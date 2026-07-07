@@ -13,9 +13,10 @@ patterns and proposes promoting them into standard **SKILL.md** and
 It all runs on your machine, on the agent subscriptions you already pay for, with
 **zero cloud dependency and zero telemetry — permanently.**
 
-> **Status: pre-alpha (Phase 0 — repo bootstrap).** Not yet installable. The design
-> is fully specified in [`docs/`](docs/README.md); the code is being built phase by
-> phase. Watch this space.
+> **Status: pre-alpha (Phase 0 — repo bootstrap).** Installable from source today;
+> not yet published to PyPI. The design is fully specified in
+> [`docs/`](docs/README.md); the code is being built phase by phase. Watch this
+> space.
 
 ## How it works
 
@@ -45,7 +46,13 @@ hooks capture (auto)  →  curator folds raw into a small durable fact set
 
 ## Install
 
-Not published yet. When it ships (planned command / package):
+Not yet published to PyPI. From a local checkout:
+
+```bash
+uv tool install .     # command: `neurobase`
+```
+
+Once it's published, the same command will pull from PyPI directly:
 
 ```bash
 uv tool install neurobase-cli     # command: `neurobase`

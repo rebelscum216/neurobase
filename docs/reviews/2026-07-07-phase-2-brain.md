@@ -1,6 +1,6 @@
 ---
 slug: phase-2-brain
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-2-brain
@@ -142,3 +142,30 @@ pinning the previously-unspecified keychain schema in spec §10. Re-relaying.
 
 **Verdict:** changes-requested — API backend credential resolution diverges
 from the spec §10 sourcing contract. _(Awaiting re-review.)_
+
+### Re-review
+
+No new findings.
+
+Verified the previous major finding is resolved in the actual diff, not just in
+the resolution note. `src/neurobase/brain/anthropic_api.py` now resolves
+Anthropic credentials in spec §10 order:
+`NEUROBASE_API_KEY` > `ANTHROPIC_API_KEY` > OS keychain > none. The keychain
+lookup uses the newly documented schema in `docs/neurobase-spec-appendix.md`
+(`keyring`, service `neurobase`, username `ANTHROPIC_API_KEY`) and fails open
+to "no key" on missing modules, unavailable/locked keychains, or lookup errors.
+The tests cover keychain fallback, env-over-keychain precedence, keychain
+errors, and missing `keyring`; select/doctor tests neutralize local keychain
+state so developer-machine secrets cannot affect results.
+
+Fresh pass also checked retry boundaries, CLI answer extraction, API error
+classification, backend selection, and doctor behavior against the Phase 2
+brief and spec-facing contracts. I did not find any blocker, major, or minor
+issues.
+
+Verification run (Reviewer re-review): `uv run pytest` (125 passed),
+`uv run ruff check .`, `uv run ruff format --check .`, and
+`uv run mypy src tests` all passed.
+
+**Verdict:** approve — the prior spec §10 credential-sourcing gap is fixed and
+the Phase 2 brain diff is ready to merge.

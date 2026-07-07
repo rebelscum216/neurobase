@@ -35,7 +35,6 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0001](0001-codex-capture-wiring.md) | Codex capture wiring — turn-completion event name + notify payload | Accepted | S1 |
 | [0002](0002-claude-cli-json-reliability.md) | `claude -p` JSON contract reliability for the curator | Accepted | S5 |
 | [0003](0003-hook-latency-budget.md) | Hook latency budget | Accepted | S6 |
+| [0004](0004-codex-injection-fallback.md) | Codex injection — hook `additionalContext` doesn't reach the model | Accepted | S2 |
 
-S2 (Codex injection: does `SessionStart` accept `additionalContext`?) is still
-open — pending a decision on how to safely clear Codex's hook-trust gate for a
-throwaway test hook; see build-plan §5.
+All four Phase 0 spikes (S1, S2, S5, S6) are now closed.

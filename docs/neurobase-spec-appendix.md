@@ -268,14 +268,28 @@ Codex has **no SessionEnd**; its hooks fire per turn. Contract:
   timestamp` to the raw write. The filename derives from it, so every per-turn
   firing resolves to the SAME path and the atomic write overwrites in place —
   one raw file per session, last-turn-wins, no store changes needed.
-- Injection (per spike S2): mirror §3 if Codex's `session_start` hook accepts
-  additionalContext; else the fallback is a fenced managed block (same fence
-  discipline as §6) in **repo-root `AGENTS.override.md`** — Codex reads override
-  files natively in its AGENTS directory-walk (`.override.md` beats `.md` at each
-  level), so no config is needed. The recall step rewrites the block with the
+- **Injection (S2 closed, ADR-0004):** Codex's `session_start` hook fires and
+  its `hookSpecificOutput.additionalContext` is parsed well enough to render
+  in the interactive TUI's transcript — but it is **not** forwarded into the
+  model's actual context (live-verified: asking the model to read content
+  visibly shown immediately above its own answer in the transcript still
+  returns nothing). So injection does **not** mirror §3; it always uses the
+  fallback: a fenced managed block (same fence discipline as §6) in
+  **repo-root `AGENTS.override.md`** — Codex reads override files natively in
+  its AGENTS directory-walk (`.override.md` beats `.md` at each level), so no
+  config is needed for this path. The recall step rewrites the block with the
   same header + node content. **Git hygiene:** `enable`/`init` MUST add
   `AGENTS.override.md` to the repo's `.git/info/exclude` (never the user's
   `.gitignore`) so memory content can never be committed or leak into PRs.
+- **Hook discovery gotcha (any Codex hook, not just injection):** a
+  project-scoped `<repo>/.codex/hooks.json` is not auto-discovered by
+  dropping the file — the project's config table must explicitly reference it:
+  `[projects."<repo-path>"] hooks = ".codex/hooks.json"` (alongside
+  `trust_level = "trusted"`). `init`'s Codex installer (Phase 6) MUST write
+  this key, not just the hooks.json file, or the capture hook (S1) silently
+  never fires. Hook invocation is via **stdin JSON**
+  (`session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`,
+  `permission_mode`, `source`), not argv.
 - **notify → rollout discovery** (when the `notify` fallback is used and its
   payload carries no path): prefer any rollout/transcript path in the payload;
   else glob `~/.codex/sessions/**/rollout-*.jsonl`, take the newest by mtime
@@ -322,10 +336,17 @@ Claude Code — merge into `.claude/settings.json` (project) or
 ```
 
 Codex — hooks in `hooks.json`, global (`~/.codex/`) or project-scoped
-(`<repo>/.codex/hooks.json` — **live-verified working**). Event names confirmed
-on a working install: lowercase **`session_start`** and **`stop`** (not
-CamelCase). Handlers `type:"command"` only. **Trust gate (live-verified):**
-Codex records a `trusted_hash` per hook under `[hooks.state]` in
+(`<repo>/.codex/hooks.json`). Event names confirmed on a working install:
+lowercase **`session_start`** and **`stop`** (not CamelCase). Handlers
+`type:"command"` only. **Discovery (live-verified, S1/S2):** a project-scoped
+`hooks.json` is **not** picked up just by existing on disk — the project's
+table in `~/.codex/config.toml` MUST also set
+`hooks = ".codex/hooks.json"` (alongside `trust_level = "trusted"`), or the
+hook is never registered at all (no trust prompt, no `[hooks.state]` entry, no
+invocation). The installer MUST write both keys, not just the file. Invocation
+is via **stdin JSON**: `{session_id, transcript_path, cwd, hook_event_name,
+model, permission_mode, source}`. **Trust gate (live-verified):** Codex
+records a `trusted_hash` per hook under `[hooks.state]` in
 `~/.codex/config.toml` — a new or edited hooks.json requires the user to
 approve it in Codex before it runs; the installer MUST tell the user this and
 `doctor` MUST detect an untrusted hook. Legacy fallback if hooks misbehave:

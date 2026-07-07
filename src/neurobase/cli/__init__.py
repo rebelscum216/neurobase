@@ -14,7 +14,9 @@ from pathlib import Path
 import typer
 
 from neurobase import __version__
+from neurobase.brain import resolve_brain
 from neurobase.core import projects, store
+from neurobase.core.config import load_config
 
 app = typer.Typer(
     name="neurobase",
@@ -102,10 +104,32 @@ def status(
     typer.echo(f"Nodes: {node_count}")
 
 
+@app.command()
+def doctor() -> None:
+    """Diagnose the install: which brain backend resolves, and why (Phase 2).
+
+    (Shim + agent + store-health checks land with their phases; Phase 2 covers
+    the brain section — build-plan Phase 2 demo.)
+    """
+    config = load_config()
+    brain, resolution = resolve_brain(config)
+    label = resolution.backend
+    if resolution.version:
+        label += f" ({resolution.version})"
+    if brain is not None:
+        typer.secho(f"brain: {label} — {resolution.reason}", fg=typer.colors.GREEN)
+    else:
+        typer.secho(
+            f"brain: none — {resolution.reason} (configured backend: {config.brain.backend})",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
 # --- Planned command surface (stubs until each command's phase lands) ---------
 
 _PLANNED: list[tuple[str, int, str]] = [
-    ("doctor", 2, "Diagnose the install: shim, agents, brain backend, store health."),
     ("curate", 3, "Fold unconsumed raw captures into the curated fact set."),
     ("recall", 4, "Print the memory that would be injected for a project."),
     ("init", 6, "Interactive setup: detect agents, choose store root, install hooks."),

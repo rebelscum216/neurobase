@@ -62,18 +62,19 @@ neurobase/
 ├── README.md                 ← project front door
 ├── LICENSE                   ← Apache-2.0 (decision D1)
 ├── pyproject.toml            ← package "neurobase-cli", command "neurobase"
-├── src/neurobase/            ← cli/, core/{store,projects,redact,config} (live)
-│                                · brain/ curator/ adapters/ recommender/ mcp/ (stubs)
-├── tests/                    ← Phase 0 smoke + Phase 1 round-trip suites; spec-§11 fixtures land per phase
+├── src/neurobase/            ← cli/, core/{store,projects,redact,config},
+│                                brain/{base,claude_cli,codex_cli,anthropic_api,select} (live)
+│                                · curator/ adapters/ recommender/ mcp/ (stubs)
+├── tests/                    ← Phase 0 smoke + Phase 1/2 suites; spec-§11 fixtures land per phase
 ├── docs/                     ← canonical docs, ADRs, notes, code-review relay + reviews
 ├── .claude/skills/           ← project skills (e.g. code-review-relay, the Author role)
 └── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix (lint, format, types, tests)
 ```
 
-`core/` is real as of Phase 1 (`store.py`, `projects.py`, `redact.py`,
-`config.py`). `brain/ curator/ adapters/ recommender/ mcp/` are still
-docstring-only stubs, each naming the spec section and phase that will fill it
-in. Replace a stub with real code when its phase lands.
+`core/` (Phase 1) and `brain/` (Phase 2) are real. `curator/ adapters/
+recommender/ mcp/` are still docstring-only stubs, each naming the spec section
+and phase that will fill it in. Replace a stub with real code when its phase
+lands.
 
 ## Current state
 
@@ -98,8 +99,18 @@ in. Replace a stub with real code when its phase lands.
   resolution incl. worktrees + slugify, spec §10/D6), `core/redact.py` (the
   full D13 table), `core/config.py` (spec §10 keys, §8 defaults). Live
   `neurobase enable`/`status` commands. 57 tests (round-trip + CLI
-  integration), ruff/mypy/pytest all green. **Next: Phase 2** (brain: execution
-  backends).
+  integration), ruff/mypy/pytest all green.
+- **Phase 2 — brain: execution backends: done.** `brain/base.py` (the
+  `plan_json`/`text` contract, lenient fence-tolerant JSON parse, 120s timeout
+  + 1-retry policy per spec §8), three backends behind it — `claude_cli`
+  (ADR-0002), `codex_cli` (`codex exec --json`, ADR-0001), `anthropic_api`
+  (SDK, injectable client) — and `brain/select.py` (auto-detection in the D9
+  order claude-cli → codex-cli → anthropic-api → openai-api, config override).
+  Live `neurobase doctor` reports which backend resolved and why. All three
+  run as the user's own logged-in CLI / their own API key (D9 ToS rule);
+  Neurobase never touches credentials. 121 tests total; live smoke (one
+  `plan_json` + one `text`) verified through both claude-cli and codex-cli.
+  **Next: Phase 3** (curator — the thinking loop, spec §2).
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a

@@ -268,26 +268,40 @@ Codex has **no SessionEnd**; its hooks fire per turn. Contract:
   timestamp` to the raw write. The filename derives from it, so every per-turn
   firing resolves to the SAME path and the atomic write overwrites in place —
   one raw file per session, last-turn-wins, no store changes needed.
-- Injection (per spike S2): mirror §3 if Codex's `session_start` hook accepts
-  additionalContext; else the fallback is a fenced managed block (same fence
-  discipline as §6) in **repo-root `AGENTS.override.md`** — Codex reads override
-  files natively in its AGENTS directory-walk (`.override.md` beats `.md` at each
-  level), so no config is needed. The recall step rewrites the block with the
-  same header + node content. **Git hygiene:** `enable`/`init` MUST add
-  `AGENTS.override.md` to the repo's `.git/info/exclude` (never the user's
-  `.gitignore`) so memory content can never be committed or leak into PRs.
+- **Injection (S2 closed, ADR-0005):** Codex's `SessionStart` hook fires and
+  its `hookSpecificOutput.additionalContext` reaches the model — live-verified
+  by inspecting a rollout directly: the injected string is present verbatim as
+  a `response_item` with `payload.role=="developer"`, a real input role, not a
+  UI-only side channel. **Injection mirrors §3**, same as the Claude adapter.
+  (An earlier pass, ADR-0004, concluded the opposite from two `NONE` test
+  replies; that was a model-reluctance-to-repeat-"secret"-content artifact in
+  the test prompt, not a transport failure — see ADR-0005 for the full
+  correction.) `AGENTS.override.md` (fenced managed block, same discipline as
+  §6, in repo-root, added to `.git/info/exclude` per the usual git-hygiene
+  rule) stays as a **documented fallback only** — for a future Codex version
+  that stops forwarding hook output, not the primary path.
+- **Hook discovery gotcha (any Codex hook, not just injection):** a
+  project-scoped `<repo>/.codex/hooks.json` is not auto-discovered by
+  dropping the file — the project's config table must explicitly reference it:
+  `[projects."<repo-path>"] hooks = ".codex/hooks.json"` (alongside
+  `trust_level = "trusted"`). `init`'s Codex installer (Phase 6) MUST write
+  this key, not just the hooks.json file, or the capture hook (S1) silently
+  never fires. Hook invocation is via **stdin JSON**
+  (`session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`,
+  `permission_mode`, `source`), not argv.
 - **notify → rollout discovery** (when the `notify` fallback is used and its
-  payload carries no path): prefer any rollout/transcript path in the payload;
-  else glob `~/.codex/sessions/**/rollout-*.jsonl`, take the newest by mtime
-  with mtime ≥ turn start, and confirm `session_meta.session_id`/`id` matches
-  the payload's thread id when present. The notify payload's exact fields are
-  research-reported, not live-verified (see §11.4) — S1 pins them.
+  payload carries no path — confirmed: it never does, see §11.4): prefer any
+  rollout/transcript path in the payload; else glob
+  `~/.codex/sessions/**/rollout-*.jsonl`, take the newest by mtime with mtime
+  ≥ turn start, and confirm `session_meta.session_id`/`id` matches the
+  payload's thread id when present. The notify payload's exact fields are
+  live-verified (S1 closed, ADR-0001) — see §11.4.
 - **Live-verified notes (captured from a working install, 2026-07-07):**
   rollout `session_meta.payload` also carries `id`, `originator`, `cli_version`,
   and `git.commit_hash` alongside the §5 fields; `user_message` events carry
-  `images`/`text_elements` alongside `message`; a turn-completion `event_msg`
-  exists with `turn_id`, `last_agent_message`, `completed_at`, `duration_ms`
-  (its literal `type` string = S1's remaining question); rollouts also contain
+  `images`/`text_elements` alongside `message`; the turn-completion `event_msg`
+  is `payload.type=="task_complete"` (S1 closed, ADR-0001), carrying `turn_id`,
+  `last_agent_message`, `completed_at`, `duration_ms`; rollouts also contain
   `response_item`, `turn_context`, and token-count channels — all ignored by
   the scribe. See fixture §11.2.
 
@@ -322,10 +336,23 @@ Claude Code — merge into `.claude/settings.json` (project) or
 ```
 
 Codex — hooks in `hooks.json`, global (`~/.codex/`) or project-scoped
-(`<repo>/.codex/hooks.json` — **live-verified working**). Event names confirmed
-on a working install: lowercase **`session_start`** and **`stop`** (not
-CamelCase). Handlers `type:"command"` only. **Trust gate (live-verified):**
-Codex records a `trusted_hash` per hook under `[hooks.state]` in
+(`<repo>/.codex/hooks.json`). **Event-name casing (live-verified, ADR-0005):**
+the installer MUST **write CamelCase** (`SessionStart`, `Stop`) — that is
+Codex's own canonical on-disk form: a scratch-repo `hooks.json` written with
+lowercase `session_start` fired correctly, but Codex silently rewrote the
+file to `SessionStart` after loading it once. Lowercase snake_case is
+accepted as input but isn't the form to *write*; the `[hooks.state]` tracking
+key stays lowercase snake_case regardless (`...hooks.json:session_start:0:0`
+— an internal stable ID, unrelated to the file's casing). Handlers
+`type:"command"` only. **Discovery (live-verified, S1/S2):** a project-scoped
+`hooks.json` is **not** picked up just by existing on disk — the project's
+table in `~/.codex/config.toml` MUST also set
+`hooks = ".codex/hooks.json"` (alongside `trust_level = "trusted"`), or the
+hook is never registered at all (no trust prompt, no `[hooks.state]` entry, no
+invocation). The installer MUST write both keys, not just the file. Invocation
+is via **stdin JSON**: `{session_id, transcript_path, cwd, hook_event_name,
+model, permission_mode, source}`. **Trust gate (live-verified):** Codex
+records a `trusted_hash` per hook under `[hooks.state]` in
 `~/.codex/config.toml` — a new or edited hooks.json requires the user to
 approve it in Codex before it runs; the installer MUST tell the user this and
 `doctor` MUST detect an untrusted hook. Legacy fallback if hooks misbehave:
@@ -483,15 +510,18 @@ Metadata (`cwd`, `gitBranch`, `sessionId`) rides on the user events.
 
 ```jsonl
 {"type":"session_meta","payload":{"session_id":"019f…","id":"019f…","timestamp":"2026-07-05T23:21:06Z","cwd":"/Users/you/proj","originator":"codex_cli","cli_version":"x.y.z","git":{"commit_hash":"abc123…","branch":"main"}}}
-{"type":"event_msg","payload":{"type":"user_message","message":"Fix the login bug","images":[],"text_elements":[]}}
-{"type":"event_msg","payload":{"type":"agent_message","message":"Done — the null check was missing in…"}}
-{"type":"event_msg","payload":{"type":"<turn-completion — literal name = S1>","turn_id":"…","last_agent_message":"Done — …","completed_at":1767000000,"duration_ms":45210}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"…","started_at":1767000000,"model_context_window":…,"collaboration_mode_kind":"…"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"Fix the login bug","images":[],"local_images":[],"text_elements":[]}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Done — the null check was missing in…","phase":"…","memory_citation":…}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"…","last_agent_message":"Done — …","completed_at":1767000000,"duration_ms":45210,"time_to_first_token_ms":…}}
 ```
 
 Also present and **ignored** by the scribe: `response_item` (raw model I/O),
-`turn_context` (sandbox/approval state), and token-count `event_msg` variants.
-`user_message`/`agent_message` literal type strings are verified by a working
-parser; only the turn-completion event's literal name remains for S1.
+`turn_context` (sandbox/approval state), and `token_count` `event_msg`
+variants. **S1 closed (ADR-0001):** the turn-completion event's literal type
+is `task_complete` (live-verified 2026-07-07 via `codex exec`); a paired
+`task_started` marks turn start. `user_message`/`agent_message` literal type
+strings were already verified by a working parser.
 
 ### 11.3 `claude -p --output-format json` envelope — VERIFIED live
 
@@ -510,8 +540,20 @@ on the first live attempt; S5's remaining scope is the 10-run reliability check.
 Note: the CLI runs whatever model the user's session defaults to — the JSON
 reports it in `modelUsage`.
 
-### 11.4 Codex `notify` argv[1] JSON — research-reported, NOT live-verified
+### 11.4 Codex `notify` argv[1] JSON — VERIFIED live (S1 closed, ADR-0001)
 
-Expected fields: `type` (`agent-turn-complete`), `turn-id`/`thread-id`,
-`input-messages`, `last-assistant-message`. No path guaranteed → use §5's
-rollout-discovery algorithm. S1 verifies or corrects this before it's relied on.
+Delivered as **argv[1]**, a JSON string; stdin is empty. Captured
+2026-07-07 via `codex exec -c 'notify=["<capture-script>"]' "…"` (a
+single-invocation config override, never written to `~/.codex/config.toml`):
+
+```json
+{"type":"agent-turn-complete","thread-id":"019f…","turn-id":"019f…",
+ "cwd":"/Users/you/proj","client":"codex_exec",
+ "input-messages":["reply with exactly: notify-test-ok"],
+ "last-assistant-message":"notify-test-ok"}
+```
+
+No rollout/transcript path is present — §5's rollout-discovery algorithm
+(newest `rollout-*.jsonl` by mtime, cross-checked against
+`session_meta.session_id`/`id`) is **required**, not a fallback for an edge
+case, whenever `notify` is the active wiring.

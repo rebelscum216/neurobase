@@ -41,7 +41,6 @@ _PLANNED: list[tuple[str, int, str]] = [
     ("mcp", 7, "Run the MCP server exposing memory tools to any client."),
     ("recommend", 8, "Review skill/rule proposals mined from your history."),
     ("seed", 8, "Import existing notes / Claude auto-memory as curated facts."),
-    ("hook", 4, "Deterministic capture/inject entry point invoked by agent hooks."),
 ]
 
 
@@ -60,3 +59,21 @@ def _make_stub(name: str, phase: int, summary: str) -> Callable[[], None]:
 
 for _name, _phase, _summary in _PLANNED:
     app.command(name=_name)(_make_stub(_name, _phase, _summary))
+
+
+@app.command(
+    name="hook",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
+)
+def hook_stub(ctx: typer.Context) -> None:
+    """Capture/inject entry point invoked by agent hooks. [not implemented — Phase 4]"""
+    typer.secho(
+        "`neurobase hook` is not implemented yet (planned for Phase 4).",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
+    # Spec §4/§5: hook entry points MUST always exit 0 — never wedge an
+    # agent's session start/teardown, even before real logic lands. Any
+    # <agent> <event> args (e.g. "claude session-start") are accepted and
+    # ignored via allow_extra_args, matching the eventual Phase-4 signature.

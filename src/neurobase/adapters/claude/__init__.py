@@ -1,5 +1,10 @@
 """Claude Code adapter: SessionEnd scribe + SessionStart recall.
 
-Contracts: spec appendix §4 (scribe), §3 (recall), §7 (hook wiring). Also owns
-settings.json read/diff/write and CLAUDE.md emit. Implemented in Phase 4.
+`scribe.py` (spec §4) parses a finished session's transcript into one redacted
+raw capture; `recall.py` (spec §3) assembles the project's status nodes into
+`additionalContext` at session start. Both are driven by the `neurobase hook
+claude session-end|session-start` entry points and always exit 0.
+
+The `init --agent claude` installer (settings.json read/diff/write + consent +
+backup, spec §7) lands with the Phase-4 install step / Phase 6.
 """

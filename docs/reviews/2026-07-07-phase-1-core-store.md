@@ -1,6 +1,6 @@
 ---
 slug: phase-1-core-store
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-1-core-store
@@ -261,3 +261,30 @@ Re-relaying for another pass.
 **Verdict:** changes-requested — the `store.toml` file exists now, but the
 newer-schema refusal is not consistently enforced before Phase 1 commands
 operate on the store. _(Awaiting re-review.)_
+
+### Re-review — 2026-07-07 (third)
+
+Prior finding verification:
+- `enable` now calls `_check_store_schema(resolved_root)` before
+  `projects.register_project()`, so a newer-schema `store.toml` is rejected
+  before `registry.toml` can be created or mutated.
+- `status` now calls `_check_store_schema(resolved_root)` after project
+  resolution and before raw/curated/node memory reads, so the prior repro with
+  a matching registry and `schema = 999` exits nonzero instead of printing
+  counts.
+- Regression coverage exists for both cases:
+  `test_enable_refuses_newer_schema_without_touching_registry` and
+  `test_status_refuses_newer_schema`.
+
+New findings: none.
+
+Verification run (Reviewer, third re-review): `uv run pytest -q` (69 passed),
+`uv run ruff check .`, `uv run ruff format --check .`, and
+`uv run mypy src tests` all pass. Manual repros also confirmed: `enable`
+against `schema = 999` exits 1 and leaves `registry.toml` missing; `status`
+with a valid registry plus `schema = 999` exits 1 before printing counts. The
+manual `uv run neurobase ...` repros required `UV_CACHE_DIR=/tmp/uv-cache`
+because the sandbox cannot write to `~/.cache/uv`.
+
+**Verdict:** approve — the previously blocking schema-guard ordering issue is
+resolved, and I found no remaining blocker/major/minor issues in this pass.

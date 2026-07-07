@@ -79,14 +79,16 @@ code when its phase lands.
   package, live `cli` with an honest stubbed command surface, smoke tests,
   ruff/mypy/pytest, 3-OS CI all pass. All four gating spikes are closed:
   [ADR-0001](docs/adr/0001-codex-capture-wiring.md) (S1),
-  [ADR-0004](docs/adr/0004-codex-injection-fallback.md) (S2),
+  [ADR-0005](docs/adr/0005-codex-injection-confirmed.md) (S2 — supersedes
+  [ADR-0004](docs/adr/0004-codex-injection-fallback.md), an initial wrong
+  conclusion Codex's own review caught and reversed),
   [ADR-0002](docs/adr/0002-claude-cli-json-reliability.md) (S5),
-  [ADR-0003](docs/adr/0003-hook-latency-budget.md) (S6). Notably, S2 found
-  that Codex's `SessionStart` hook output is TUI-visible but never reaches the
-  model — injection uses the `AGENTS.override.md` fallback, not a
-  Claude-mirrored hook path. (S3, clean-machine install, is tracked in the
-  build-plan spike table but isn't part of Phase 0's closing gate — see
-  build-plan §6 Phase 0 deliverables. Not started.) **Next: Phase 1** (core
+  [ADR-0003](docs/adr/0003-hook-latency-budget.md) (S6). S2's confirmed
+  answer: Codex's `SessionStart` hook output **does** reach the model, as a
+  `developer`-role input message — injection mirrors the Claude adapter, per
+  spec §5/§3. (S3, clean-machine install, is tracked in the build-plan spike
+  table but isn't part of Phase 0's closing gate — see build-plan §6 Phase 0
+  deliverables. Not started.) **Next: Phase 1** (core
   store, config, projects).
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive

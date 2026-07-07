@@ -35,6 +35,9 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0001](0001-codex-capture-wiring.md) | Codex capture wiring — turn-completion event name + notify payload | Accepted | S1 |
 | [0002](0002-claude-cli-json-reliability.md) | `claude -p` JSON contract reliability for the curator | Accepted | S5 |
 | [0003](0003-hook-latency-budget.md) | Hook latency budget | Accepted | S6 |
-| [0004](0004-codex-injection-fallback.md) | Codex injection — hook `additionalContext` doesn't reach the model | Accepted | S2 |
+| [0004](0004-codex-injection-fallback.md) | Codex injection — hook `additionalContext` doesn't reach the model | Superseded by 0005 | S2 |
+| [0005](0005-codex-injection-confirmed.md) | Codex injection — `additionalContext` does reach the model (corrects 0004) | Accepted | S2 |
 
-All four Phase 0 spikes (S1, S2, S5, S6) are now closed.
+All four Phase 0 spikes (S1, S2, S5, S6) are now closed. ADR-0004 was caught
+and reversed by Codex's own review of this repo's relay process — see
+ADR-0005 for the correction.

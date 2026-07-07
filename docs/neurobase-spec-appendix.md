@@ -268,19 +268,18 @@ Codex has **no SessionEnd**; its hooks fire per turn. Contract:
   timestamp` to the raw write. The filename derives from it, so every per-turn
   firing resolves to the SAME path and the atomic write overwrites in place —
   one raw file per session, last-turn-wins, no store changes needed.
-- **Injection (S2 closed, ADR-0004):** Codex's `session_start` hook fires and
-  its `hookSpecificOutput.additionalContext` is parsed well enough to render
-  in the interactive TUI's transcript — but it is **not** forwarded into the
-  model's actual context (live-verified: asking the model to read content
-  visibly shown immediately above its own answer in the transcript still
-  returns nothing). So injection does **not** mirror §3; it always uses the
-  fallback: a fenced managed block (same fence discipline as §6) in
-  **repo-root `AGENTS.override.md`** — Codex reads override files natively in
-  its AGENTS directory-walk (`.override.md` beats `.md` at each level), so no
-  config is needed for this path. The recall step rewrites the block with the
-  same header + node content. **Git hygiene:** `enable`/`init` MUST add
-  `AGENTS.override.md` to the repo's `.git/info/exclude` (never the user's
-  `.gitignore`) so memory content can never be committed or leak into PRs.
+- **Injection (S2 closed, ADR-0005):** Codex's `SessionStart` hook fires and
+  its `hookSpecificOutput.additionalContext` reaches the model — live-verified
+  by inspecting a rollout directly: the injected string is present verbatim as
+  a `response_item` with `payload.role=="developer"`, a real input role, not a
+  UI-only side channel. **Injection mirrors §3**, same as the Claude adapter.
+  (An earlier pass, ADR-0004, concluded the opposite from two `NONE` test
+  replies; that was a model-reluctance-to-repeat-"secret"-content artifact in
+  the test prompt, not a transport failure — see ADR-0005 for the full
+  correction.) `AGENTS.override.md` (fenced managed block, same discipline as
+  §6, in repo-root, added to `.git/info/exclude` per the usual git-hygiene
+  rule) stays as a **documented fallback only** — for a future Codex version
+  that stops forwarding hook output, not the primary path.
 - **Hook discovery gotcha (any Codex hook, not just injection):** a
   project-scoped `<repo>/.codex/hooks.json` is not auto-discovered by
   dropping the file — the project's config table must explicitly reference it:
@@ -291,17 +290,18 @@ Codex has **no SessionEnd**; its hooks fire per turn. Contract:
   (`session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`,
   `permission_mode`, `source`), not argv.
 - **notify → rollout discovery** (when the `notify` fallback is used and its
-  payload carries no path): prefer any rollout/transcript path in the payload;
-  else glob `~/.codex/sessions/**/rollout-*.jsonl`, take the newest by mtime
-  with mtime ≥ turn start, and confirm `session_meta.session_id`/`id` matches
-  the payload's thread id when present. The notify payload's exact fields are
-  research-reported, not live-verified (see §11.4) — S1 pins them.
+  payload carries no path — confirmed: it never does, see §11.4): prefer any
+  rollout/transcript path in the payload; else glob
+  `~/.codex/sessions/**/rollout-*.jsonl`, take the newest by mtime with mtime
+  ≥ turn start, and confirm `session_meta.session_id`/`id` matches the
+  payload's thread id when present. The notify payload's exact fields are
+  live-verified (S1 closed, ADR-0001) — see §11.4.
 - **Live-verified notes (captured from a working install, 2026-07-07):**
   rollout `session_meta.payload` also carries `id`, `originator`, `cli_version`,
   and `git.commit_hash` alongside the §5 fields; `user_message` events carry
-  `images`/`text_elements` alongside `message`; a turn-completion `event_msg`
-  exists with `turn_id`, `last_agent_message`, `completed_at`, `duration_ms`
-  (its literal `type` string = S1's remaining question); rollouts also contain
+  `images`/`text_elements` alongside `message`; the turn-completion `event_msg`
+  is `payload.type=="task_complete"` (S1 closed, ADR-0001), carrying `turn_id`,
+  `last_agent_message`, `completed_at`, `duration_ms`; rollouts also contain
   `response_item`, `turn_context`, and token-count channels — all ignored by
   the scribe. See fixture §11.2.
 
@@ -336,8 +336,14 @@ Claude Code — merge into `.claude/settings.json` (project) or
 ```
 
 Codex — hooks in `hooks.json`, global (`~/.codex/`) or project-scoped
-(`<repo>/.codex/hooks.json`). Event names confirmed on a working install:
-lowercase **`session_start`** and **`stop`** (not CamelCase). Handlers
+(`<repo>/.codex/hooks.json`). **Event-name casing (live-verified, ADR-0005):**
+the installer MUST **write CamelCase** (`SessionStart`, `Stop`) — that is
+Codex's own canonical on-disk form: a scratch-repo `hooks.json` written with
+lowercase `session_start` fired correctly, but Codex silently rewrote the
+file to `SessionStart` after loading it once. Lowercase snake_case is
+accepted as input but isn't the form to *write*; the `[hooks.state]` tracking
+key stays lowercase snake_case regardless (`...hooks.json:session_start:0:0`
+— an internal stable ID, unrelated to the file's casing). Handlers
 `type:"command"` only. **Discovery (live-verified, S1/S2):** a project-scoped
 `hooks.json` is **not** picked up just by existing on disk — the project's
 table in `~/.codex/config.toml` MUST also set

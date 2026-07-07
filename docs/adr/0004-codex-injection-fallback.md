@@ -1,9 +1,16 @@
 # ADR-0004: Codex injection — hook `additionalContext` doesn't reach the model
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0005](0005-codex-injection-confirmed.md)
 - **Date:** 2026-07-07
-- **Resolves:** S2
+- **Resolves:** S2 (superseded — see ADR-0005)
 - **Supersedes:** none
+
+> **Superseded:** this ADR's central conclusion — that `additionalContext`
+> never reaches the model — was wrong. A direct rollout inspection found the
+> hook's output present verbatim as a `developer`-role input message. See
+> [ADR-0005](0005-codex-injection-confirmed.md) for the corrected conclusion
+> and why the two `NONE` test results were misleading. Left unedited below
+> per this repo's ADR-immutability convention.
 
 ## Context
 

@@ -1,6 +1,6 @@
 ---
 slug: phase-3-curator
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-3-curator
@@ -137,3 +137,24 @@ adding the regression test the reviewer suggested. Re-relaying.
 
 **Verdict:** changes-requested — blocker spec §2 partial-failure path is not
 fully enforced after raw consumption. _(Awaiting re-review.)_
+
+### Re-review
+
+No new findings.
+
+Verified the blocker resolution against the diff. The post-consumption step-8
+boundary in `src/neurobase/curator/engine.py` now wraps the full
+`_synthesize()` call in `except Exception`, so failures from node text
+generation, node write, index rebuild, or linkify after `mark_consumed()` are
+returned as `status: partial`, logged, and keep applied state. The added
+`test_non_brain_step8_failure_is_partial_after_consumption` exercises the
+non-`BrainError` case by forcing `rebuild_index` to raise after consumption and
+asserting the fact remains written, the raw remains consumed, and the pass is
+logged.
+
+Fresh verification run (Reviewer re-review): `uv run pytest` (159 passed),
+`uv run ruff check .` clean, `uv run ruff format --check .` clean,
+`uv run mypy src tests` clean.
+
+**Verdict:** approve — the prior blocker is resolved and no additional blocking
+or major issues were found.

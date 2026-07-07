@@ -64,7 +64,8 @@ neurobase/
 ├── pyproject.toml            ← [not yet] package "neurobase-cli", command "neurobase"
 ├── src/neurobase/            ← [not yet] core/ brain/ curator/ adapters/ recommender/ mcp/ cli/
 ├── tests/                    ← [not yet] round-trip + per-module; fixtures from spec §11
-├── docs/                     ← canonical docs, ADRs, working notes  (see docs/README.md)
+├── docs/                     ← canonical docs, ADRs, notes, code-review relay + reviews
+├── .claude/skills/           ← project skills (e.g. code-review-relay, the Author role)
 └── .github/workflows/ci.yml  ← [not yet] 3-OS matrix
 ```
 
@@ -107,6 +108,29 @@ tool isn't wired up yet, say so.
   spec) *and* note the change in an ADR. Never let code and spec diverge silently.
 - **Real transcript/rollout fixtures** → `tests/fixtures/` (once tests exist),
   shaped from spec §11. Sanitize every captured value.
+- **A code-review handoff** → follow the [code-review relay](docs/code-review-relay.md);
+  the baton is a file in [docs/reviews/](docs/reviews/README.md).
+
+## Code review relay (Claude ⇄ Codex)
+
+This repo has a **defined cross-agent review process**: Claude authors, Codex
+reviews independently, findings come back, Claude resolves. The full protocol,
+roles, and reviewer checklist are in
+[docs/code-review-relay.md](docs/code-review-relay.md) — that file is the single
+source of truth; this section and the Claude `code-review-relay` skill are pointers.
+
+- **If you are Codex, you are the Reviewer.** When the user points you at a review
+  file under `docs/reviews/`: read the brief, then **run the diff and review the
+  actual code**, verifying the brief's claims rather than trusting them. Assess
+  against the checklist in the protocol doc (correctness · spec adherence — a
+  `MUST` violation is a **blocker** · tests · security · simplicity · provenance).
+  Append findings (severity · `file:line` · issue · suggested direction) and end
+  with a verdict (`approve` | `changes-requested`). **Do not fix** — that's the
+  Author's job.
+- **If you are Claude, you are the Author** — the `code-review-relay` skill
+  (`.claude/skills/code-review-relay/`) drives your half.
+- **Keep Author and Reviewer as separate sessions.** The independent perspective is
+  the entire point of the relay.
 
 ## Conventions
 

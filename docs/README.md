@@ -17,6 +17,13 @@ with no external code or private repos required.
 
 **Reading order:** build-plan → spec-appendix → architecture-options.
 
+## Process
+
+| Document | What it is |
+|---|---|
+| [code-review-relay.md](code-review-relay.md) | The defined **Claude ⇄ Codex code-review handoff** process — roles, protocol, reviewer checklist. Single source of truth; the Claude `code-review-relay` skill and the AGENTS.md Reviewer section point to it. |
+| [reviews/](reviews/README.md) | The trail of review handoffs — one baton file per review, from [`TEMPLATE.md`](reviews/TEMPLATE.md). |
+
 ## Decision & spike quick-reference
 
 - **Locked decisions** live in build-plan §3 (table D1–D13). Any change to them

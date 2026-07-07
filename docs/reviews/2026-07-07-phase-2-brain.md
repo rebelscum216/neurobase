@@ -103,4 +103,42 @@ the live smoke is manual per the "Done when").
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** approve | changes-requested — _one-line rationale._
+- **major** — `src/neurobase/brain/anthropic_api.py:32` — API key
+  resolution only checks `NEUROBASE_API_KEY` and `ANTHROPIC_API_KEY`, then
+  reports the backend unavailable. Spec §10 requires API backends to source
+  keys in this order: `NEUROBASE_API_KEY` env >
+  `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` env > OS keychain > none. As written,
+  a user with a key in the OS keychain but no env var will never resolve
+  `anthropic-api`, and auto-detection will incorrectly fall through or fail.
+  Suggested direction: either implement the OS-keychain lookup for the
+  Anthropic backend and add a test for env-missing/keychain-present, or update
+  the spec/ADR if Phase 2 is intentionally narrowing this contract.
+  - **resolution:** resolved — real gap, not disputed. Implemented the OS
+    keychain step: `_keychain_api_key()` reads via the `keyring` library
+    (added as a dependency), and `resolve_api_key()` now honors the full
+    spec §10 precedence `NEUROBASE_API_KEY` > `ANTHROPIC_API_KEY` > OS
+    keychain > none. Spec §10 didn't pin a keychain *schema* (just said "OS
+    keychain"), so I pinned one there rather than invent it silently:
+    service `neurobase`, username = the provider env-var name the entry
+    stands in for (`ANTHROPIC_API_KEY`). Any keyring failure (not installed,
+    no backend, locked, missing entry) fails open to "no key" — never
+    prompts or raises into the caller (verified: a real lookup with no entry
+    returns None in ~56ms). Added 4 tests: env-absent→keychain-present,
+    env-wins-over-keychain, keychain-error-fails-open, keyring-module-absent.
+    Also made the select/doctor autouse fixtures neutralize the keychain so a
+    real dev-machine entry can't leak into those tests. 125 tests total,
+    ruff/mypy/pytest green.
+
+Verification run (Reviewer): `uv run pytest` (121 passed), ruff/format/mypy
+all passed.
+
+Verification run (Author, post-fix): ruff/format/mypy green; `pytest` 125
+passed (up from 121 — 4 new keychain tests); `uv run neurobase doctor` still
+resolves claude-cli.
+
+**Author's response to verdict:** the one finding was a real spec-adherence
+gap; fixed by implementing the keychain step (not narrowing the spec) and
+pinning the previously-unspecified keychain schema in spec §10. Re-relaying.
+
+**Verdict:** changes-requested — API backend credential resolution diverges
+from the spec §10 sourcing contract. _(Awaiting re-review.)_

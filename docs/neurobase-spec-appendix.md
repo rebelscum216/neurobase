@@ -434,6 +434,11 @@ extra_patterns = []              # regex strings appended to the §10 table
 API-key sourcing (API backends only): `NEUROBASE_API_KEY` env >
 `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` env > OS keychain > none (backend
 unavailable; fail open — auto-detection falls through to the next backend).
+**OS keychain schema (Phase 2):** looked up via the `keyring` library under
+service `neurobase`, username = the provider env-var name the entry stands in
+for (`ANTHROPIC_API_KEY`, later `OPENAI_API_KEY`). Any keyring failure (no
+backend, locked keychain, missing entry) is treated as "no key" and falls
+through — the lookup never prompts or raises into the caller.
 
 ### store.toml
 At `<root>/store.toml`: `schema = 1`, `created_at = <ISO8601>`. `neurobase

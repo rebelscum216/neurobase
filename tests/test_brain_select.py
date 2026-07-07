@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from neurobase.brain import select
+from neurobase.brain import anthropic_api, select
 from neurobase.brain.anthropic_api import AnthropicAPIBrain
 from neurobase.brain.claude_cli import ClaudeCLIBrain
 from neurobase.brain.codex_cli import CodexCLIBrain
@@ -15,6 +15,8 @@ from neurobase.core.config import Config
 def _clear_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NEUROBASE_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # Neutralize the OS keychain so a real dev-machine entry can't leak in.
+    monkeypatch.setattr(anthropic_api, "_keychain_api_key", lambda: None)
 
 
 def _no_clis(monkeypatch: pytest.MonkeyPatch) -> None:

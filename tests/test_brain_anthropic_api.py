@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from dataclasses import dataclass
 
 import anthropic
 import httpx
 import pytest
 
+from neurobase.brain import anthropic_api
 from neurobase.brain.anthropic_api import AnthropicAPIBrain, resolve_api_key
 from neurobase.brain.base import BrainError
+
+
+def _fake_keyring(value: str | None = None, *, raises: bool = False) -> types.ModuleType:
+    module = types.ModuleType("keyring")
+
+    def get_password(service: str, username: str) -> str | None:
+        if raises:
+            raise RuntimeError("no keyring backend")
+        return value
+
+    module.get_password = get_password  # type: ignore[attr-defined]
+    return module
 
 
 @dataclass
@@ -131,9 +146,11 @@ def test_empty_text_retries() -> None:
     assert len(client.messages.calls) == 2
 
 
-def test_resolve_api_key_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_api_key_env_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NEUROBASE_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # Neutralize the keychain so this test only exercises env precedence.
+    monkeypatch.setattr(anthropic_api, "_keychain_api_key", lambda: None)
     assert resolve_api_key() is None
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic")
@@ -141,3 +158,32 @@ def test_resolve_api_key_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("NEUROBASE_API_KEY", "sk-neurobase")
     assert resolve_api_key() == "sk-neurobase"  # NEUROBASE_API_KEY wins
+
+
+def test_resolve_api_key_falls_back_to_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """spec §10: env vars absent ⇒ consult the OS keychain."""
+    monkeypatch.delenv("NEUROBASE_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "keyring", _fake_keyring("sk-from-keychain"))
+    assert resolve_api_key() == "sk-from-keychain"
+
+
+def test_env_var_wins_over_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "keyring", _fake_keyring("sk-from-keychain"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-env")
+    monkeypatch.delenv("NEUROBASE_API_KEY", raising=False)
+    assert resolve_api_key() == "sk-from-env"
+
+
+def test_keychain_error_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NEUROBASE_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "keyring", _fake_keyring(raises=True))
+    assert resolve_api_key() is None
+
+
+def test_keychain_missing_module_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NEUROBASE_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "keyring", None)  # ImportError on `import keyring`
+    assert resolve_api_key() is None

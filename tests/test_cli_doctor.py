@@ -6,7 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 import neurobase.cli as cli
-from neurobase.brain import select
+from neurobase.brain import anthropic_api, select
 from neurobase.cli import app
 from neurobase.core.config import Config
 
@@ -15,9 +15,11 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def _hermetic(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No API keys, and a default config regardless of the dev machine's own.
+    # No API keys, no keychain leak, and a default config regardless of the
+    # dev machine's own.
     monkeypatch.delenv("NEUROBASE_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(anthropic_api, "_keychain_api_key", lambda: None)
     monkeypatch.setattr(cli, "load_config", Config)
 
 

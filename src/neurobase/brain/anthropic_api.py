@@ -28,12 +28,36 @@ from neurobase.brain.base import (
 
 DEFAULT_API_MODEL = "claude-sonnet-5"
 
+# OS-keychain lookup schema (spec §10): service `neurobase`, username = the
+# provider env-var name the entry stands in for.
+KEYCHAIN_SERVICE = "neurobase"
+KEYCHAIN_USERNAME = "ANTHROPIC_API_KEY"
+
+
+def _keychain_api_key() -> str | None:
+    """Read the Anthropic key from the OS keychain (spec §10). Any failure —
+    keyring not installed, no backend, locked keychain, missing entry — is
+    treated as "no key" and falls through; the lookup never prompts or raises
+    into the caller."""
+    try:
+        import keyring
+    except ImportError:
+        return None
+    try:
+        return keyring.get_password(KEYCHAIN_SERVICE, KEYCHAIN_USERNAME) or None
+    except Exception:
+        return None
+
 
 def resolve_api_key() -> str | None:
-    """API-key precedence for API backends (spec §10): ``NEUROBASE_API_KEY``
-    then ``ANTHROPIC_API_KEY``. ``None`` ⇒ backend unavailable (auto-detection
-    falls through)."""
-    return os.environ.get("NEUROBASE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    """API-key precedence for the Anthropic backend (spec §10):
+    ``NEUROBASE_API_KEY`` env > ``ANTHROPIC_API_KEY`` env > OS keychain > none.
+    ``None`` ⇒ backend unavailable (auto-detection falls through)."""
+    return (
+        os.environ.get("NEUROBASE_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or _keychain_api_key()
+    )
 
 
 class AnthropicAPIBrain:

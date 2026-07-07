@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -39,6 +40,32 @@ def test_memory_dir_rejects_invalid_project_slug(root: Path, bad_project: str) -
         store.memory_dir(bad_project, root)
     with pytest.raises(store.InvalidSlugError):
         store.ensure_tree(bad_project, root)
+
+
+def test_ensure_tree_creates_store_toml(root: Path) -> None:
+    """spec §10/D11: <root>/store.toml with schema + created_at."""
+    store.ensure_tree("proj", root)
+    path = store.store_toml_path(root)
+    assert path.exists()
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert data["schema"] == store.STORE_SCHEMA_VERSION
+    assert "created_at" in data
+
+
+def test_ensure_store_metadata_does_not_rewrite_existing_created_at(root: Path) -> None:
+    store.ensure_store_metadata(root)
+    first = store.store_toml_path(root).read_text(encoding="utf-8")
+    store.ensure_store_metadata(root)
+    second = store.store_toml_path(root).read_text(encoding="utf-8")
+    assert first == second
+
+
+def test_ensure_store_metadata_refuses_newer_schema(root: Path) -> None:
+    path = store.store_toml_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('schema = 999\ncreated_at = "2020-01-01T00:00:00Z"\n')
+    with pytest.raises(store.UnsupportedSchemaError):
+        store.ensure_store_metadata(root)
 
 
 def test_resolve_root_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

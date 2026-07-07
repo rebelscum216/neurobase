@@ -10,18 +10,21 @@ from __future__ import annotations
 
 import os
 import re
+import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import tomli_w
 import yaml
 
 from neurobase.core.config import load_config
 
 SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 RAW_SUBDIRS = ("raw", "curated", "nodes", ".tombstones")
+STORE_SCHEMA_VERSION = 1
 
 _DOC_RE = re.compile(r"\A---\n(?P<frontmatter>.*?)\n---\n\n(?P<body>.*)\Z", re.DOTALL)
 
@@ -32,6 +35,10 @@ class InvalidSlugError(ValueError):
 
 class RawConsumedError(RuntimeError):
     """A scribe tried to overwrite a raw capture the curator already consumed."""
+
+
+class UnsupportedSchemaError(RuntimeError):
+    """The store's on-disk schema is newer than this binary supports (D11)."""
 
 
 @dataclass
@@ -78,9 +85,37 @@ def memory_dir(project: str, root: Path) -> Path:
     return root / "projects" / project / "memory"
 
 
+def store_toml_path(root: Path) -> Path:
+    return root / "store.toml"
+
+
+def ensure_store_metadata(root: Path) -> Path:
+    """Write ``<root>/store.toml`` (``schema = 1``, ``created_at``) on first
+    use; on subsequent calls, refuse to operate if the on-disk schema is
+    newer than this binary supports (spec §10, decision D11). ``neurobase
+    migrate`` owns future schema bumps."""
+    path = store_toml_path(root)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        doc = {"schema": STORE_SCHEMA_VERSION, "created_at": _now_iso()}
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(tomli_w.dumps(doc).encode("utf-8"))
+        tmp.replace(path)
+        return path
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    schema = data.get("schema")
+    if not isinstance(schema, int) or schema > STORE_SCHEMA_VERSION:
+        raise UnsupportedSchemaError(
+            f"{path}: schema {schema!r} is newer than this binary supports "
+            f"(max {STORE_SCHEMA_VERSION}) — upgrade neurobase-cli."
+        )
+    return path
+
+
 def ensure_tree(project: str, root: Path) -> Path:
     """Create ``raw/ curated/ nodes/ .tombstones/`` under the project's memory
-    dir. Idempotent."""
+    dir (and the root's ``store.toml`` if this is a fresh store). Idempotent."""
+    ensure_store_metadata(root)
     mem = memory_dir(project, root)
     for sub in RAW_SUBDIRS:
         (mem / sub).mkdir(parents=True, exist_ok=True)

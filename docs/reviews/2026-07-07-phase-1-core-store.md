@@ -148,3 +148,60 @@ one covering 4 invalid-slug cases).
 
 **Verdict:** changes-requested — blocking spec §1 slug-validation MUSTs are not
 fully enforced yet. _(Awaiting re-review.)_
+
+### Re-review — 2026-07-07
+
+Prior blocker verification:
+- `memory_dir()` now validates the project slug before constructing
+  `<root>/projects/<project>/memory`, so `ensure_tree` and every store helper
+  that routes through `memory_dir` reject invalid/empty project slugs.
+  Regression coverage exists in `test_memory_dir_rejects_invalid_project_slug`.
+- `register_project()` now rejects an empty/invalid final slug for both
+  auto-derived and explicit input, and `enable` catches `InvalidSlugError`.
+  Regression coverage exists in
+  `test_register_project_rejects_empty_{derived,explicit}_slug`.
+- `soft_delete_curated()` now validates the fact slug before building the
+  source/destination paths. Regression coverage exists in
+  `test_soft_delete_curated_rejects_invalid_slug`.
+
+New findings:
+
+- **major** — `src/neurobase/core/store.py:81`: Phase 1 still does not create
+  or validate the store-level `store.toml` required by build-plan §6 Phase 1
+  and spec §10/D11 (`<root>/store.toml` with `schema = 1` and `created_at =
+  <ISO8601>`, and refusal to operate on a schema newer than the binary). The
+  current `ensure_tree()` only creates the per-project memory subdirectories,
+  so an enabled store has no schema marker and no forward-compatibility guard.
+  Suggested direction: add store metadata initialization/validation at the
+  root boundary used by `enable`/store operations, and cover both first-create
+  and newer-schema refusal in tests.
+  - **resolution:** resolved — this was a real omission (`store.toml` wasn't
+    implemented at all). Added `store.STORE_SCHEMA_VERSION`,
+    `store_toml_path()`, and `ensure_store_metadata()`: writes
+    `{schema, created_at}` on first use, and on every subsequent call reads
+    the existing file and raises `UnsupportedSchemaError` if
+    `schema > STORE_SCHEMA_VERSION`. Wired into `ensure_tree()` so `enable`
+    (and anything else that ensures a project tree) also ensures/validates
+    the root's `store.toml`. Verified manually end-to-end through the
+    reinstalled `uv tool` shim (`enable` → `store.toml` contains `schema = 1`
+    + a real `created_at`). Added three regression tests: creation shape,
+    idempotence (`created_at` doesn't get rewritten on a second call), and
+    refusal on a newer schema.
+
+Verification run (Reviewer, re-review): `uv run pytest -q` (64 passed),
+`uv run ruff check .`, `uv run ruff format --check .`, and
+`uv run mypy src tests` all pass.
+
+Verification run (Author, post-fix): `uv run ruff check .`, `ruff format
+--check .`, `mypy src tests`, `pytest -q` all green (67 passed, up from 64).
+`uv tool install . --force` + manual `enable`/`status` in a scratch repo
+confirmed `store.toml` is created with the right shape.
+
+**Author's response to verdict:** the `store.toml` gap was real — genuinely
+missed it against the build-plan §6 Phase 1 deliverable list despite
+following spec §1 closely; fixed as described above. Re-relaying for another
+pass.
+
+**Verdict:** changes-requested — the original slug blockers are fixed, but the
+Phase 1 `store.toml` schema/versioning deliverable is still missing.
+_(Awaiting re-review.)_

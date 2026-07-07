@@ -7,6 +7,13 @@
 
 ## Context
 
+> **Note (added after [ADR-0005](0005-codex-injection-confirmed.md)):** the
+> `session_start`/`stop` casing below reflects what this ADR's live test
+> observed at the time — lowercase, and it fired correctly. ADR-0005 later
+> found Codex silently rewrites this to `SessionStart`/`Stop` on disk after
+> loading it once, and that CamelCase is the form the installer should write.
+> Both statements are true; see ADR-0005 and spec §7 for the full picture.
+
 Spec §5 (Codex scribe contract) and §11.2/§11.4 already had the Codex rollout
 JSONL structure and hook event names (`session_start`/`stop`, live-verified per
 §7) pinned, but two things remained open per the build-plan §5 spike table:

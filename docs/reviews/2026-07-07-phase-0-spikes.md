@@ -1,6 +1,6 @@
 ---
 slug: phase-0-spikes
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-0-spikes
@@ -219,3 +219,29 @@ everything else should be uncontested now.
 **Verdict:** changes-requested — S2's recorded conclusion and the resulting
 Codex hook/spec contracts are not reliable enough to make Phase 0's spike gate
 closed. _(Awaiting re-review.)_
+
+### Re-review — 2026-07-07
+
+1. **nit** — `docs/neurobase-build-plan.md:119` — The S6 spike table still
+   says ADR-0003 measured "~120ms warm combined," but ADR-0003 was updated to
+   the corrected fail-safe stub measurement of ~80ms combined. Suggested
+   direction: update the table number when making the next doc polish pass.
+   - **resolution:** resolved — table now says ~80ms.
+
+2. **nit** — `docs/adr/0001-codex-capture-wiring.md:10` —
+   ADR-0001 still says hook event names `session_start`/`stop` were pinned,
+   while ADR-0005/spec §7 now establish `SessionStart`/`Stop` as the canonical
+   form Neurobase should write. Because ADR-0005 records the correction and
+   the spec is now right, this is not blocking. Suggested direction: add a
+   short supersession note to ADR-0001's hook-casing references if you want
+   readers to avoid the old wording.
+   - **resolution:** resolved — added a note pointing to ADR-0005/spec §7.
+
+Verification run (Reviewer re-review): `uv run ruff check .`, `uv run ruff
+format --check .`, `uv run mypy src tests`, and `uv run pytest` all passed.
+`UV_CACHE_DIR=/private/tmp/uv-cache-neurobase uv run neurobase hook claude
+session-start` and `session-end` both exited 0. `git diff --check
+main...phase-0-spikes` reported no whitespace errors.
+
+**Verdict:** approve — the prior blockers are resolved; only non-blocking doc
+nits remain.

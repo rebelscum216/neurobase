@@ -116,7 +116,7 @@ neurobase/                         github.com/<you>/neurobase · Apache-2.0
 | S3 | Clean-machine install | Fresh macOS user acct or container: `uv tool install neurobase-cli` → `neurobase init` with no Python preinstalled | Documented one-liner works; cold-start < 60s | Open |
 | S4 | PyPI/GitHub naming | `curl` PyPI JSON endpoints | **DONE:** `neurobase` taken → ship as `neurobase-cli` (D2) | ✅ Closed |
 | S5 | `claude -p` JSON contract for the curator (does `--output-format json` + prompt-level JSON demand give parseable plan objects reliably? `--json-schema` usable?) | 10-run harness against the real CLI | Parse success ≥ 9/10 with lenient parser; else prompt/flags adjusted until so | ✅ **Closed** — [ADR-0002](adr/0002-claude-cli-json-reliability.md): 10/10 parsed |
-| S6 | Hook latency budget | Time `neurobase hook` cold/warm via `uv tool` shim | Session start+end overhead < 500ms combined warm | ✅ **Closed** — [ADR-0003](adr/0003-hook-latency-budget.md): ~120ms warm combined; re-measure once Phase 4 lands real hook logic |
+| S6 | Hook latency budget | Time `neurobase hook` cold/warm via `uv tool` shim | Session start+end overhead < 500ms combined warm | ✅ **Closed** — [ADR-0003](adr/0003-hook-latency-budget.md): ~80ms warm combined (fail-safe-conformant stub); re-measure once Phase 4 lands real hook logic |
 
 ## 6. Phases
 

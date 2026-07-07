@@ -62,16 +62,18 @@ neurobase/
 ├── README.md                 ← project front door
 ├── LICENSE                   ← Apache-2.0 (decision D1)
 ├── pyproject.toml            ← package "neurobase-cli", command "neurobase"
-├── src/neurobase/            ← cli/ (live) · core/ brain/ curator/ adapters/ recommender/ mcp/ (stubs)
-├── tests/                    ← smoke tests now; round-trip + spec-§11 fixtures land per phase
+├── src/neurobase/            ← cli/, core/{store,projects,redact,config} (live)
+│                                · brain/ curator/ adapters/ recommender/ mcp/ (stubs)
+├── tests/                    ← Phase 0 smoke + Phase 1 round-trip suites; spec-§11 fixtures land per phase
 ├── docs/                     ← canonical docs, ADRs, notes, code-review relay + reviews
 ├── .claude/skills/           ← project skills (e.g. code-review-relay, the Author role)
 └── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix (lint, format, types, tests)
 ```
 
-The `src/neurobase/` subpackages other than `cli/` are docstring-only stubs, each
-naming the spec section and phase that will fill it in. Replace a stub with real
-code when its phase lands.
+`core/` is real as of Phase 1 (`store.py`, `projects.py`, `redact.py`,
+`config.py`). `brain/ curator/ adapters/ recommender/ mcp/` are still
+docstring-only stubs, each naming the spec section and phase that will fill it
+in. Replace a stub with real code when its phase lands.
 
 ## Current state
 
@@ -88,8 +90,16 @@ code when its phase lands.
   `developer`-role input message — injection mirrors the Claude adapter, per
   spec §5/§3. (S3, clean-machine install, is tracked in the build-plan spike
   table but isn't part of Phase 0's closing gate — see build-plan §6 Phase 0
-  deliverables. Not started.) **Next: Phase 1** (core
-  store, config, projects).
+  deliverables. Not started.)
+- **Phase 1 — core store, config, projects: done.** `core/store.py` (tree,
+  YAML-frontmatter document format, atomic writes, raw/curated/nodes/index per
+  spec §1, including the Codex per-turn overwrite trick and the
+  consumed-mutability rule), `core/projects.py` (registry + git-common-dir
+  resolution incl. worktrees + slugify, spec §10/D6), `core/redact.py` (the
+  full D13 table), `core/config.py` (spec §10 keys, §8 defaults). Live
+  `neurobase enable`/`status` commands. 57 tests (round-trip + CLI
+  integration), ruff/mypy/pytest all green. **Next: Phase 2** (brain: execution
+  backends).
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a

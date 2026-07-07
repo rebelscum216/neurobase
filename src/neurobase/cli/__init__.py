@@ -9,10 +9,12 @@ phases land, replace a stub with its real command.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import typer
 
 from neurobase import __version__
+from neurobase.core import projects, store
 
 app = typer.Typer(
     name="neurobase",
@@ -28,11 +30,81 @@ def version() -> None:
     typer.echo(__version__)
 
 
+def _check_store_schema(root: Path) -> None:
+    """Refuse to operate on a store whose schema is newer than this binary
+    supports (spec §10/D11) — called before any registry/memory read or
+    write so a newer-schema store is never partially mutated."""
+    try:
+        store.ensure_store_metadata(root)
+    except store.UnsupportedSchemaError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command()
+def enable(
+    root: str | None = typer.Option(
+        None, "--root", help="Override the store root (default: config/env/~/neurobase)."
+    ),
+    slug: str | None = typer.Option(
+        None, "--slug", help="Explicit project slug (skips the collision error)."
+    ),
+    cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+) -> None:
+    """Register the current repo as a project and create its memory tree."""
+    resolved_root = store.resolve_root(root)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    _check_store_schema(resolved_root)  # before registry.toml is touched
+    try:
+        project_slug = projects.register_project(resolved_root, resolved_cwd, slug=slug)
+    except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    mem = store.ensure_tree(project_slug, resolved_root)
+    typer.echo(f"Enabled project '{project_slug}' at {mem}")
+
+
+@app.command()
+def status(
+    root: str | None = typer.Option(None, "--root", help="Override the store root."),
+    cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+) -> None:
+    """Show projects, raw/curated counts, nodes, and fact-count trend."""
+    resolved_root = store.resolve_root(root)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    project_slug = projects.resolve_project(resolved_root, resolved_cwd)
+    if project_slug is None:
+        typer.echo("Not an enabled project (no registered root matches this directory).")
+        raise typer.Exit(code=1)
+    _check_store_schema(resolved_root)  # before any memory read
+
+    all_raw = store.list_raw(resolved_root, project_slug, unconsumed_only=False)
+    unconsumed_count = sum(1 for d in all_raw if not d.get("consumed"))
+    consumed_count = sum(1 for d in all_raw if d.get("consumed"))
+
+    mem = store.memory_dir(project_slug, resolved_root)
+    active_facts = 0
+    curated_dir = mem / "curated"
+    if curated_dir.exists():
+        for path in curated_dir.glob("*.md"):
+            try:
+                doc = store.read_doc(path)
+            except ValueError:
+                continue
+            if doc.get("status") == "active":
+                active_facts += 1
+    nodes_dir = mem / "nodes"
+    node_count = len(list(nodes_dir.glob("*.md"))) if nodes_dir.exists() else 0
+
+    typer.echo(f"Project: {project_slug}")
+    typer.echo(f"Raw captures: {unconsumed_count} unconsumed, {consumed_count} consumed")
+    typer.echo(f"Active curated facts: {active_facts}")
+    typer.echo(f"Nodes: {node_count}")
+
+
 # --- Planned command surface (stubs until each command's phase lands) ---------
 
 _PLANNED: list[tuple[str, int, str]] = [
-    ("enable", 1, "Register the current repo as a project and create its memory tree."),
-    ("status", 1, "Show projects, raw/curated counts, nodes, and fact-count trend."),
     ("doctor", 2, "Diagnose the install: shim, agents, brain backend, store health."),
     ("curate", 3, "Fold unconsumed raw captures into the curated fact set."),
     ("recall", 4, "Print the memory that would be injected for a project."),

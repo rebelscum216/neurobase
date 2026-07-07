@@ -19,6 +19,8 @@ classifiers = [
 ]
 dependencies = [
     "typer>=0.12",
+    "pyyaml>=6.0",
+    "tomli-w>=1.0",
 ]
 
 [project.urls]
@@ -46,6 +48,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pre-commit>=3.8",
+    "types-pyyaml>=6.0",
 ]
 
 [tool.ruff]

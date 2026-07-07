@@ -61,41 +61,46 @@ neurobase/
 ├── AGENTS.md                 ← you are here
 ├── README.md                 ← project front door
 ├── LICENSE                   ← Apache-2.0 (decision D1)
-├── pyproject.toml            ← [not yet] package "neurobase-cli", command "neurobase"
-├── src/neurobase/            ← [not yet] core/ brain/ curator/ adapters/ recommender/ mcp/ cli/
-├── tests/                    ← [not yet] round-trip + per-module; fixtures from spec §11
+├── pyproject.toml            ← package "neurobase-cli", command "neurobase"
+├── src/neurobase/            ← cli/ (live) · core/ brain/ curator/ adapters/ recommender/ mcp/ (stubs)
+├── tests/                    ← smoke tests now; round-trip + spec-§11 fixtures land per phase
 ├── docs/                     ← canonical docs, ADRs, notes, code-review relay + reviews
 ├── .claude/skills/           ← project skills (e.g. code-review-relay, the Author role)
-└── .github/workflows/ci.yml  ← [not yet] 3-OS matrix
+└── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix (lint, format, types, tests)
 ```
 
-Sections marked `[not yet]` are Phase 0 scaffolding not yet created. Update this
-list — and remove the markers — as they land.
+The `src/neurobase/` subpackages other than `cli/` are docstring-only stubs, each
+naming the spec section and phase that will fill it in. Replace a stub with real
+code when its phase lands.
 
 ## Current state
 
-- **Phase:** 0 (repo bootstrap). The founding docs and this operating guide exist;
-  the Python package, tests, and CI do **not** yet.
+- **Phase:** 0. The **repo bootstrap is done** — installable package, live `cli`
+  with an honest stubbed command surface, smoke tests, ruff/mypy/pytest, and 3-OS
+  CI all pass. **Remaining in Phase 0:** spikes S1/S2/S5/S6, which require the
+  Claude Code and Codex CLIs installed + logged in on the dev machine (not yet
+  present — see build-plan assumption #9). Each spike's outcome becomes an ADR.
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a
   placeholder holding that name, not part of the build.
 - **License (D1):** Apache-2.0.
 
-## Dev workflow (fill in as Phase 0 lands)
-
-Once `pyproject.toml` exists, the intended commands (build-plan §9) are:
+## Dev workflow
 
 ```bash
-uv sync                # install deps into a managed venv
-uv run pytest          # run the suite — the contract enforcer
-uv run ruff check .    # lint
-uv run ruff format .   # format
-uv run mypy src        # types (lenient to start)
+uv sync                     # install deps into a managed venv (bootstraps Python)
+uv run neurobase --help     # run the CLI from the dev env
+uv run pytest               # run the suite — the contract enforcer
+uv run ruff check .         # lint
+uv run ruff format .        # format
+uv run mypy src tests       # types (lenient to start)
+uv run pre-commit install   # optional: enable the pre-commit hooks
 ```
 
-Until then there is no build. Do not invent commands that don't resolve — if a
-tool isn't wired up yet, say so.
+CI runs `ruff check`, `ruff format --check`, `mypy src tests`, and `pytest` on a
+3-OS × 2-Python matrix — keep all four green. To validate the installed shim
+(not just the dev env): `uv tool install .` then `neurobase --help`.
 
 ## Where to put things
 

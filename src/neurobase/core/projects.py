@@ -15,6 +15,8 @@ from pathlib import Path
 
 import tomli_w
 
+from neurobase.core.store import SLUG_RE, InvalidSlugError
+
 _SLUG_INVALID = re.compile(r"[^a-z0-9]+")
 
 
@@ -79,6 +81,12 @@ def register_project(root: Path, cwd: Path, slug: str | None = None) -> str:
     should re-prompt with an explicit ``slug``."""
     project_root = git_common_root(cwd) or cwd.resolve()
     final_slug = slugify(slug) if slug else slugify(project_root.name)
+    if not SLUG_RE.match(final_slug):
+        source = slug if slug else project_root.name
+        raise InvalidSlugError(
+            f"derived project slug {final_slug!r} (from {source!r}) is invalid "
+            "— must match ^[a-z0-9-]+$; pass an explicit --slug"
+        )
     registry = load_registry(root)
     existing_roots = registry.get(final_slug, [])
     root_str = str(project_root)

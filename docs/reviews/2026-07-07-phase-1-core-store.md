@@ -100,4 +100,51 @@ scribe/curator-facing, land with their owning phases).
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** approve | changes-requested — _one-line rationale._
+- **blocker** — `src/neurobase/core/store.py:71`: Project slugs are never
+  validated on the store entry points (`ensure_tree`, `memory_dir`, and the
+  raw/curated/node helpers that build paths through them), even though spec §1
+  says project/fact/node slugs **MUST** match `^[a-z0-9-]+$` and be rejected
+  otherwise. This is reachable today via direct store calls and via registry
+  data: `register_project` can also produce an empty slug when the supplied or
+  derived name slugifies to `""`, and then `enable` will create
+  `<root>/projects/memory/...` instead of a valid
+  `<root>/projects/<project>/memory/...` tree. Suggested direction: centralize
+  project-slug validation in the store path boundary and have
+  `register_project` reject an empty/invalid final slug, with tests for both
+  explicit and auto-derived cases.
+  - **resolution:** resolved — confirmed empirically first (`Path("/root") /
+    "projects" / "" / "memory"` really does collapse to
+    `/root/projects/memory`, exactly as flagged). Centralized validation in
+    `memory_dir` itself (moved `_require_slug` above it and call it there) so
+    every store entry point that builds a path through `memory_dir` is
+    covered in one place, not each call site individually. `register_project`
+    now validates the final slug (explicit or derived) against `SLUG_RE` and
+    raises `InvalidSlugError` if it's empty/invalid; the CLI's `enable` now
+    catches that alongside `ProjectSlugCollisionError`. Added regression
+    tests: `test_memory_dir_rejects_invalid_project_slug` (parametrized,
+    includes the empty-string case) and
+    `test_register_project_rejects_empty_{derived,explicit}_slug`.
+
+- **blocker** — `src/neurobase/core/store.py:244`: `soft_delete_curated`
+  accepts the fact slug without calling `_require_slug`, while
+  `upsert_curated` and `write_node` do validate their slugs. That violates the
+  same spec §1 MUST and is especially risky for the Phase 3 curator path, where
+  tombstone targets may originate from model output; a bad slug should be
+  rejected/skipped, not used to construct a filesystem path. Suggested
+  direction: validate `slug` in `soft_delete_curated` (and add a regression
+  test for an invalid tombstone slug).
+  - **resolution:** resolved — added the missing `_require_slug(slug, "fact
+    slug")` call at the top of `soft_delete_curated`, matching
+    `upsert_curated`/`write_node`. Added
+    `test_soft_delete_curated_rejects_invalid_slug`.
+
+Verification run (Author, post-fix): `uv run ruff check .`, `ruff format
+--check .`, `mypy src tests`, `pytest -q` all green (64 passed, up from 57 —
+7 new regression tests for these two findings, including a parametrized
+one covering 4 invalid-slug cases).
+
+**Author's response to verdict:** both blockers were real gaps, not disputed
+— fixed as described above. Re-relaying for re-review.
+
+**Verdict:** changes-requested — blocking spec §1 slug-validation MUSTs are not
+fully enforced yet. _(Awaiting re-review.)_

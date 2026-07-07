@@ -31,6 +31,16 @@ def test_ensure_tree_is_idempotent(root: Path) -> None:
     assert (root / "projects" / "proj" / "memory" / "raw" / "marker.md").exists()
 
 
+@pytest.mark.parametrize("bad_project", ["", "Not Valid!", "has spaces", "UPPER"])
+def test_memory_dir_rejects_invalid_project_slug(root: Path, bad_project: str) -> None:
+    """An invalid/empty project must never silently collapse into a bad path
+    (e.g. an empty slug joining away to <root>/projects/memory)."""
+    with pytest.raises(store.InvalidSlugError):
+        store.memory_dir(bad_project, root)
+    with pytest.raises(store.InvalidSlugError):
+        store.ensure_tree(bad_project, root)
+
+
 def test_resolve_root_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NEUROBASE_ROOT", raising=False)
     explicit = tmp_path / "explicit"
@@ -249,6 +259,12 @@ def test_upsert_curated_supersedes_new_value_overrides(root: Path) -> None:
     store.upsert_curated(root, "proj", "fact-a", "v3", supersedes=["old-2"])
     doc = store.read_doc(store.memory_dir("proj", root) / "curated" / "fact-a.md")
     assert doc["supersedes"] == ["old-2"]
+
+
+def test_soft_delete_curated_rejects_invalid_slug(root: Path) -> None:
+    store.ensure_tree("proj", root)
+    with pytest.raises(store.InvalidSlugError):
+        store.soft_delete_curated(root, "proj", "Not Valid!")
 
 
 def test_soft_delete_moves_to_tombstones(root: Path) -> None:

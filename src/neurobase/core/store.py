@@ -64,7 +64,17 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
     return Path(cfg.store.root).expanduser().resolve()
 
 
+def _require_slug(value: str, what: str) -> str:
+    if not SLUG_RE.match(value):
+        raise InvalidSlugError(f"invalid {what}: {value!r} (must match ^[a-z0-9-]+$)")
+    return value
+
+
 def memory_dir(project: str, root: Path) -> Path:
+    """The path boundary for every store entry point — validates ``project``
+    here so an invalid/empty slug can never silently collapse into a bad path
+    (e.g. an empty project string joining away to ``<root>/projects/memory``)."""
+    _require_slug(project, "project slug")
     return root / "projects" / project / "memory"
 
 
@@ -75,12 +85,6 @@ def ensure_tree(project: str, root: Path) -> Path:
     for sub in RAW_SUBDIRS:
         (mem / sub).mkdir(parents=True, exist_ok=True)
     return mem
-
-
-def _require_slug(value: str, what: str) -> str:
-    if not SLUG_RE.match(value):
-        raise InvalidSlugError(f"invalid {what}: {value!r} (must match ^[a-z0-9-]+$)")
-    return value
 
 
 # --- document format ---------------------------------------------------
@@ -244,6 +248,7 @@ def upsert_curated(
 def soft_delete_curated(root: Path, project: str, slug: str) -> Path:
     """Tombstone a curated fact: move it to ``.tombstones/``, recoverable
     until ``prune_tombstones`` hard-deletes it past the grace period."""
+    _require_slug(slug, "fact slug")
     mem = memory_dir(project, root)
     src = mem / "curated" / f"{slug}.md"
     doc = read_doc(src)

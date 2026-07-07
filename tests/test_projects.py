@@ -63,6 +63,20 @@ def test_register_project_explicit_slug(root: Path, repo: Path) -> None:
     assert slug == "custom-name"
 
 
+def test_register_project_rejects_empty_derived_slug(root: Path, tmp_path: Path) -> None:
+    """A directory name that slugifies to "" must be rejected, not silently
+    registered under an empty project slug."""
+    all_punctuation_dir = tmp_path / "!!!"
+    all_punctuation_dir.mkdir()
+    with pytest.raises(projects.InvalidSlugError):
+        projects.register_project(root, all_punctuation_dir)
+
+
+def test_register_project_rejects_empty_explicit_slug(root: Path, repo: Path) -> None:
+    with pytest.raises(projects.InvalidSlugError):
+        projects.register_project(root, repo, slug="!!!")
+
+
 def test_register_project_collision_raises(root: Path, repo: Path, tmp_path: Path) -> None:
     other = tmp_path / "My Cool Repo (copy)"
     other.mkdir()

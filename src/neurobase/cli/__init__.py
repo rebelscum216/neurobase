@@ -45,7 +45,7 @@ def enable(
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
     try:
         project_slug = projects.register_project(resolved_root, resolved_cwd, slug=slug)
-    except projects.ProjectSlugCollisionError as exc:
+    except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
     mem = store.ensure_tree(project_slug, resolved_root)

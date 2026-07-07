@@ -62,19 +62,19 @@ neurobase/
 ├── README.md                 ← project front door
 ├── LICENSE                   ← Apache-2.0 (decision D1)
 ├── pyproject.toml            ← package "neurobase-cli", command "neurobase"
-├── src/neurobase/            ← cli/, core/{store,projects,redact,config},
-│                                brain/{base,claude_cli,codex_cli,anthropic_api,select} (live)
-│                                · curator/ adapters/ recommender/ mcp/ (stubs)
-├── tests/                    ← Phase 0 smoke + Phase 1/2 suites; spec-§11 fixtures land per phase
+├── src/neurobase/            ← cli/, core/{store,projects,redact,config,linkify},
+│                                brain/{base,claude_cli,codex_cli,anthropic_api,select},
+│                                curator/engine (live) · adapters/ recommender/ mcp/ (stubs)
+├── tests/                    ← Phase 0 smoke + Phase 1/2/3 suites; spec-§11 fixtures land per phase
 ├── docs/                     ← canonical docs, ADRs, notes, code-review relay + reviews
 ├── .claude/skills/           ← project skills (e.g. code-review-relay, the Author role)
 └── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix (lint, format, types, tests)
 ```
 
-`core/` (Phase 1) and `brain/` (Phase 2) are real. `curator/ adapters/
-recommender/ mcp/` are still docstring-only stubs, each naming the spec section
-and phase that will fill it in. Replace a stub with real code when its phase
-lands.
+`core/` (Phase 1 + `linkify` Phase 3), `brain/` (Phase 2), and `curator/`
+(Phase 3) are real. `adapters/ recommender/ mcp/` are still docstring-only
+stubs, each naming the spec section and phase that will fill it in. Replace a
+stub with real code when its phase lands.
 
 ## Current state
 
@@ -110,7 +110,20 @@ lands.
   run as the user's own logged-in CLI / their own API key (D9 ToS rule);
   Neurobase never touches credentials. 121 tests total; live smoke (one
   `plan_json` + one `text`) verified through both claude-cli and codex-cli.
-  **Next: Phase 3** (curator — the thinking loop, spec §2).
+- **Phase 3 — curator: done.** `curator/engine.py` runs the full spec §2 loop
+  (plan → apply upserts/supersession → explicit tombstones → consume raws →
+  prune → synthesize node → index → linkify), with the hard rules enforced:
+  a plan that won't parse aborts and leaves raws unconsumed (D9); a
+  valid-but-empty plan IS consumed; node-synthesis failure after consumption
+  is `partial` (self-heals). Brain is injected (testable with fakes, no
+  network). `core/linkify.py` (spec §6): idempotent `[[wikilink]]` lineage
+  blocks in curated/nodes bodies, frontmatter byte-for-byte preserved,
+  raw/.tombstones never touched. Live `neurobase curate [--if-stale]
+  [--dry-run] [--resynth]`; `status` shows the fact-count trend from
+  `.curator-log.jsonl`. 158 tests total; full "Done when" verified live
+  (2 raws from 2 agents → 2 deduped facts w/ provenance → node + index +
+  wikilinks → second run no-ops). **Next: Phase 4** (Claude adapter: scribe +
+  recall, hooks — spec §3/§4).
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a

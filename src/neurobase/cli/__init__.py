@@ -8,6 +8,7 @@ phases land, replace a stub with its real command.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from neurobase import __version__
 from neurobase.brain import resolve_brain
 from neurobase.core import projects, store
 from neurobase.core.config import load_config
+from neurobase.curator import curate as run_curate
+from neurobase.curator import is_stale, read_fact_count_trend
 
 app = typer.Typer(
     name="neurobase",
@@ -103,6 +106,65 @@ def status(
     typer.echo(f"Active curated facts: {active_facts}")
     typer.echo(f"Nodes: {node_count}")
 
+    trend = read_fact_count_trend(resolved_root, project_slug)
+    if trend:
+        typer.echo(f"Fact-count trend (last {len(trend)} passes): {' → '.join(map(str, trend))}")
+
+
+@app.command()
+def curate(
+    root: str | None = typer.Option(None, "--root", help="Override the store root."),
+    cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+    if_stale: bool = typer.Option(
+        False, "--if-stale", help="Only run if unconsumed raw is older than the staleness window."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the plan the curator would apply; change nothing."
+    ),
+    resynth: bool = typer.Option(
+        False, "--resynth", help="Regenerate the node + index from current facts; no new raw."
+    ),
+) -> None:
+    """Fold unconsumed raw captures into the curated fact set (spec §2)."""
+    config = load_config()
+    resolved_root = store.resolve_root(root)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    project_slug = projects.resolve_project(resolved_root, resolved_cwd)
+    if project_slug is None:
+        typer.echo("Not an enabled project (no registered root matches this directory).")
+        raise typer.Exit(code=1)
+    _check_store_schema(resolved_root)
+
+    checking_staleness = if_stale and not resynth
+    if checking_staleness and not is_stale(resolved_root, project_slug, config.curate.stale_hours):
+        typer.echo("Not stale — nothing to curate.")
+        return
+
+    brain, resolution = resolve_brain(config)
+    if brain is None:
+        typer.secho(
+            f"No brain backend available ({resolution.reason}); run `neurobase doctor`.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    summary = run_curate(
+        resolved_root,
+        project_slug,
+        brain,
+        dry_run=dry_run,
+        resynth=resynth,
+        tombstone_grace_days=config.curate.tombstone_grace_days,
+    )
+
+    if dry_run:
+        typer.echo(json.dumps(summary.get("plan", {}), indent=2, ensure_ascii=False))
+        return
+    typer.echo(json.dumps({k: v for k, v in summary.items() if k != "plan"}, ensure_ascii=False))
+    if summary.get("status") == "error":
+        raise typer.Exit(code=1)
+
 
 @app.command()
 def doctor() -> None:
@@ -130,7 +192,6 @@ def doctor() -> None:
 # --- Planned command surface (stubs until each command's phase lands) ---------
 
 _PLANNED: list[tuple[str, int, str]] = [
-    ("curate", 3, "Fold unconsumed raw captures into the curated fact set."),
     ("recall", 4, "Print the memory that would be injected for a project."),
     ("init", 6, "Interactive setup: detect agents, choose store root, install hooks."),
     ("uninstall", 6, "Remove Neurobase-owned hooks; leave the store intact."),

@@ -30,8 +30,12 @@ for investigation, and reserve ADRs for decisions someone might later question.
 
 ## Index
 
-_(none yet — the first ADRs will come from Phase 0 spikes S1, S2, S5, S6.)_
-
 | # | Title | Status | Resolves |
 |---|---|---|---|
-| — | — | — | — |
+| [0001](0001-codex-capture-wiring.md) | Codex capture wiring — turn-completion event name + notify payload | Accepted | S1 |
+| [0002](0002-claude-cli-json-reliability.md) | `claude -p` JSON contract reliability for the curator | Accepted | S5 |
+| [0003](0003-hook-latency-budget.md) | Hook latency budget | Accepted | S6 |
+
+S2 (Codex injection: does `SessionStart` accept `additionalContext`?) is still
+open — pending a decision on how to safely clear Codex's hook-trust gate for a
+throwaway test hook; see build-plan §5.

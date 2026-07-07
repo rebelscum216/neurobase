@@ -77,9 +77,14 @@ code when its phase lands.
 
 - **Phase:** 0. The **repo bootstrap is done** — installable package, live `cli`
   with an honest stubbed command surface, smoke tests, ruff/mypy/pytest, and 3-OS
-  CI all pass. **Remaining in Phase 0:** spikes S1/S2/S5/S6, which require the
-  Claude Code and Codex CLIs installed + logged in on the dev machine (not yet
-  present — see build-plan assumption #9). Each spike's outcome becomes an ADR.
+  CI all pass. Spikes **S1, S5, S6 are closed** ([ADR-0001](docs/adr/0001-codex-capture-wiring.md),
+  [ADR-0002](docs/adr/0002-claude-cli-json-reliability.md),
+  [ADR-0003](docs/adr/0003-hook-latency-budget.md)). **Remaining in Phase 0:**
+  S2 (Codex injection — does `SessionStart` accept `additionalContext`?), open
+  pending a decision on how to safely clear Codex's hook-trust gate for a
+  throwaway test hook without a trust/sandbox bypass flag. (S3, clean-machine
+  install, is tracked in the build-plan spike table but isn't part of Phase
+  0's closing gate — see build-plan §6 Phase 0 deliverables.)
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a

@@ -483,15 +483,18 @@ Metadata (`cwd`, `gitBranch`, `sessionId`) rides on the user events.
 
 ```jsonl
 {"type":"session_meta","payload":{"session_id":"019f…","id":"019f…","timestamp":"2026-07-05T23:21:06Z","cwd":"/Users/you/proj","originator":"codex_cli","cli_version":"x.y.z","git":{"commit_hash":"abc123…","branch":"main"}}}
-{"type":"event_msg","payload":{"type":"user_message","message":"Fix the login bug","images":[],"text_elements":[]}}
-{"type":"event_msg","payload":{"type":"agent_message","message":"Done — the null check was missing in…"}}
-{"type":"event_msg","payload":{"type":"<turn-completion — literal name = S1>","turn_id":"…","last_agent_message":"Done — …","completed_at":1767000000,"duration_ms":45210}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"…","started_at":1767000000,"model_context_window":…,"collaboration_mode_kind":"…"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"Fix the login bug","images":[],"local_images":[],"text_elements":[]}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Done — the null check was missing in…","phase":"…","memory_citation":…}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"…","last_agent_message":"Done — …","completed_at":1767000000,"duration_ms":45210,"time_to_first_token_ms":…}}
 ```
 
 Also present and **ignored** by the scribe: `response_item` (raw model I/O),
-`turn_context` (sandbox/approval state), and token-count `event_msg` variants.
-`user_message`/`agent_message` literal type strings are verified by a working
-parser; only the turn-completion event's literal name remains for S1.
+`turn_context` (sandbox/approval state), and `token_count` `event_msg`
+variants. **S1 closed (ADR-0001):** the turn-completion event's literal type
+is `task_complete` (live-verified 2026-07-07 via `codex exec`); a paired
+`task_started` marks turn start. `user_message`/`agent_message` literal type
+strings were already verified by a working parser.
 
 ### 11.3 `claude -p --output-format json` envelope — VERIFIED live
 
@@ -510,8 +513,20 @@ on the first live attempt; S5's remaining scope is the 10-run reliability check.
 Note: the CLI runs whatever model the user's session defaults to — the JSON
 reports it in `modelUsage`.
 
-### 11.4 Codex `notify` argv[1] JSON — research-reported, NOT live-verified
+### 11.4 Codex `notify` argv[1] JSON — VERIFIED live (S1 closed, ADR-0001)
 
-Expected fields: `type` (`agent-turn-complete`), `turn-id`/`thread-id`,
-`input-messages`, `last-assistant-message`. No path guaranteed → use §5's
-rollout-discovery algorithm. S1 verifies or corrects this before it's relied on.
+Delivered as **argv[1]**, a JSON string; stdin is empty. Captured
+2026-07-07 via `codex exec -c 'notify=["<capture-script>"]' "…"` (a
+single-invocation config override, never written to `~/.codex/config.toml`):
+
+```json
+{"type":"agent-turn-complete","thread-id":"019f…","turn-id":"019f…",
+ "cwd":"/Users/you/proj","client":"codex_exec",
+ "input-messages":["reply with exactly: notify-test-ok"],
+ "last-assistant-message":"notify-test-ok"}
+```
+
+No rollout/transcript path is present — §5's rollout-discovery algorithm
+(newest `rollout-*.jsonl` by mtime, cross-checked against
+`session_meta.session_id`/`id`) is **required**, not a fallback for an edge
+case, whenever `notify` is the active wiring.

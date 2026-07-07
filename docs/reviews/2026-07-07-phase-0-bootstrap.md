@@ -1,6 +1,6 @@
 ---
 slug: phase-0-bootstrap
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-0-bootstrap
@@ -88,4 +88,23 @@ brain, etc. — all still stubs by design).
   leads with `uv tool install .` from a local checkout, with the PyPI-based
   command kept as the "once published" path.
 
-**Verdict:** _not provided by reviewer in this pass (findings only)._
+### Re-review — 2026-07-07
+
+No new findings.
+
+The branch is now clearly scoped as the Phase 0 bootstrap sub-deliverable, not
+full Phase 0 closure. The remaining S1/S2/S5/S6 spike ADRs are still required
+before Phase 0 as a whole can be called done, but that gap is explicitly tracked
+in this baton and in `AGENTS.md`, so it is not blocking this bootstrap branch.
+
+Verified:
+- `uv run pytest` → 5 passed.
+- `uv run ruff check .` → passed.
+- `uv run ruff format --check .` → passed.
+- `uv run mypy src tests` → passed.
+- `uv build` → built sdist and wheel.
+- `uv tool install . --force` → installed `neurobase`.
+- `neurobase --help` and `neurobase version` → passed.
+
+**Verdict:** approve — scoped bootstrap work is clean, installable, tested, and
+honest about the remaining Phase 0 spike work.

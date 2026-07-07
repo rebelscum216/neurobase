@@ -139,6 +139,11 @@ source of truth; this section and the Claude `code-review-relay` skill are point
 
 ## Conventions
 
+- **End each response with a suggested next action.** Whichever agent you are,
+  close by telling the user what you'd do next. The one exception: mid a
+  code-review round-trip (you've just handed off and are waiting on the other
+  agent's findings/verdict) — there the next step is obviously to wait, so skip
+  it.
 - **Commits:** imperative, scoped ("curator: enforce unconsumed-on-parse-failure").
   Reference the phase or decision when relevant.
 - **Slugs** (projects, facts, nodes) match `^[a-z0-9-]+$` — enforced in code (spec §1).

@@ -30,6 +30,17 @@ def version() -> None:
     typer.echo(__version__)
 
 
+def _check_store_schema(root: Path) -> None:
+    """Refuse to operate on a store whose schema is newer than this binary
+    supports (spec §10/D11) — called before any registry/memory read or
+    write so a newer-schema store is never partially mutated."""
+    try:
+        store.ensure_store_metadata(root)
+    except store.UnsupportedSchemaError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+
 @app.command()
 def enable(
     root: str | None = typer.Option(
@@ -43,6 +54,7 @@ def enable(
     """Register the current repo as a project and create its memory tree."""
     resolved_root = store.resolve_root(root)
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    _check_store_schema(resolved_root)  # before registry.toml is touched
     try:
         project_slug = projects.register_project(resolved_root, resolved_cwd, slug=slug)
     except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
@@ -64,6 +76,7 @@ def status(
     if project_slug is None:
         typer.echo("Not an enabled project (no registered root matches this directory).")
         raise typer.Exit(code=1)
+    _check_store_schema(resolved_root)  # before any memory read
 
     all_raw = store.list_raw(resolved_root, project_slug, unconsumed_only=False)
     unconsumed_count = sum(1 for d in all_raw if not d.get("consumed"))

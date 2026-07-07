@@ -64,3 +64,34 @@ def test_enable_then_handwritten_raw_then_status_shows_it(tmp_path: Path) -> Non
     assert result.exit_code == 0
     assert "myrepo" in result.output
     assert "1 unconsumed, 0 consumed" in result.output
+
+
+def test_enable_refuses_newer_schema_without_touching_registry(tmp_path: Path) -> None:
+    """spec §10/D11: refuse to operate on a newer schema — and never partially
+    mutate the store (registry.toml) before that refusal."""
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    root = tmp_path / "store"
+    root.mkdir(parents=True)
+    (root / "store.toml").write_text('schema = 999\ncreated_at = "2020-01-01T00:00:00Z"\n')
+
+    result = runner.invoke(app, ["enable", "--root", str(root), "--cwd", str(repo)])
+    assert result.exit_code == 1
+    assert not (root / "registry.toml").exists()
+
+
+def test_status_refuses_newer_schema(tmp_path: Path) -> None:
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    root = tmp_path / "store"
+
+    result = runner.invoke(app, ["enable", "--root", str(root), "--cwd", str(repo)])
+    assert result.exit_code == 0
+
+    (root / "store.toml").write_text('schema = 999\ncreated_at = "2020-01-01T00:00:00Z"\n')
+
+    result = runner.invoke(app, ["status", "--root", str(root), "--cwd", str(repo)])
+    assert result.exit_code == 1
+    assert "schema" in result.output

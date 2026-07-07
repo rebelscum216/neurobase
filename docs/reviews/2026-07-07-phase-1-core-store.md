@@ -205,3 +205,59 @@ pass.
 **Verdict:** changes-requested — the original slug blockers are fixed, but the
 Phase 1 `store.toml` schema/versioning deliverable is still missing.
 _(Awaiting re-review.)_
+
+### Re-review — 2026-07-07 (second)
+
+Prior finding verification:
+- `ensure_store_metadata()` now creates `<root>/store.toml` with `schema = 1`
+  and `created_at`, preserves it on repeated calls, and raises on a newer
+  schema. The new regression tests cover those cases.
+- `ensure_tree()` calls `ensure_store_metadata()`, so first-time project tree
+  creation now creates the root schema marker.
+
+New findings:
+
+- **blocker** — `src/neurobase/cli/__init__.py:47`: the newer-schema refusal is
+  still not enforced before all Phase 1 operations. `enable` writes
+  `registry.toml` via `projects.register_project()` before it calls
+  `store.ensure_tree()`/`ensure_store_metadata()`, so against an existing
+  `<root>/store.toml` with `schema = 999` it mutates the registry and then
+  crashes with an uncaught `UnsupportedSchemaError`. `status` also never checks
+  `store.toml`: with a matching `registry.toml` and `schema = 999`, it reports
+  counts successfully instead of refusing to operate. This violates spec §10/D11
+  ("refuse to operate on a schema newer than the binary") and leaves the exact
+  forward-compatibility guard from the prior finding only partially wired.
+  Suggested direction: validate store metadata before any root-scoped registry
+  or memory read/write in live commands and shared root-boundary helpers, catch
+  `UnsupportedSchemaError` in the CLI as a clean user-facing error, and add
+  regression tests showing `enable` leaves `registry.toml` untouched on a newer
+  schema and `status` refuses a newer-schema store.
+
+Verification run (Reviewer, second re-review): `uv run pytest -q` (67 passed),
+`uv run ruff check .`, `uv run ruff format --check .`, and
+`uv run mypy src tests` all pass. Manual repros confirmed the remaining schema
+gap: `enable` exits 1 after writing `registry.toml`, while `status` exits 0
+and prints counts when `store.toml` has `schema = 999`.
+- **resolution:** resolved — added a shared `_check_store_schema(root)` CLI
+  helper (calls `store.ensure_store_metadata`, catches
+  `UnsupportedSchemaError`, prints a clean message, exits 1) and called it at
+  the true first-touch point of each command: in `enable`, *before*
+  `projects.register_project` (so `registry.toml` is never written against a
+  newer-schema store); in `status`, right after confirming the project
+  resolves and *before* any memory read. Verified both halves manually
+  against the reviewer's exact repro (newer-schema `store.toml`,
+  `--root`/`--cwd` overrides): `enable` now exits 1 with no `registry.toml`
+  created; `status` now exits 1 instead of printing counts. Added 2
+  regression tests: `test_enable_refuses_newer_schema_without_touching_registry`
+  and `test_status_refuses_newer_schema`.
+
+Verification run (Author, post-fix): `uv run ruff check .`, `ruff format
+--check .`, `mypy src tests`, `pytest -q` all green (69 passed, up from 67).
+`uv tool install . --force` + manual repro of both scenarios confirmed fixed.
+
+**Author's response to verdict:** another real gap, fixed as described above.
+Re-relaying for another pass.
+
+**Verdict:** changes-requested — the `store.toml` file exists now, but the
+newer-schema refusal is not consistently enforced before Phase 1 commands
+operate on the store. _(Awaiting re-review.)_

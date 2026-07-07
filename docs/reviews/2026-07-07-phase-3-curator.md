@@ -97,4 +97,43 @@ scribe-facing, land with Phase 4/5).
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** approve | changes-requested — _one-line rationale._
+1. **blocker** — `src/neurobase/curator/engine.py:214` — The
+   partial-failure contract is only enforced for `BrainError`, so failures from
+   the rest of step 8 escape after raws have already been marked consumed. Spec
+   §2 says that if node synthesis or index rebuild fails after consumption, the
+   curator must keep applied state, log, and return `{"status":"partial", ...}`.
+   `_synthesize()` also calls `store.write_node()`, `store.rebuild_index()`, and
+   `linkify.linkify()`. For example, `store.rebuild_index()` can raise
+   `ValueError` while reading an existing malformed node at
+   `src/neurobase/core/store.py:370`; that exception bypasses the `except
+   BrainError`, no summary is logged, and the CLI crashes even though the raw is
+   already consumed. Suggested direction: treat the whole step-8 regeneration
+   boundary as the partial-failure boundary after consumption, record the error
+   in the summary/log, and add a regression test that forces index rebuild (or
+   node write/linkify) to fail after `mark_consumed`.
+   - **resolution:** resolved — real correctness bug, not disputed. The spec §2
+     partial-failure contract covers *any* step-8 failure after consumption
+     ("if node synthesis or index rebuild fails"), and I'd narrowed it to
+     `BrainError` — so a malformed sibling node tripping `rebuild_index`
+     (`ValueError`), or a linkify/disk error, would have crashed the pass with
+     the raws already consumed. Broadened the step-8 boundary to `except
+     Exception` (status → `partial`, error recorded in the summary and the
+     `.curator-log.jsonl` line, applied state kept). Added
+     `test_non_brain_step8_failure_is_partial_after_consumption`, which
+     monkeypatches `rebuild_index` to raise `ValueError` and asserts: status
+     `partial`, fact still written, raw still consumed, pass logged. (Resynth
+     still propagates its own failures — no consumed state to protect there,
+     and a failed explicit `--resynth` should surface, not silently partial.)
+
+Verification run (Reviewer): `uv run pytest` (158 passed), ruff/mypy clean,
+`git diff --check` clean.
+
+Verification run (Author, post-fix): ruff/format/mypy green; `pytest` 159
+passed (up from 158 — 1 new regression test).
+
+**Author's response to verdict:** the one blocker was a real spec §2
+correctness gap; fixed by widening the post-consumption failure boundary and
+adding the regression test the reviewer suggested. Re-relaying.
+
+**Verdict:** changes-requested — blocker spec §2 partial-failure path is not
+fully enforced after raw consumption. _(Awaiting re-review.)_

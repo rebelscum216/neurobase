@@ -208,13 +208,18 @@ def curate(
     # Step 7: prune tombstones past the grace period.
     pruned = store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)
 
-    # Step 8: node synthesis + index + linkify. A failure here (after raws were
-    # consumed) is `partial`, not `error` — the node self-heals on a later pass.
+    # Step 8: node synthesis + index + linkify. Per spec §2's partial-failure
+    # contract, ANY failure here — brain error, a malformed sibling node
+    # tripping the index rebuild, a linkify/disk error — is `partial`, not a
+    # crash: raws are already consumed and the applied state stands, and the
+    # node self-heals on any later pass (it's a pure function of curated/).
     status = "ok"
+    synth_error: str | None = None
     try:
         _synthesize(root, project, brain)
-    except BrainError:
+    except Exception as exc:  # noqa: BLE001 - spec §2: keep applied state, log, return partial
         status = "partial"
+        synth_error = str(exc)
 
     summary = {
         "status": status,
@@ -225,6 +230,8 @@ def curate(
         "pruned_tombstones": len(pruned),
         "active_facts": len(store.list_curated(root, project)),
     }
+    if synth_error is not None:
+        summary["error"] = synth_error
     _log_pass(root, project, summary)
     return summary
 

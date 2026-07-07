@@ -245,6 +245,31 @@ def test_node_synthesis_failure_is_partial_but_keeps_applied_state(root: Path) -
     assert store.read_doc(raw)["consumed"] is True
 
 
+def test_non_brain_step8_failure_is_partial_after_consumption(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §2: ANY step-8 failure after raws are consumed (not just a
+    BrainError) — e.g. a malformed sibling node tripping the index rebuild — is
+    `partial`, not a crash. Applied state stands; the error is logged."""
+    raw = _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [{"slug": "fact-a", "body": "x", "from_raw": []}], "tombstones": []}
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise ValueError("malformed sibling node broke the index rebuild")
+
+    monkeypatch.setattr(engine.store, "rebuild_index", boom)
+
+    summary = engine.curate(root, "proj", FakeBrain(plan))
+    assert summary["status"] == "partial"
+    assert "error" in summary
+    # applied state kept: fact written, raw consumed — no crash.
+    assert (store.memory_dir("proj", root) / "curated" / "fact-a.md").exists()
+    assert store.read_doc(raw)["consumed"] is True
+    # the partial pass was logged.
+    trend = engine.read_fact_count_trend(root, "proj")
+    assert trend == [1]
+
+
 def test_resynth_regenerates_without_new_raw(root: Path) -> None:
     store.ensure_tree("proj", root)
     store.upsert_curated(root, "proj", "fact-a", "x")

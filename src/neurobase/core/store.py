@@ -280,6 +280,26 @@ def upsert_curated(
     return write_doc(path, frontmatter, body)
 
 
+def list_curated(root: Path, project: str, active_only: bool = True) -> list[Document]:
+    """Curated facts, sorted by slug (stable order for plan payloads + node
+    synthesis). Unparseable files are skipped, never fatal. ``active_only``
+    keeps only ``status: active`` (all files in ``curated/`` should be active —
+    tombstoned facts live in ``.tombstones/`` — but filter defensively)."""
+    curated_dir = memory_dir(project, root) / "curated"
+    if not curated_dir.exists():
+        return []
+    docs = []
+    for path in sorted(curated_dir.glob("*.md")):
+        try:
+            doc = read_doc(path)
+        except ValueError:
+            continue
+        if active_only and doc.get("status") != "active":
+            continue
+        docs.append(doc)
+    return docs
+
+
 def soft_delete_curated(root: Path, project: str, slug: str) -> Path:
     """Tombstone a curated fact: move it to ``.tombstones/``, recoverable
     until ``prune_tombstones`` hard-deletes it past the grace period."""

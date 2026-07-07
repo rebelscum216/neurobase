@@ -1,6 +1,39 @@
-node_modules/
-.claude/settings.local.json
-npm-debug.log*
+# --- OS / editor ---
 .DS_Store
+
+# --- secrets / env ---
 .env
 .env.*
+
+# --- Claude Code local settings ---
+.claude/settings.local.json
+
+# --- npm placeholder (defensive name reservation only; this is a Python project) ---
+node_modules/
+npm-debug.log*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# --- uv ---
+# (uv.lock IS committed — do not ignore it)
+
+# --- tooling caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Neurobase store artifacts (never commit memory content) ---
+# The default store lives at ~/neurobase, outside the repo. But if a store or
+# Codex inject-file ever lands inside a working tree, keep it out of git.
+AGENTS.override.md
+/neurobase/

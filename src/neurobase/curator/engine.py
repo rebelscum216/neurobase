@@ -37,6 +37,8 @@ Rules:
 - When a new observation obsoletes a fact, write the corrected fact and list the \
 replaced slug(s) in "supersedes".
 - Tombstone stale facts that nothing replaces.
+- A fact marked "pinned": true was saved by explicit user direction — NEVER \
+tombstone, supersede, or reword it; carry it forward unchanged.
 - A fact is one durable, self-contained statement — not a session log.
 - Slugs are stable kebab-case matching ^[a-z0-9-]+$.
 - Include only facts that change; omit unchanged ones.
@@ -59,8 +61,28 @@ def node_name(project: str) -> str:
     return f"{project}{NODE_SUFFIX}"
 
 
-def _facts_payload(docs: list[store.Document]) -> list[dict[str, str]]:
-    return [{"slug": str(d.get("name", d.file_path.stem)), "body": d.body.strip()} for d in docs]
+def _facts_payload(docs: list[store.Document]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for d in docs:
+        entry: dict[str, Any] = {
+            "slug": str(d.get("name", d.file_path.stem)),
+            "body": d.body.strip(),
+        }
+        if "user-directed" in (d.get("provenance") or []):
+            entry["pinned"] = True  # spec §2: explicit user save — see PLAN_SYSTEM
+        payload.append(entry)
+    return payload
+
+
+def _pinned_slugs(docs: list[store.Document]) -> set[str]:
+    """Slugs the curator must not tombstone, supersede, or reword — facts the
+    user saved by explicit direction (provenance ``user-directed``, spec §2).
+    Enforced deterministically in ``curate`` (not just via the prompt)."""
+    return {
+        str(d.get("name", d.file_path.stem))
+        for d in docs
+        if "user-directed" in (d.get("provenance") or [])
+    }
 
 
 def _safe_soft_delete(root: Path, project: str, slug: str) -> bool:
@@ -162,6 +184,7 @@ def curate(
         return summary
 
     curated = store.list_curated(root, project)
+    pinned = _pinned_slugs(curated)
     user_payload = json.dumps(
         {
             "curated_facts": _facts_payload(curated),
@@ -184,19 +207,23 @@ def curate(
     if dry_run:
         return {"status": "dry-run", "raw": len(raw_docs), "plan": plan}
 
-    # Step 4: upserts + tombstone superseded (unless re-upserted this pass).
+    # D-b guard (spec §2): user-directed facts are pinned — drop any plan step
+    # that would reword, supersede, or tombstone one, regardless of the prompt.
+    upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]
+
+    # Step 4: upserts + tombstone superseded (unless re-upserted / pinned).
     upserted, superseded_slugs = _apply_upserts(root, project, upserts)
     superseded_count = sum(
         _safe_soft_delete(root, project, slug)
         for slug in dict.fromkeys(superseded_slugs)  # dedupe, order-preserving
-        if slug not in upserted
+        if slug not in upserted and slug not in pinned
     )
 
-    # Step 5: explicit tombstones (skip any slug upserted this pass).
+    # Step 5: explicit tombstones (skip any slug upserted this pass or pinned).
     tombstone_count = 0
     for entry in tombstones:
         slug = str(entry.get("slug", "")).strip()
-        if not slug or slug in upserted:
+        if not slug or slug in upserted or slug in pinned:
             continue
         if _safe_soft_delete(root, project, slug):
             tombstone_count += 1

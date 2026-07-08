@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from neurobase.adapters.claude import recall as claude_recall
 from neurobase.adapters.codex import recall as codex_recall
+from neurobase.adapters.codex import scribe as codex_scribe
 from neurobase.cli import app
 from neurobase.core import projects, store
 
@@ -114,3 +115,35 @@ def test_codex_session_start_fails_closed(enabled: tuple[Path, Path]) -> None:
     )
     assert result.exit_code == 0
     assert result.output.strip() == ""
+
+
+def test_codex_notify_fails_closed(
+    enabled: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notify path (argv JSON + rollout discovery) also inherits the guard."""
+    root, repo = enabled
+    sessions = tmp_path / "sessions" / "2026" / "07" / "05"
+    sessions.mkdir(parents=True)
+    (sessions / "rollout-a.jsonl").write_text(
+        "\n".join(
+            json.dumps(e)
+            for e in [
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": "s1",
+                        "timestamp": "2026-07-05T23:21:06Z",
+                        "cwd": str(repo),
+                    },
+                },
+                {"type": "event_msg", "payload": {"type": "user_message", "message": "a fact"}},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_scribe, "_SESSIONS_ROOT", tmp_path / "sessions")
+    _bump_schema(root)
+    notify = json.dumps({"type": "agent-turn-complete", "thread-id": "s1", "cwd": str(repo)})
+    result = runner.invoke(app, ["hook", "codex", "notify", notify, "--root", str(root)], input="")
+    assert result.exit_code == 0
+    assert store.list_raw(root, "myrepo", unconsumed_only=False) == []

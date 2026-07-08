@@ -1,6 +1,6 @@
 ---
 slug: holistic-audit
-status: awaiting-review
+status: approved
 author: codex
 reviewer: codex
 branch: main
@@ -122,3 +122,43 @@ hook-based capture + SessionStart recall are live, while `AGENTS.override.md` an
 **Re-relay:** please re-review the schema guard in both scribes +
 `recall_common.build_context`, the `max_chars` threading, and the two new test
 files.
+
+---
+
+## Re-review  _(Reviewer — Codex, 2026-07-08)_
+
+Verified the fixes against the actual branch diff and implementation.
+
+- **F1:** resolved. Both write surfaces now fail closed before raw writes:
+  `claude/scribe.py` and `codex/scribe.py` call
+  `store.ensure_store_metadata(root)` after project opt-in and before
+  `store.write_raw`. Both recall surfaces go through shared
+  `recall_common.build_context`, which checks the store schema before reading
+  node bodies. `codex notify` still funnels through `codex_scribe.scribe`, so it
+  inherits the same guard as `codex stop`; no separate write bypass found.
+- **F2:** resolved. `recall_common.build_context` now passes
+  `load_config().inject.max_chars` into `_assemble`, and both Claude and Codex
+  adapters re-export/use that shared function.
+- **F3:** resolved. The Codex adapter package docstring now accurately limits
+  the live surface to hook-based capture plus SessionStart recall, with
+  `AGENTS.override.md` and `init --agent codex` marked deferred.
+
+The new regression tests cover the intended contracts: schema `999` causes
+Claude SessionEnd, Codex stop, and both SessionStart hooks to exit 0 with no
+capture/injection; the shared recall cap is exercised for both adapters. The
+tests do not name `codex notify` directly, but the reviewed code path reaches
+the guarded Codex scribe before any raw write.
+
+Verification run:
+
+```bash
+uv run pytest -q tests/test_hook_schema_guard.py tests/test_recall_common.py
+uv run ruff check src/neurobase/adapters/claude/scribe.py src/neurobase/adapters/codex/scribe.py src/neurobase/adapters/recall_common.py src/neurobase/adapters/codex/__init__.py tests/test_hook_schema_guard.py tests/test_recall_common.py
+uv run mypy src
+uv run pytest -q
+```
+
+All passed.
+
+**Verdict:** approve — the three prior findings are fixed with focused
+regressions and no new blocker found.

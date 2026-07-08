@@ -145,8 +145,30 @@ lands.
   ever created/replaced/removed, so every other key and hook is preserved, and
   a malformed settings.json is refused rather than clobbered. 207 tests.
   **Still deferred** (needs the user's real Claude config + live sessions): the
-  in-vivo session-A→session-B demo of the installed hooks. **Next: that live
-  demo, then Phase 5** (Codex adapter → cross-agent MVP).
+  in-vivo session-A→session-B demo of the installed hooks.
+- **Phase 5 (core) — Codex adapter → ★ cross-agent MVP: done (code + tests).**
+  `adapters/codex/scribe.py` (spec §5): rollout JSONL parse (§11.2 fixture —
+  `session_meta`/`user_message`/`agent_message`; `response_item`/`turn_context`/
+  token channels ignored), VS Code IDE-wrapper split (`## My request for Codex:`
+  → prompt kept; preceding block kept once as a ≤800-char `## Files in focus
+  (IDE)` section), consecutive-duplicate-prompt skip (thread_rolled_back),
+  D13 redaction, opt-in, empty-skip, and the **per-turn overwrite trick** —
+  `captured_at = session-start timestamp` so every turn resolves to one raw
+  file, last-turn-wins (falls back to a fresh filename if the raw was already
+  consumed mid-session). `discover_rollout` (newest `rollout-*.jsonl` by mtime +
+  session-id cross-check) for the `notify` path that carries no rollout path
+  (§11.4). Injection is agent-agnostic and now lives in
+  `adapters/recall_common.py` (extracted from the Claude adapter, both re-export
+  it) — Codex `SessionStart` output reaches the model identically (ADR-0005).
+  Live `neurobase hook codex session-start|stop|notify` (stdin JSON for
+  stop/start, argv JSON for notify; **always exits 0**). The MVP "Done when" is
+  covered by `tests/test_cross_agent.py` (a Claude raw + a Codex raw fold into
+  one fact set → **both** next-sessions recall the node) and the codex `stop`
+  capture is verified live through the installed shim. 228 tests. **Deferred to
+  Phase 5-init** (installer): `init --agent codex` (hooks.json + the
+  `[projects."<repo>"] hooks=".codex/hooks.json"` + `trust_level` config keys,
+  CamelCase events, notify fallback — spec §7). **Next: `init --agent codex`,
+  then the live cross-agent demo** (needs the user's real Codex config).
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a

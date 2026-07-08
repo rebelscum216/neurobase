@@ -19,6 +19,8 @@ import typer
 from neurobase import __version__
 from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.claude import recall, scribe
+from neurobase.adapters.codex import recall as codex_recall
+from neurobase.adapters.codex import scribe as codex_scribe
 from neurobase.brain import resolve_brain
 from neurobase.core import backups, projects, store
 from neurobase.core.config import load_config
@@ -337,7 +339,60 @@ def _hook_claude_session_start(
     recall.spawn_curate_if_stale(resolved_root, resolved_cwd)
 
 
-_HOOK_FLAGS = ("--transcript", "--cwd", "--root", "--reason")
+def _hook_codex_session_start(
+    payload: dict[str, object], cwd: str | None, root: str | None
+) -> None:
+    """Codex SessionStart inject — identical to Claude's (ADR-0005)."""
+    resolved_root = store.resolve_root(root)
+    resolved_cwd = Path(cwd or str(payload.get("cwd") or ".")).expanduser()
+    output = codex_recall.emit(resolved_root, resolved_cwd)
+    if output:
+        typer.echo(output)
+    codex_recall.spawn_curate_if_stale(resolved_root, resolved_cwd)
+
+
+def _hook_codex_stop(
+    payload: dict[str, object], rollout: str | None, cwd: str | None, root: str | None
+) -> None:
+    """Codex per-turn capture (spec §5). The rollout path arrives as the hook
+    payload's ``transcript_path`` (or ``--rollout`` for testing); if absent, it
+    is discovered by mtime + session-id cross-check."""
+    resolved_root = store.resolve_root(root)
+    resolved_cwd = cwd or str(payload.get("cwd") or "")
+    session_id = str(payload.get("session_id") or "")
+    rollout_path = rollout or payload.get("transcript_path")
+    resolved_rollout = (
+        Path(str(rollout_path))
+        if rollout_path
+        else codex_scribe.discover_rollout(session_id=session_id or None)
+    )
+    if resolved_rollout is None:
+        return
+    codex_scribe.scribe(
+        resolved_root,
+        rollout_path=resolved_rollout,
+        cwd=resolved_cwd,
+        session_id=session_id,
+    )
+
+
+def _hook_codex_notify(argv_payload: dict[str, object], root: str | None) -> None:
+    """Codex ``notify`` fallback (spec §5/§11.4): payload is argv JSON with no
+    rollout path, so the rollout is always discovered (session id = thread id)."""
+    resolved_root = store.resolve_root(root)
+    session_id = str(argv_payload.get("thread-id") or "")
+    resolved_rollout = codex_scribe.discover_rollout(session_id=session_id or None)
+    if resolved_rollout is None:
+        return
+    codex_scribe.scribe(
+        resolved_root,
+        rollout_path=resolved_rollout,
+        cwd=str(argv_payload.get("cwd") or ""),
+        session_id=session_id,
+    )
+
+
+_HOOK_FLAGS = ("--transcript", "--rollout", "--cwd", "--root", "--reason")
 
 
 def _parse_hook_args(args: list[str]) -> tuple[str | None, str | None, dict[str, str]]:
@@ -368,6 +423,19 @@ def _parse_hook_args(args: list[str]) -> tuple[str | None, str | None, dict[str,
     return agent, event, opts
 
 
+def _argv_json_payload(args: list[str]) -> dict[str, object]:
+    """Codex ``notify`` delivers its JSON as argv (§11.4), not stdin. Return the
+    first ``{``-prefixed arg that parses as a JSON object, else ``{}``."""
+    for tok in args:
+        if tok.startswith("{"):
+            try:
+                data = json.loads(tok)
+            except ValueError:
+                return {}
+            return data if isinstance(data, dict) else {}
+    return {}
+
+
 def run_hook(args: list[str]) -> None:
     """Dispatch a hook invocation. Spec §4/§5: **always returns cleanly** —
     never raises, never exits non-zero, never wedges an agent's session start
@@ -385,7 +453,13 @@ def run_hook(args: list[str]) -> None:
             )
         elif agent == "claude" and event == "session-start":
             _hook_claude_session_start(payload, opts.get("cwd"), opts.get("root"))
-        # codex (Phase 5) and any unknown agent/event: no-op.
+        elif agent == "codex" and event == "session-start":
+            _hook_codex_session_start(payload, opts.get("cwd"), opts.get("root"))
+        elif agent == "codex" and event == "stop":
+            _hook_codex_stop(payload, opts.get("rollout"), opts.get("cwd"), opts.get("root"))
+        elif agent == "codex" and event == "notify":
+            _hook_codex_notify(_argv_json_payload(args), opts.get("root"))
+        # any unknown agent/event: no-op.
     except Exception:  # noqa: BLE001 - fail-safe: never wedge teardown
         pass
 

@@ -277,44 +277,70 @@ def _init_guided(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bo
 
 def _init_claude(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bool) -> None:
     config = load_config()
-    path = claude_install.settings_path(user=user, cwd=resolved_cwd)
+    shim = claude_install.shim_path()
+    writes: list[_PendingWrite] = []
 
+    # Hooks — user or project scope per --user.
+    hooks_path = claude_install.settings_path(user=user, cwd=resolved_cwd)
     try:
-        existing = claude_install.load_settings(path)
+        existing = claude_install.load_settings(hooks_path)
     except claude_install.SettingsParseError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
-
-    shim = claude_install.shim_path()
     new_settings = claude_install.build_settings(existing, shim, config.inject.sources)
+    h_before = claude_install.render(existing) if hooks_path.exists() else ""
+    h_after = claude_install.render(new_settings)
+    if h_before != h_after:
+        writes.append(
+            (hooks_path, h_before, h_after, lambda: claude_install.write_settings(hooks_path, new_settings))
+        )
 
-    before = claude_install.render(existing) if path.exists() else ""
-    after = claude_install.render(new_settings)
-    if before == after:
-        typer.echo(f"Claude hooks already up to date in {path}.")
+    # MCP server — always user scope (~/.claude.json), spec §13 / decision D-d.
+    mcp_path = claude_install.mcp_config_path()
+    try:
+        mcp_existing = claude_install.load_mcp_config(mcp_path)
+    except claude_install.SettingsParseError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    mcp_new = claude_install.build_mcp_config(mcp_existing, shim)
+    m_before = claude_install.render(mcp_existing) if mcp_path.exists() else ""
+    m_after = claude_install.render(mcp_new)
+    if m_before != m_after:
+        writes.append(
+            (mcp_path, m_before, m_after, lambda: claude_install.write_settings(mcp_path, mcp_new))
+        )
+
+    if not writes:
+        typer.echo("Claude hooks and MCP server already up to date.")
         return
 
-    typer.echo(_unified_diff(before, after, path))
+    for path, before, after, _writer in writes:
+        typer.echo(_unified_diff(before, after, path))
 
-    if not yes and not typer.confirm(f"Apply these changes to {path}?"):
+    target_desc = ", ".join(str(p) for p, *_rest in writes)
+    if not yes and not typer.confirm(f"Apply these changes to {target_desc}?"):
         typer.echo("Aborted — no changes made.")
         return
 
-    backup_dir = backups.backup_files(resolved_root, [path])
+    backup_dir = backups.backup_files(resolved_root, [p for p, *_rest in writes])
     if backup_dir is not None:
-        typer.echo(f"Backed up {path} to {backup_dir}")
-    claude_install.write_settings(path, new_settings)
+        typer.echo(f"Backed up existing config to {backup_dir}")
+    for _path, _before, _after, writer in writes:
+        writer()
     typer.secho(
-        f"Installed Claude hooks in {path}. Takes effect next session.",
+        "Installed Claude hooks + MCP server. Takes effect next session.",
         fg=typer.colors.GREEN,
     )
     typer.echo("Run `neurobase enable` in each repo you want captured (opt-in).")
 
 
 def _init_codex(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bool) -> None:
-    """Install Codex hooks (spec §7). Writes a ``hooks.json`` and, for project
-    scope, surgically registers the project in ``~/.codex/config.toml`` so the
-    hook is discovered and trusted."""
+    """Install Codex hooks (spec §7) + register the MCP server (spec §13).
+
+    Writes a ``hooks.json`` and edits ``~/.codex/config.toml``: for project
+    scope, the ``[projects.*]`` trust/discovery table; and — always, user-scope —
+    the ``[mcp_servers.neurobase]`` table so ``neurobase mcp serve`` is available.
+    """
     project_root = resolved_cwd if user else projects.git_common_root(resolved_cwd) or resolved_cwd
     hooks_path = codex_install.hooks_json_path(user=user, cwd=project_root)
     try:
@@ -329,24 +355,23 @@ def _init_codex(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: boo
     hooks_after = codex_install.render_hooks(new_hooks)
     hooks_changed = hooks_before != hooks_after
 
-    # config.toml is edited only for project scope (user hooks.json is
-    # auto-discovered and needs no [projects.*] table).
+    # config.toml carries the project trust/discovery table (project scope only)
+    # and the MCP server table (always — user-scope registration, spec §13).
     cfg_path = codex_install.config_path()
     project_key = str(project_root)
-    cfg_before = ""
-    cfg_after = ""
-    cfg_changed = False
-    if not user:
-        try:
-            cfg_before = codex_install.load_config_text(cfg_path)
-            cfg_after = codex_install.merge_config(cfg_before, project_key)
-        except codex_install.ConfigParseError as exc:
-            typer.secho(str(exc), fg=typer.colors.RED, err=True)
-            raise typer.Exit(code=1) from exc
-        cfg_changed = cfg_before != cfg_after
+    try:
+        cfg_before = codex_install.load_config_text(cfg_path)
+        cfg_after = cfg_before
+        if not user:
+            cfg_after = codex_install.merge_config(cfg_after, project_key)
+        cfg_after = codex_install.merge_mcp_config(cfg_after, shim)
+    except codex_install.ConfigParseError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    cfg_changed = cfg_before != cfg_after
 
     if not hooks_changed and not cfg_changed:
-        typer.echo("Codex hooks already up to date.")
+        typer.echo("Codex hooks and MCP server already up to date.")
         return
 
     if hooks_changed:
@@ -354,7 +379,7 @@ def _init_codex(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: boo
     if cfg_changed:
         typer.echo(_unified_diff(cfg_before, cfg_after, cfg_path))
 
-    targets = [hooks_path] + ([cfg_path] if not user else [])
+    targets = ([hooks_path] if hooks_changed else []) + ([cfg_path] if cfg_changed else [])
     target_desc = ", ".join(str(t) for t in targets)
     if not yes and not typer.confirm(f"Apply these changes to {target_desc}?"):
         typer.echo("Aborted — no changes made.")
@@ -369,15 +394,16 @@ def _init_codex(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: boo
         codex_install.write_config(cfg_path, cfg_after)
 
     typer.secho(
-        f"Installed Codex hooks in {hooks_path}. Takes effect next session.",
+        "Installed Codex hooks + MCP server. Takes effect next session.",
         fg=typer.colors.GREEN,
     )
-    typer.secho(
-        "IMPORTANT — approve the hook in Codex before it takes effect: editing "
-        "hooks.json invalidates its trust hash, so Codex re-prompts to approve "
-        "the hook on next launch. It will not fire until you approve it there.",
-        fg=typer.colors.YELLOW,
-    )
+    if hooks_changed:
+        typer.secho(
+            "IMPORTANT — approve the hook in Codex before it takes effect: editing "
+            "hooks.json invalidates its trust hash, so Codex re-prompts to approve "
+            "the hook on next launch. It will not fire until you approve it there.",
+            fg=typer.colors.YELLOW,
+        )
     typer.echo("Run `neurobase enable` in each repo you want captured (opt-in).")
 
 
@@ -488,16 +514,32 @@ def uninstall(
 
 
 def _uninstall_claude(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
+    writes: list[_PendingWrite] = []
+
     path = claude_install.settings_path(user=user, cwd=resolved_cwd)
-    if not path.exists():
-        return []
-    existing = claude_install.load_settings(path)
-    new_settings = claude_install.remove_owned_settings(existing)
-    before = claude_install.render(existing)
-    after = claude_install.render(new_settings)
-    if before == after:
-        return []
-    return [(path, before, after, lambda: claude_install.write_settings(path, new_settings))]
+    if path.exists():
+        existing = claude_install.load_settings(path)
+        new_settings = claude_install.remove_owned_settings(existing)
+        before = claude_install.render(existing)
+        after = claude_install.render(new_settings)
+        if before != after:
+            writes.append(
+                (path, before, after, lambda: claude_install.write_settings(path, new_settings))
+            )
+
+    # MCP registration is user-scope (~/.claude.json), removed regardless of the
+    # hook scope being uninstalled.
+    mcp_path = claude_install.mcp_config_path()
+    if mcp_path.exists():
+        mcp_existing = claude_install.load_mcp_config(mcp_path)
+        mcp_new = claude_install.remove_mcp_config(mcp_existing)
+        mcp_before = claude_install.render(mcp_existing)
+        mcp_after = claude_install.render(mcp_new)
+        if mcp_before != mcp_after:
+            writes.append(
+                (mcp_path, mcp_before, mcp_after, lambda: claude_install.write_settings(mcp_path, mcp_new))
+            )
+    return writes
 
 
 def _uninstall_codex(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
@@ -520,20 +562,24 @@ def _uninstall_codex(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
                 )
             )
 
-    if not user:
-        cfg_path = codex_install.config_path()
-        if cfg_path.exists():
-            cfg_before = codex_install.load_config_text(cfg_path)
-            cfg_after = codex_install.remove_project_hooks_config(cfg_before, str(project_root))
-            if cfg_before != cfg_after:
-                writes.append(
-                    (
-                        cfg_path,
-                        cfg_before,
-                        cfg_after,
-                        lambda: codex_install.write_config(cfg_path, cfg_after),
-                    )
+    # config.toml: drop the project hooks table (project scope) and the MCP
+    # server table (always — it's user-scope).
+    cfg_path = codex_install.config_path()
+    if cfg_path.exists():
+        cfg_before = codex_install.load_config_text(cfg_path)
+        cfg_after = cfg_before
+        if not user:
+            cfg_after = codex_install.remove_project_hooks_config(cfg_after, str(project_root))
+        cfg_after = codex_install.remove_mcp_config(cfg_after)
+        if cfg_before != cfg_after:
+            writes.append(
+                (
+                    cfg_path,
+                    cfg_before,
+                    cfg_after,
+                    lambda text=cfg_after: codex_install.write_config(cfg_path, text),
                 )
+            )
     return writes
 
 

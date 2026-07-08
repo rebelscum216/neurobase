@@ -182,12 +182,15 @@ def build_server(
         text = fact.strip()
         if not text:
             raise ValueError("fact must not be empty")
+        # A resolved project must be a valid slug. An invalid *explicit* project
+        # is not resolvable — fold it into the documented no-project hard error
+        # (§13) rather than letting store.ensure_tree raise InvalidSlugError.
         target = project or current_project
-        if target is None:
+        if target is None or not _SLUG_RE.match(target):
             available = ", ".join(sorted(_safe_registry(root))) or "none"
             raise ValueError(
-                "no project resolved for this save — pass project= "
-                f"(available: {available})"
+                "no valid project resolved for this save — pass a registered "
+                f"project= (available: {available})"
             )
         store.ensure_tree(target, root)
         body = redact.redact(text, config.redact.extra_patterns)

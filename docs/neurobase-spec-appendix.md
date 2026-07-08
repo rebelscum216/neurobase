@@ -124,7 +124,8 @@ _<N> active curated facts._
 1. `ensure_tree`; load unconsumed raw. **None ⇒ no-op** (return
    `{"status":"noop", …}`) — idempotence.
 2. Load active curated facts. Call brain `plan_json` with the plan prompt (§2.1),
-   user payload = `{"curated_facts":[{slug,body}…], "raw_captures":[{raw:<filename>, body}…]}`.
+   user payload = `{"curated_facts":[{slug,body,pinned?}…], "raw_captures":[{raw:<filename>, body}…]}`
+   — `pinned: true` is set for user-directed facts (see **Pinned facts** below).
 3. **If the response is unparseable ⇒ ABORT the pass, leave every raw
    unconsumed, return `{"status":"error", …}`.** A transient bad LLM response
    must never silently drop observations. (Distinguish parse-failure from a
@@ -132,8 +133,8 @@ _<N> active curated facts._
 4. Apply upserts: skip empty slug/body; `supersedes` filtered of self;
    `provenance = ["raw/"+name for name in from_raw]`; bad slug ⇒ skip + warn.
    For each superseded slug: tombstone it **unless that slug was itself
-   re-upserted this pass**.
-5. Apply explicit tombstones (skip any slug upserted this pass).
+   re-upserted this pass, or is pinned**.
+5. Apply explicit tombstones (skip any slug upserted this pass **or pinned**).
 6. Mark all consumed raws `consumed: true`.
 7. `prune_tombstones(14)`.
 8. Regenerate node: brain `text` with node prompt (§2.2) over the resulting
@@ -141,6 +142,17 @@ _<N> active curated facts._
    slug + `-status`). Rebuild `index.md`. Run linkify (§6).
 9. Return summary: `{status, raw, upserts, superseded, tombstones,
    pruned_tombstones, active_facts}`.
+
+**Pinned facts (user-directed, decision D-b):** a curated fact whose
+`provenance` includes `user-directed` — written by the MCP `memory_remember`
+tool (§13) — is *pinned*. The plan payload marks it `"pinned": true`, and the
+plan prompt (§2.1) MUST tell the curator never to tombstone, supersede, or
+reword a pinned fact. This is **also enforced deterministically** in the apply
+pipeline: pinned slugs are dropped from upserts, from supersession tombstones,
+and from explicit tombstones regardless of what the plan says — so an explicit
+user "remember this" cannot silently vanish on a later pass. A pinned fact
+leaves the store only when the user removes it. (A linkify lineage footer, §6,
+may still be appended — that is not a content edit.)
 
 **Partial-failure contract:** only the *plan* step aborts the pass (step 3). If
 node synthesis or index rebuild fails *after* raws were consumed (steps 6→8),
@@ -165,7 +177,9 @@ slug) over near-duplicates; when an observation obsoletes a fact, write the
 corrected fact and list replaced slug(s) in `supersedes`; tombstone stale facts
 not replaced by anything; a fact is one durable self-contained statement, not a
 session log; slugs are stable kebab-case; **include only facts that change,
-omit unchanged ones**. Response MUST be only JSON:
+omit unchanged ones**; **never tombstone, supersede, or reword a fact marked
+`"pinned": true`** (user-directed — carry it forward unchanged). Response MUST
+be only JSON:
 
 ```json
 {
@@ -562,3 +576,59 @@ No rollout/transcript path is present — §5's rollout-discovery algorithm
 (newest `rollout-*.jsonl` by mtime, cross-checked against
 `session_meta.session_id`/`id`) is **required**, not a fallback for an edge
 case, whenever `notify` is the active wiring.
+
+## 13. MCP server contract (`mcp/`, Phase 7)
+
+`neurobase mcp serve` runs a **stdio** MCP server (official `mcp` SDK,
+exact-pinned) named `neurobase`, exposing memory to any MCP client. The tool
+baseline is **universal** (must work on a tools-only client such as Codex);
+resources + the recall prompt are **Claude-only sugar**, gated off by default.
+
+### Invariants
+
+- **`resources/list` MUST always answer with a valid array and MUST NOT error**
+  — in every configuration (dual-exposure off, on-with-no-nodes, on-with-nodes,
+  or no store at all). Codex probes it at startup and drops the whole server on
+  an error. The node scan is wrapped so any failure registers zero resources.
+- Every tool is **fail-soft**: a missing store, bad slug, or unreadable file
+  yields an empty/structured result, never an unhandled exception. The only
+  hard error is `memory_remember` with empty input or no resolvable project.
+- Read tools default to **all projects** when `project` is omitted (decision
+  D-c — the server can't trust a single session cwd for reads). The write tool
+  resolves a project from the process launch cwd, else an explicit `project`.
+
+### Tools (universal baseline)
+
+| Tool | Input | Returns | Empty/error rule |
+|---|---|---|---|
+| `memory_search` | `query: str`, `project?: str` | list of `{project, name, kind, score, snippet}` | no hits / empty query ⇒ `[]` |
+| `memory_read_node` | `project: str`, `name: str` | `{found, project, name, body?}` | missing/bad slug ⇒ `{found: false}` |
+| `memory_list_projects` | — | list of `{project, curated_count, node_count}` | no store ⇒ `[]` |
+| `memory_remember` | `fact: str`, `project?: str` | `{project, slug, path}` | empty fact / no project ⇒ error |
+| `recommendations_list` | `project?: str` | list of proposal summaries | no `<root>/proposals/` ⇒ `[]` |
+
+- `memory_search` — grep + term-frequency over curated facts + status nodes
+  (decision D-a; ranking lives in `core/search.py`, reusable). Slug/name matches
+  weighted over body; a BM25/FTS index is backlog.
+- `memory_remember` — an **explicit, user-directed save**. Redact (§10 / D13)
+  **before** writing; slug derived from the fact's first line, de-duplicated so
+  a save never clobbers an unrelated fact; written to `curated/` with provenance
+  `user-directed` → **pinned** against the curator (§2). This is the only write
+  path the server exposes.
+- `recommendations_list` — a thin read-path over the Phase 8 proposals dir;
+  returns `[]` until Phase 8 populates it. The server does **not** mine or rank.
+
+### Resources + prompt (Claude sugar, opt-in)
+
+Gated behind `[mcp] expose_resources` (default **false**, decision D-d). When
+on, each status node is exposed as a resource at `neurobase://node/<project>/
+<name>` (`text/markdown`), and a `recall` prompt returns the recalled status
+node(s) for the launch cwd's project (reusing the §3 recall assembly). When off,
+no resources and no prompt are registered — and `resources/list` is still `[]`.
+
+### Registration (`init`)
+
+`init` offers to register the server with each detected agent (`claude mcp add`
+/ `codex mcp add`) under the **same consent → diff → backup** flow as the hook
+installers (§7). `doctor` checks the server is registered and startable per
+agent; `uninstall` removes any registration it added.

@@ -425,3 +425,102 @@ def write_config(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
+
+
+# --- MCP server registration (Phase 7, spec §13) ----------------------------
+# Codex stores MCP servers in ``~/.codex/config.toml`` as ``[mcp_servers.<name>]``
+# (the shape ``codex mcp add`` writes). Registration is user-scope. The server
+# name ``neurobase`` is reserved to us; we own that whole table and preserve
+# everything else in the file. Reuses this module's TOML surgery helpers.
+
+MCP_SERVER_NAME = "neurobase"
+_MCP_TABLE_PATH = ["mcp_servers", MCP_SERVER_NAME]
+
+
+def _mcp_desired_lines(shim: str) -> list[str]:
+    return [
+        f"[mcp_servers.{MCP_SERVER_NAME}]",
+        f"command = {_toml_basic_string(shim)}",
+        'args = ["mcp", "serve"]',
+    ]
+
+
+def _remove_mcp_table(text: str) -> str:
+    """Drop the ``[mcp_servers.neurobase]`` table (header + body up to the next
+    header/EOF), plus one blank separator line above it if present."""
+    lines = text.split("\n")
+    header_idx = _find_table_header(lines, _MCP_TABLE_PATH)
+    if header_idx is None:
+        return text
+    end = len(lines)
+    for j in range(header_idx + 1, len(lines)):
+        if _ANY_HEADER_RE.match(lines[j]):
+            end = j
+            break
+    start = header_idx
+    if start > 0 and lines[start - 1].strip() == "":
+        start -= 1  # tidy the blank line we inserted before the table
+    del lines[start:end]
+    return "\n".join(lines)
+
+
+def merge_mcp_config(existing_text: str, shim: str) -> str:
+    """Ensure ``[mcp_servers.neurobase]`` maps to our stdio command, preserving
+    all other content. Idempotent (returns input verbatim when already correct);
+    the result is re-parsed and re-checked, so a bad edit raises rather than
+    being written. Rewrites the table wholesale (remove + append canonical)."""
+    parsed = _parse_toml(existing_text)
+    servers = parsed.get("mcp_servers")
+    entry = servers.get(MCP_SERVER_NAME) if isinstance(servers, dict) else None
+    if (
+        isinstance(entry, dict)
+        and entry.get("command") == shim
+        and entry.get("args") == ["mcp", "serve"]
+    ):
+        return existing_text
+
+    text = _remove_mcp_table(existing_text)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if text and not text.endswith("\n\n"):
+        text += "\n"  # blank line before the new table
+    new_text = text + "\n".join(_mcp_desired_lines(shim)) + "\n"
+
+    check = _parse_toml(new_text)  # never emit unparseable TOML
+    got = check.get("mcp_servers", {})
+    got = got.get(MCP_SERVER_NAME, {}) if isinstance(got, dict) else {}
+    if not (
+        isinstance(got, dict)
+        and got.get("command") == shim
+        and got.get("args") == ["mcp", "serve"]
+    ):
+        raise ConfigParseError("surgical mcp config edit did not produce the expected keys")
+    return new_text
+
+
+def remove_mcp_config(existing_text: str) -> str:
+    """Remove the ``[mcp_servers.neurobase]`` table. No-op if absent."""
+    parsed = _parse_toml(existing_text)
+    servers = parsed.get("mcp_servers")
+    if not (isinstance(servers, dict) and MCP_SERVER_NAME in servers):
+        return existing_text
+    new_text = _remove_mcp_table(existing_text)
+    check = _parse_toml(new_text)
+    servers_out = check.get("mcp_servers", {})
+    if isinstance(servers_out, dict) and MCP_SERVER_NAME in servers_out:
+        raise ConfigParseError("surgical mcp config edit did not remove the table")
+    return new_text
+
+
+def is_mcp_registered(existing_text: str, shim: str | None = None) -> bool:
+    """Whether ``[mcp_servers.neurobase]`` is present (and, if ``shim`` given,
+    maps to that command). Used by ``doctor``. Tolerant of unparseable text."""
+    try:
+        parsed = _parse_toml(existing_text)
+    except ConfigParseError:
+        return False
+    servers = parsed.get("mcp_servers")
+    entry = servers.get(MCP_SERVER_NAME) if isinstance(servers, dict) else None
+    if not isinstance(entry, dict):
+        return False
+    return shim is None or entry.get("command") == shim

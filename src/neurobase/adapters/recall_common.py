@@ -16,7 +16,10 @@ import sys
 from pathlib import Path
 
 from neurobase.core import projects, store
+from neurobase.core.config import load_config
 
+# Fallback cap when config can't be read; the real cap is [inject].max_chars
+# (spec §8/§10 — 6000 default, config-overridable).
 MAX_CONTEXT_CHARS = 6000
 
 HEADER = (
@@ -70,11 +73,20 @@ def build_context(root: Path, cwd: Path) -> str | None:
     project = projects.resolve_project(root, cwd)
     if project is None:
         return None
+    # D11: refuse to read from a store whose schema is newer than we support —
+    # the hook fails closed (inject nothing), never operates on an incompatible
+    # store (spec §10). Reached only for an established project, so store.toml
+    # exists; a newer schema raises and we emit nothing.
+    try:
+        store.ensure_store_metadata(root)
+    except store.UnsupportedSchemaError:
+        return None
     bodies = _node_bodies(root, project)
     if not bodies:
         return None
+    cap = load_config().inject.max_chars  # spec §10: config-overridable
     header = HEADER.format(memory_dir=store.memory_dir(project, root))
-    return _assemble(header, bodies)
+    return _assemble(header, bodies, cap)
 
 
 def emit(root: Path, cwd: Path) -> str | None:

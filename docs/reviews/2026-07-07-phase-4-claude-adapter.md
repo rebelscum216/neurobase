@@ -1,6 +1,6 @@
 ---
 slug: phase-4-claude-adapter
-status: changes-requested
+status: approved
 author: claude
 reviewer: codex
 branch: phase-4-claude-adapter
@@ -146,3 +146,43 @@ argv you reproduced. Re-relaying.
 **Verdict:** changes-requested — one blocking fail-safe violation remains in the
 hook CLI entry path; the focused suite, full `pytest`, `ruff check`, `ruff
 format --check`, and `mypy src tests` otherwise pass. _(Awaiting re-review.)_
+
+### Re-review
+
+No new findings.
+
+Verified the prior blocker is resolved in the actual code, not just in the
+resolution note:
+
+- `src/neurobase/cli/__init__.py` now exposes `main()` as the console entry
+  point and routes `neurobase hook ...` through `run_hook(sys.argv[2:])`
+  before Typer can parse argv.
+- `run_hook()` uses `_parse_hook_args()` and swallows all exceptions, so extra
+  positionals, unknown flags, and value-less known flags do not produce Click/
+  Typer usage exits.
+- Reproduced the original bad argv cases through `CliRunner(app, ...)`:
+  `["hook", "claude", "session-start", "extra"]`,
+  `["hook", "claude", "session-start", "--root"]`, and
+  `["hook", "totally", "bogus", "args"]` all returned exit code 0.
+- Reproduced the same cases through the installed-style console path with
+  `UV_CACHE_DIR=.uv-cache uv run neurobase hook ...`; all returned exit code 0.
+  A first attempt without `UV_CACHE_DIR` failed before Neurobase started because
+  uv could not access the sandboxed `~/.cache/uv`, so that was not counted as a
+  hook result.
+
+Fresh pass notes: the Claude scribe and recall code matches the Phase 4 spec
+surface I checked: transcript parsing, sidechain/tool-result/noise skips,
+redaction-before-write, opt-in/empty-capture behavior, node-only recall,
+alphabetical node assembly, 6000-char cap semantics, detached best-effort
+curation spawn, and fail-safe hook behavior. I did not find a correctness,
+security, or spec-adherence issue.
+
+Verification run (Reviewer, re-review): `uv run pytest` (187 passed),
+`uv run pytest tests/test_cli_hook.py tests/test_claude_scribe.py
+tests/test_claude_recall.py` (28 passed), `uv run ruff check .`,
+`UV_CACHE_DIR=.uv-cache uv run ruff format --check .`, and
+`uv run mypy src tests`.
+
+**Verdict:** approve — the prior hook parse-time fail-safe blocker is fixed,
+and the Phase 4 Claude adapter diff is ready to merge with only the already
+declared follow-up work deferred.

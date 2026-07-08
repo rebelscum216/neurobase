@@ -124,7 +124,8 @@ _<N> active curated facts._
 1. `ensure_tree`; load unconsumed raw. **None ⇒ no-op** (return
    `{"status":"noop", …}`) — idempotence.
 2. Load active curated facts. Call brain `plan_json` with the plan prompt (§2.1),
-   user payload = `{"curated_facts":[{slug,body}…], "raw_captures":[{raw:<filename>, body}…]}`.
+   user payload = `{"curated_facts":[{slug,body,pinned?}…], "raw_captures":[{raw:<filename>, body}…]}`
+   — `pinned: true` is set for user-directed facts (see **Pinned facts** below).
 3. **If the response is unparseable ⇒ ABORT the pass, leave every raw
    unconsumed, return `{"status":"error", …}`.** A transient bad LLM response
    must never silently drop observations. (Distinguish parse-failure from a
@@ -132,8 +133,8 @@ _<N> active curated facts._
 4. Apply upserts: skip empty slug/body; `supersedes` filtered of self;
    `provenance = ["raw/"+name for name in from_raw]`; bad slug ⇒ skip + warn.
    For each superseded slug: tombstone it **unless that slug was itself
-   re-upserted this pass**.
-5. Apply explicit tombstones (skip any slug upserted this pass).
+   re-upserted this pass, or is pinned**.
+5. Apply explicit tombstones (skip any slug upserted this pass **or pinned**).
 6. Mark all consumed raws `consumed: true`.
 7. `prune_tombstones(14)`.
 8. Regenerate node: brain `text` with node prompt (§2.2) over the resulting
@@ -141,6 +142,17 @@ _<N> active curated facts._
    slug + `-status`). Rebuild `index.md`. Run linkify (§6).
 9. Return summary: `{status, raw, upserts, superseded, tombstones,
    pruned_tombstones, active_facts}`.
+
+**Pinned facts (user-directed, decision D-b):** a curated fact whose
+`provenance` includes `user-directed` — written by the MCP `memory_remember`
+tool (§13) — is *pinned*. The plan payload marks it `"pinned": true`, and the
+plan prompt (§2.1) MUST tell the curator never to tombstone, supersede, or
+reword a pinned fact. This is **also enforced deterministically** in the apply
+pipeline: pinned slugs are dropped from upserts, from supersession tombstones,
+and from explicit tombstones regardless of what the plan says — so an explicit
+user "remember this" cannot silently vanish on a later pass. A pinned fact
+leaves the store only when the user removes it. (A linkify lineage footer, §6,
+may still be appended — that is not a content edit.)
 
 **Partial-failure contract:** only the *plan* step aborts the pass (step 3). If
 node synthesis or index rebuild fails *after* raws were consumed (steps 6→8),
@@ -165,7 +177,9 @@ slug) over near-duplicates; when an observation obsoletes a fact, write the
 corrected fact and list replaced slug(s) in `supersedes`; tombstone stale facts
 not replaced by anything; a fact is one durable self-contained statement, not a
 session log; slugs are stable kebab-case; **include only facts that change,
-omit unchanged ones**. Response MUST be only JSON:
+omit unchanged ones**; **never tombstone, supersede, or reword a fact marked
+`"pinned": true`** (user-directed — carry it forward unchanged). Response MUST
+be only JSON:
 
 ```json
 {
@@ -562,3 +576,250 @@ No rollout/transcript path is present — §5's rollout-discovery algorithm
 (newest `rollout-*.jsonl` by mtime, cross-checked against
 `session_meta.session_id`/`id`) is **required**, not a fallback for an edge
 case, whenever `notify` is the active wiring.
+
+## 12. Recommender contract (Phase 8)
+
+The recommender mines the local cross-session, cross-agent corpus for recurring
+patterns and proposes promotions into standard agent artifacts. It is
+human-in-the-loop by contract: it MUST propose, never silently install,
+activate, deactivate, or edit agent behavior.
+
+### Proposal store
+
+Proposals live at:
+
+```text
+<root>/proposals/<slug>.md
+```
+
+Every proposal file uses the same YAML frontmatter + markdown body format as
+§1. Writes MUST be atomic. Unparseable proposal files MUST be skipped, not fatal
+to listing, MCP reads, UI reads, or future mining passes.
+
+Frontmatter fields:
+
+```yaml
+schema: 1
+slug: <proposal-slug>
+status: proposed        # proposed | accepted | rejected | superseded
+type: skill             # skill | rule
+target: project         # project | user
+enabled: false
+projects: []            # project slugs that contributed evidence
+agents: []              # claude | codex | ...
+score: 0.0
+score_parts:
+  recurrence: 0
+  sessions: 0
+  agents: 0
+  projects: 0
+  recency: 0.0
+evidence: []            # "project:curated/<slug>" or "project:raw/<filename>"
+candidate_hash: <stable-content-hash>
+created_at: <ISO8601>
+updated_at: <ISO8601>
+accepted_at: null
+rejected_at: null
+rejection_reason: null
+emitted_path: null
+disabled_path: null
+supersedes: []
+```
+
+Rules:
+
+- `slug` MUST match §1's slug regex. Bad slugs are skipped on write/read.
+- `candidate_hash` MUST be stable for the normalized `(type, title,
+  proposed-artifact)` tuple so reruns dedupe near-identical candidates.
+- `enabled` MUST be true only when an accepted proposal's managed artifact is
+  currently active at `emitted_path`.
+- Accepted and rejected proposals MUST remain on disk. Historical decisions are
+  not deleted by normal operation.
+- The proposal body MUST be human-reviewable and contain, at minimum:
+  recommendation text, evidence summaries, and the proposed artifact body.
+
+### Ledger
+
+User decisions and recommender metrics live at:
+
+```text
+<root>/recommender/ledger.jsonl
+```
+
+Each line is a JSON object:
+
+```json
+{
+  "ts": "ISO8601",
+  "event": "generated|accepted|edited|rejected|enabled|disabled|survival_check",
+  "proposal": "slug",
+  "type": "skill|rule",
+  "target": "project|user",
+  "artifact_path": "path or null",
+  "reason": "optional",
+  "survived": true,
+  "notes": {}
+}
+```
+
+The ledger is append-only. Proposal frontmatter stores current state; the
+ledger stores decision history. Corrupt ledger lines MUST be skipped with a
+warning and MUST NOT block proposal reads.
+
+### Mining
+
+`neurobase recommend run` loads active curated facts across projects plus a
+bounded window of recent raw captures. Defaults: last 100 raw captures or last
+30 days, whichever yields fewer inputs, unless config overrides it. Existing
+proposals and ledger decisions MUST be visible to the miner so rejected
+patterns and near-duplicates can be suppressed.
+
+Candidate types in v1:
+
+- repeated correction
+- repeated workflow
+- repeated instruction
+- cross-project convention
+
+Default threshold: at least 3 occurrences across at least 2 sessions. Any agent
+mix counts; multiple agents and multiple projects increase rank.
+
+The miner uses `Brain.plan_json`. Parse failure or brain failure MUST write no
+new proposals and MUST leave existing proposal state untouched. Valid candidates
+are post-processed deterministically: validate slug/evidence refs, compute
+score, apply threshold, dedupe by `candidate_hash`, apply rejection suppression,
+write proposal docs atomically, append `generated` ledger events.
+
+### Review CLI
+
+`neurobase recommend` MUST expose:
+
+```text
+neurobase recommend run [--root ROOT] [--project PROJECT] [--all-projects]
+neurobase recommend list [--status proposed|accepted|rejected|all]
+neurobase recommend show <slug>
+neurobase recommend accept <slug> [--target project|user] [--path PATH] [--yes]
+neurobase recommend reject <slug> [--reason TEXT]
+neurobase recommend enable <slug> [--yes]
+neurobase recommend disable <slug> [--yes]
+```
+
+`accept`, `enable`, and `disable` MUST show the exact diff and ask consent
+unless `--yes` is passed. They MUST create timestamped backups before editing
+files outside `<root>/proposals/` or `<root>/recommender/`. They MUST be
+idempotent: repeating an accepted/enabled/disabled operation leaves the same
+state and does not duplicate blocks or ledger side effects beyond an optional
+no-op event.
+
+`reject` updates proposal frontmatter, records `rejected_at` and optional
+`rejection_reason`, appends a ledger event, and causes near-duplicate future
+candidates to be deprioritized or suppressed.
+
+### Artifact emission
+
+Accepted `type: skill` proposals emit:
+
+```text
+<scope-skill-dir>/<slug>/SKILL.md
+```
+
+Project scope defaults to `.claude/skills/<slug>/SKILL.md` in the project root.
+User scope is allowed only when explicitly requested. A generated skill
+directory is Neurobase-owned only if it was created from an accepted proposal
+and its path matches the proposal's `emitted_path`.
+
+Accepted `type: rule` proposals emit a Neurobase-owned fenced block into the
+chosen target file (`AGENTS.md` or `CLAUDE.md` in v1). The target MUST be
+explicit; v1 MUST NOT silently write both files for one proposal. The fence must
+include the proposal slug so only that proposal's block is touched later.
+
+### Activation and deactivation
+
+Accepted proposals may be enabled or disabled. This powers both the CLI and the
+future local UI.
+
+For skills:
+
+- Disable MUST preserve the generated skill directory by moving
+  `<scope-skill-dir>/<slug>/` to
+  `<scope-skill-dir>/.neurobase-disabled/<slug>/`.
+- Re-enable MUST move the same directory back to `<scope-skill-dir>/<slug>/`.
+- Neurobase MUST NOT move or delete a skill directory unless the proposal's
+  `emitted_path`/`disabled_path` proves Neurobase ownership.
+
+For rules:
+
+- Disable MUST remove only the matching Neurobase-owned fenced block for that
+  proposal slug.
+- Re-enable MUST restore the proposal's artifact body into the same target file
+  inside the same owned fence.
+- Unrelated user prose, comments, and non-Neurobase blocks MUST be preserved.
+
+After a successful disable, the proposal has `enabled: false` and
+`disabled_path` set for skills. After a successful enable, it has
+`enabled: true` and `emitted_path` set. Every state change appends a ledger
+event.
+
+### Local UI invariant
+
+The future local recommender UI is a client of this same contract. It MUST read
+from `<root>/proposals/` and `<root>/recommender/ledger.jsonl`, and it MUST call
+the same consent-first write paths as the CLI for accept/edit/reject/enable/
+disable. The UI MUST NOT gain a separate mutation path, cloud dependency, or
+telemetry channel.
+
+## 13. MCP server contract (`mcp/`, Phase 7)
+
+`neurobase mcp serve` runs a **stdio** MCP server (official `mcp` SDK,
+exact-pinned) named `neurobase`, exposing memory to any MCP client. The tool
+baseline is **universal** (must work on a tools-only client such as Codex);
+resources + the recall prompt are **Claude-only sugar**, gated off by default.
+
+### Invariants
+
+- **`resources/list` MUST always answer with a valid array and MUST NOT error**
+  — in every configuration (dual-exposure off, on-with-no-nodes, on-with-nodes,
+  or no store at all). Codex probes it at startup and drops the whole server on
+  an error. The node scan is wrapped so any failure registers zero resources.
+- Every tool is **fail-soft**: a missing store, bad slug, or unreadable file
+  yields an empty/structured result, never an unhandled exception. The only
+  hard error is `memory_remember` with empty input or no resolvable project.
+- Read tools default to **all projects** when `project` is omitted (decision
+  D-c — the server can't trust a single session cwd for reads). The write tool
+  resolves a project from the process launch cwd, else an explicit `project`.
+
+### Tools (universal baseline)
+
+| Tool | Input | Returns | Empty/error rule |
+|---|---|---|---|
+| `memory_search` | `query: str`, `project?: str` | list of `{project, name, kind, score, snippet}` | no hits / empty query ⇒ `[]` |
+| `memory_read_node` | `project: str`, `name: str` | `{found, project, name, body?}` | missing/bad slug ⇒ `{found: false}` |
+| `memory_list_projects` | — | list of `{project, curated_count, node_count}` | no store ⇒ `[]` |
+| `memory_remember` | `fact: str`, `project?: str` | `{project, slug, path}` | empty fact / no project ⇒ error |
+| `recommendations_list` | `project?: str` | list of proposal summaries | no `<root>/proposals/` ⇒ `[]` |
+
+- `memory_search` — grep + term-frequency over curated facts + status nodes
+  (decision D-a; ranking lives in `core/search.py`, reusable). Slug/name matches
+  weighted over body; a BM25/FTS index is backlog.
+- `memory_remember` — an **explicit, user-directed save**. Redact (§10 / D13)
+  **before** writing; slug derived from the fact's first line, de-duplicated so
+  a save never clobbers an unrelated fact; written to `curated/` with provenance
+  `user-directed` → **pinned** against the curator (§2). This is the only write
+  path the server exposes.
+- `recommendations_list` — a thin read-path over the Phase 8 proposals dir;
+  returns `[]` until Phase 8 populates it. The server does **not** mine or rank.
+
+### Resources + prompt (Claude sugar, opt-in)
+
+Gated behind `[mcp] expose_resources` (default **false**, decision D-d). When
+on, each status node is exposed as a resource at `neurobase://node/<project>/
+<name>` (`text/markdown`), and a `recall` prompt returns the recalled status
+node(s) for the launch cwd's project (reusing the §3 recall assembly). When off,
+no resources and no prompt are registered — and `resources/list` is still `[]`.
+
+### Registration (`init`)
+
+`init` offers to register the server with each detected agent (`claude mcp add`
+/ `codex mcp add`) under the **same consent → diff → backup** flow as the hook
+installers (§7). `doctor` checks the server is registered and startable per
+agent; `uninstall` removes any registration it added.

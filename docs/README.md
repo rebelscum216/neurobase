@@ -33,12 +33,12 @@ with no external code or private repos required.
 
 | Spike | Question | Status (per plan) |
 |---|---|---|
-| S1 | Codex capture wiring (which hook, payload, rollout path) | Narrowed |
-| S2 | Codex injection (`additionalContext` vs `AGENTS.override.md` fallback) | Open |
-| S3 | Clean-machine install (`uv tool install`, cold-start < 60s) | Open |
+| S1 | Codex capture wiring (which hook, payload, rollout path) | ✅ Closed → [ADR-0001](adr/0001-codex-capture-wiring.md) |
+| S2 | Codex injection (`additionalContext` vs `AGENTS.override.md` fallback) | ✅ Closed → [ADR-0005](adr/0005-codex-injection-confirmed.md) |
+| S3 | Clean-machine install (`uv tool install`, cold-start < 60s) | Open; [local isolated smoke recorded](notes/spikes/2026-07-08-s3-install-smoke.md) |
 | S4 | PyPI/GitHub naming | ✅ Closed → `neurobase-cli` |
-| S5 | `claude -p` JSON contract for the curator | Narrowed |
-| S6 | Hook latency budget (< 500ms combined warm) | Open |
+| S5 | `claude -p` JSON contract for the curator | ✅ Closed → [ADR-0002](adr/0002-claude-cli-json-reliability.md) |
+| S6 | Hook latency budget (< 500ms combined warm) | ✅ Closed → [ADR-0003](adr/0003-hook-latency-budget.md) |
 
 ## Directories
 

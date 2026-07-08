@@ -1,6 +1,6 @@
 ---
 slug: phase-5-codex-adapter
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-5-codex-adapter
@@ -159,3 +159,26 @@ worth a one-line `dict[str, Any]` annotation if we ever gate `tests/` too.
 
 **Re-relay:** please re-review `scribe.py:discover_rollout` (fail-closed) and the
 two new regression tests.
+
+---
+
+## Re-review  _(Reviewer — Codex, 2026-07-08)_
+
+F1 is resolved. I re-reviewed `discover_rollout()` and the notify hook path in the
+actual diff: when `session_id` is provided, discovery now scans only eligible
+rollouts for a matching `session_meta.session_id`/`id` and returns `None` on a
+miss, so the notify path fails closed instead of capturing the newest unrelated
+rollout. The fallback-to-newest behavior remains limited to calls with no id to
+cross-check.
+
+The two claimed regressions are present and cover the issue:
+`test_discover_rollout_fails_closed_on_session_mismatch` verifies the unit-level
+`None` result, and `test_codex_notify_thread_id_mismatch_captures_nothing`
+verifies the hook exits 0 and writes no raw capture.
+
+Verification run:
+`uv run pytest tests/test_codex_scribe.py tests/test_cli_hook_codex.py -q` and
+`git diff --check main...phase-5-codex-adapter` both pass.
+
+**Verdict:** approve — the F1 fail-closed semantics are now enforced in code and
+covered by focused regression tests.

@@ -13,10 +13,10 @@ patterns and proposes promoting them into standard **SKILL.md** and
 It all runs on your machine, on the agent subscriptions you already pay for, with
 **zero cloud dependency and zero telemetry — permanently.**
 
-> **Status: pre-alpha (Phase 0 — repo bootstrap).** Installable from source today;
-> not yet published to PyPI. The design is fully specified in
-> [`docs/`](docs/README.md); the code is being built phase by phase. Watch this
-> space.
+> **Status: pre-alpha (Phase 6 — lifecycle hardening).** Installable from source
+> today; not yet published to PyPI. The core capture → curate → recall loop is
+> implemented for Claude Code and Codex CLI, with consent-first hook installers,
+> `doctor`, and surgical `uninstall`. MCP and the recommender are still planned.
 
 ## How it works
 
@@ -44,15 +44,47 @@ hooks capture (auto)  →  curator folds raw into a small durable fact set
 - **[docs/](docs/README.md)** — the full index: the phased build plan, the
   authoritative behavioral spec, the architecture rationale, ADRs, and working notes.
 
-## Install
+## Quickstart
 
-Not yet published to PyPI. From a local checkout:
+Neurobase is not published to PyPI yet. From a local checkout:
 
 ```bash
 uv tool install .     # command: `neurobase`
 ```
 
-Once it's published, the same command will pull from PyPI directly:
+Then run the guided setup in the repo you want Neurobase to remember:
+
+```bash
+neurobase init
+neurobase doctor
+```
+
+`init` chooses a visible store root, enables the current repo, detects Claude
+Code/Codex CLI on your `PATH`, shows the exact config diffs, asks before writing,
+backs up existing agent config files, and prints the next-session notice. Codex
+will also ask you to approve the edited hook on next launch; until that trust
+prompt is accepted, Codex will not run the hook. `doctor` reports the installed
+shim, store, project, brain backend, agent binaries, hook wiring, and Codex trust
+state with named remedies.
+
+If you prefer the explicit path, use the per-agent installers:
+
+```bash
+neurobase enable
+neurobase init --agent claude
+neurobase init --agent codex
+```
+
+To remove Neurobase-owned hooks without touching your memory store:
+
+```bash
+neurobase uninstall
+```
+
+Use `neurobase uninstall --purge-store` only when you also want to delete the
+local store.
+
+Once Neurobase is published, the install command will pull from PyPI directly:
 
 ```bash
 uv tool install neurobase-cli     # command: `neurobase`

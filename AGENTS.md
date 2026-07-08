@@ -62,25 +62,23 @@ neurobase/
 ├── README.md                 ← project front door
 ├── LICENSE                   ← Apache-2.0 (decision D1)
 ├── pyproject.toml            ← package "neurobase-cli", command "neurobase"
-├── src/neurobase/            ← cli/, core/{store,projects,redact,config,linkify},
-│                                brain/{base,claude_cli,codex_cli,anthropic_api,select},
-│                                curator/engine, adapters/claude/{scribe,recall} (live)
-│                                · adapters/codex/ recommender/ mcp/ (stubs)
-├── tests/                    ← Phase 0 smoke + Phase 1/2/3/4 suites; spec-§11 fixtures land per phase
+├── src/neurobase/            ← cli/, core/, brain/, curator/, adapters/ (live)
+│                                · recommender/ mcp/ (stubs)
+├── tests/                    ← Phase 0 smoke + Phase 1–6 suites; spec-§11 fixtures land per phase
 ├── docs/                     ← canonical docs, ADRs, notes, code-review relay + reviews
 ├── .claude/skills/           ← project skills (e.g. xcode-review, the Author role)
 └── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix (lint, format, types, tests)
 ```
 
 `core/` (Phase 1 + `linkify` Phase 3), `brain/` (Phase 2), `curator/` (Phase
-3), and `adapters/claude/` (Phase 4: scribe + recall) are real. `adapters/codex/
-recommender/ mcp/` are still docstring-only stubs, each naming the spec section
-and phase that will fill it in. Replace a stub with real code when its phase
-lands.
+3), `adapters/claude/` (Phase 4), `adapters/codex/` (Phase 5), and the Phase 6
+CLI lifecycle surfaces are real. `recommender/` and `mcp/` are still
+docstring-only stubs, each naming the spec section and phase that will fill it
+in. Replace a stub with real code when its phase lands.
 
 ## Current state
 
-- **Phase:** 0 — **fully done**, spike gate included. Repo bootstrap: installable
+- **Phase 0 — bootstrap + gating spikes: done.** Repo bootstrap: installable
   package, live `cli` with an honest stubbed command surface, smoke tests,
   ruff/mypy/pytest, 3-OS CI all pass. All four gating spikes are closed:
   [ADR-0001](docs/adr/0001-codex-capture-wiring.md) (S1),
@@ -91,9 +89,7 @@ lands.
   [ADR-0003](docs/adr/0003-hook-latency-budget.md) (S6). S2's confirmed
   answer: Codex's `SessionStart` hook output **does** reach the model, as a
   `developer`-role input message — injection mirrors the Claude adapter, per
-  spec §5/§3. (S3, clean-machine install, is tracked in the build-plan spike
-  table but isn't part of Phase 0's closing gate — see build-plan §6 Phase 0
-  deliverables. Not started.)
+  spec §5/§3. S3 clean-machine install is still tracked for Phase 6 closeout.
 - **Phase 1 — core store, config, projects: done.** `core/store.py` (tree,
   YAML-frontmatter document format, atomic writes, raw/curated/nodes/index per
   spec §1, including the Codex per-turn overwrite trick and the
@@ -171,9 +167,17 @@ lands.
   `trust_level = "trusted"` into `~/.codex/config.toml` while preserving
   unrelated comments/tables/keys. ADR-0006 records the live spike confirming
   Codex tokenizes string commands, sends stdin JSON, and re-prompts trust after
-  hook edits; init prints that approval reminder. 266 tests. **Still deferred**
-  (needs the user's real Codex config): the live installed `init --agent codex`
-  run and full in-vivo cross-agent demo.
+  hook edits; init prints that approval reminder. 266 tests.
+- **Phase 6 — installer & lifecycle hardening: code merged; closeout in
+  progress.** Guided `neurobase init` detects agents, chooses/enables the store,
+  then delegates to the consent-first Claude/Codex installers. `neurobase doctor`
+  reports a full shim/store/project/brain/agent/hook/trust matrix with
+  per-check ✓/!/✗ and remedies, including Codex user/project hook trust state.
+  `neurobase uninstall` surgically removes only Neurobase-owned hook entries,
+  preserves user edits, restores timestamped backups only when explicitly asked,
+  and leaves the store intact unless `--purge-store` is passed. Reviewed and
+  merged in `1caf5e6`. Remaining Phase 6 closeout: S3 clean-machine install on a
+  fresh user/container and README/state-doc updates from that evidence.
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a

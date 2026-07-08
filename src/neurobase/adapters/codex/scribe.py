@@ -1,0 +1,280 @@
+"""Codex scribe (spec §5): the per-turn rollout capture.
+
+Codex has no SessionEnd — hooks fire per turn — so this scribe is written to run
+on every turn and **overwrite one raw file per session in place**: it passes
+``captured_at = session start timestamp`` to the raw write, so the derived
+filename is stable and each firing's atomic write replaces the prior one
+(last-turn-wins). Deterministic, no LLM, **every code path exits 0** (never wedge
+a turn). Parses a Codex rollout (JSONL, §11.2), redacts (D13), and writes one raw
+capture with ``agent: codex`` — but only if the resolved project's memory tree
+exists (opt-in), and only if the capture is non-empty.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from neurobase.core import projects, store
+from neurobase.core.config import load_config
+from neurobase.core.redact import redact
+
+# Tuned defaults (spec §8) — identical to the Claude scribe; §8 is agent-agnostic.
+MAX_PROMPTS = 25
+MAX_PROMPT_CHARS = 600
+MAX_SUMMARY_CHARS = 4000
+# The latest IDE context block, kept once as session metadata (spec §5).
+MAX_IDE_CHARS = 800
+
+# VS Code extension wraps typed prompts (spec §5). Split at the request marker;
+# keep the request as the prompt and the preceding block as IDE context.
+_IDE_CONTEXT_MARKER = "# Context from my IDE setup:"
+_IDE_REQUEST_MARKER = "## My request for Codex:"
+
+_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"
+
+
+def _iter_events(rollout_path: Path) -> list[dict[str, Any]]:
+    """Parse the JSONL rollout, skipping unparseable lines (never fatal)."""
+    events: list[dict[str, Any]] = []
+    try:
+        text = rollout_path.read_text(encoding="utf-8")
+    except OSError:
+        return events
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _split_ide_wrapper(message: str) -> tuple[str, str | None]:
+    """Split a VS Code-wrapped prompt into ``(prompt, ide_context)``. A plain
+    (non-wrapped) message returns ``(message, None)``."""
+    if _IDE_REQUEST_MARKER not in message:
+        return message, None
+    before, _, after = message.partition(_IDE_REQUEST_MARKER)
+    prompt = after.strip()
+    context = before.strip()
+    if context.startswith(_IDE_CONTEXT_MARKER):
+        context = context[len(_IDE_CONTEXT_MARKER) :].strip()
+    return prompt, (context or None)
+
+
+def parse_rollout(rollout_path: Path) -> dict[str, Any]:
+    """Return ``{prompts, summary, ide_context, cwd, branch, session_id,
+    started_at}`` from a rollout. ``prompts`` are the clean typed user turns
+    (IDE wrapper stripped, consecutive duplicates dropped); ``summary`` is the
+    last non-empty agent message; ``started_at`` is the session_meta timestamp
+    (ISO string) that keys the per-turn overwrite."""
+    prompts: list[str] = []
+    summary = ""
+    ide_context = ""
+    cwd = ""
+    branch = ""
+    session_id = ""
+    started_at = ""
+    for event in _iter_events(rollout_path):
+        if event.get("type") == "session_meta":
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            session_id = payload.get("session_id") or payload.get("id") or session_id
+            cwd = payload.get("cwd") or cwd
+            started_at = payload.get("timestamp") or started_at
+            git = payload.get("git")
+            if isinstance(git, dict):
+                branch = git.get("branch") or branch
+            continue
+        if event.get("type") != "event_msg":
+            continue  # response_item / turn_context / token_count → ignored
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+        if ptype == "user_message":
+            message = payload.get("message")
+            if not isinstance(message, str):
+                continue
+            prompt, ctx = _split_ide_wrapper(message)
+            if ctx is not None:
+                ide_context = ctx  # latest IDE context wins
+            prompt = prompt.strip()
+            if not prompt:
+                continue
+            if prompts and prompts[-1] == prompt:
+                continue  # thread_rolled_back re-emits the previous prompt
+            prompts.append(prompt)
+        elif ptype == "agent_message":
+            message = payload.get("message")
+            if isinstance(message, str) and message.strip():
+                summary = message.strip()  # last non-empty wins
+    return {
+        "prompts": prompts,
+        "summary": summary,
+        "ide_context": ide_context,
+        "cwd": cwd,
+        "branch": branch,
+        "session_id": session_id,
+        "started_at": started_at,
+    }
+
+
+def _assemble_body(
+    prompts: list[str], summary: str, ide_context: str
+) -> str:
+    kept = [p[:MAX_PROMPT_CHARS] for p in prompts[-MAX_PROMPTS:]]
+    summary = summary[:MAX_SUMMARY_CHARS]
+    lines = [
+        "## Session",
+        "- agent: codex",
+        f"- prompts captured: {len(kept)}",
+    ]
+    if ide_context:
+        lines += ["", "## Files in focus (IDE)", "", ide_context[:MAX_IDE_CHARS]]
+    lines += ["", "## Prompts"]
+    lines += [f"- {p}" for p in kept]
+    lines += ["", "## Final assistant summary", "", summary]
+    return "\n".join(lines)
+
+
+def _parse_started_at(started_at: str) -> datetime:
+    """Session-start ISO timestamp → aware datetime (keys the per-turn
+    overwrite). Any parse failure falls back to ``now`` — capture still works,
+    it just won't dedupe across turns for that session."""
+    if started_at:
+        try:
+            return datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return datetime.now(UTC)
+
+
+def _read_session_meta(rollout_path: Path) -> dict[str, Any] | None:
+    """The first-line ``session_meta`` payload, or ``None`` (never raises)."""
+    try:
+        with rollout_path.open(encoding="utf-8") as fh:
+            first = fh.readline()
+    except OSError:
+        return None
+    try:
+        event = json.loads(first)
+    except ValueError:
+        return None
+    if isinstance(event, dict) and event.get("type") == "session_meta":
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def discover_rollout(
+    *,
+    session_id: str | None = None,
+    min_mtime: float | None = None,
+    sessions_root: Path | None = None,
+) -> Path | None:
+    """Find the active rollout when the hook payload carries no path (the
+    ``notify`` fallback never does — §11.4). Newest ``rollout-*.jsonl`` by mtime
+    with ``mtime >= min_mtime``.
+
+    ``session_id`` (the notify payload's thread id) is a **hard requirement**
+    when given — return the newest eligible rollout whose ``session_meta``
+    matches, else ``None`` (fail closed rather than capture an unrelated
+    session's rollout into this project — spec §5/§11.4). A matching rollout is
+    correct regardless of age (a resumed session's rollout can be old), so
+    ``min_mtime`` is only a defensive floor the caller may supply; notify's
+    payload carries no turn-start, so its capture relies on the id match. Only
+    when no id is given (no cross-check possible) do we fall back to newest."""
+    base = sessions_root or _SESSIONS_ROOT
+    if not base.exists():
+        return None
+    try:
+        candidates = sorted(
+            base.glob("**/rollout-*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    eligible: list[Path] = []
+    for path in candidates:
+        try:
+            if min_mtime is not None and path.stat().st_mtime < min_mtime:
+                continue
+        except OSError:
+            continue
+        eligible.append(path)
+    if not eligible:
+        return None
+    if session_id is not None:
+        for path in eligible:
+            meta = _read_session_meta(path)
+            if meta and session_id in (meta.get("session_id"), meta.get("id")):
+                return path
+        return None  # id given but nothing matched → fail closed
+    return eligible[0]  # no id to cross-check → best-effort newest
+
+
+def scribe(
+    root: Path,
+    *,
+    rollout_path: Path,
+    cwd: str = "",
+    session_id: str = "",
+) -> Path | None:
+    """Write (or session-keyed-overwrite) one raw capture for a Codex turn, or
+    ``None`` if there's no project tree / nothing to capture. Deterministic;
+    callers should treat any exception as "capture nothing" (the hook exits 0)."""
+    parsed = parse_rollout(rollout_path)
+
+    # cwd from the hook payload takes precedence over the rollout's.
+    resolve_cwd = Path(cwd or parsed["cwd"] or ".").expanduser()
+    project = projects.resolve_project(root, resolve_cwd)
+    if project is None:
+        return None  # untracked directory
+    if not store.memory_dir(project, root).exists():
+        return None  # opt-in: no tree ⇒ write nothing
+
+    prompts: list[str] = parsed["prompts"]
+    summary: str = parsed["summary"]
+    if not prompts and not summary:
+        return None  # empty capture ⇒ write nothing
+
+    body = _assemble_body(prompts, summary, parsed["ide_context"])
+    body = redact(body, load_config().redact.extra_patterns)
+
+    sid = session_id or parsed["session_id"]
+    started = _parse_started_at(parsed["started_at"])
+    try:
+        return store.write_raw(
+            root,
+            project,
+            agent="codex",
+            session_id=sid,
+            cwd=str(resolve_cwd),
+            branch=parsed["branch"],
+            captured_at=started,
+            body=body,
+        )
+    except store.RawConsumedError:
+        # The session's raw was already folded mid-session; write a fresh
+        # capture under a new filename (spec §1 mutability rule).
+        return store.write_raw(
+            root,
+            project,
+            agent="codex",
+            session_id=sid,
+            cwd=str(resolve_cwd),
+            branch=parsed["branch"],
+            captured_at=datetime.now(UTC),
+            body=body,
+        )

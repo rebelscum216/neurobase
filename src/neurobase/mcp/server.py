@@ -37,6 +37,16 @@ _INSTRUCTIONS = (
 
 _MAX_SLUG_CHARS = 50
 _NODE_URI_PREFIX = "neurobase://node/"
+_SLUG_RE = re.compile(r"^[a-z0-9-]+$")  # the store's slug rule (spec §1)
+
+
+def _safe_registry(root: Path) -> dict[str, list[str]]:
+    """Registry projects, fail-soft: a malformed/unreadable ``registry.toml``
+    yields ``{}`` rather than raising — the server must never crash on it."""
+    try:
+        return projects.load_registry(root)
+    except Exception:
+        return {}
 
 
 def _slugify_fact(fact: str) -> str:
@@ -67,8 +77,11 @@ def _node_count(root: Path, project: str) -> int:
 def _register_node_resources(server: FastMCP, root: Path) -> None:
     """Add every status node as a resource. Wrapped by the caller so a scan
     failure leaves the server with zero resources (invariant: never error)."""
-    for project in sorted(projects.load_registry(root)):
-        nodes_dir = store.memory_dir(project, root) / "nodes"
+    for project in sorted(_safe_registry(root)):
+        try:
+            nodes_dir = store.memory_dir(project, root) / "nodes"
+        except store.InvalidSlugError:
+            continue  # a bad slug in the registry must not sink the scan
         if not nodes_dir.exists():
             continue
         for path in sorted(nodes_dir.glob("*.md")):
@@ -102,7 +115,10 @@ def build_server(
     root = store.resolve_root(root)
     config = config if config is not None else load_config()
     cwd = cwd if cwd is not None else Path.cwd()
-    current_project = projects.resolve_project(root, cwd)
+    try:
+        current_project = projects.resolve_project(root, cwd)
+    except Exception:
+        current_project = None  # a corrupt registry must not prevent startup
 
     server: FastMCP = FastMCP("neurobase", instructions=_INSTRUCTIONS)
 
@@ -125,7 +141,12 @@ def build_server(
     @server.tool()
     def memory_read_node(project: str, name: str) -> dict:
         """Read one synthesized status node by project + name. Returns
-        ``{found: false}`` for a missing node — never an error."""
+        ``{found: false}`` for a missing/invalid node — never an error."""
+        # Validate the node name as a slug BEFORE building the path: an
+        # unvalidated name (e.g. "../curated/x") would escape nodes/ and read an
+        # arbitrary store file. Node-only read boundary (§13).
+        if not _SLUG_RE.match(name):
+            return {"found": False, "project": project, "name": name}
         try:
             path = store.memory_dir(project, root) / "nodes" / f"{name}.md"
         except store.InvalidSlugError:
@@ -142,7 +163,7 @@ def build_server(
     def memory_list_projects() -> list[dict]:
         """List registered projects with curated-fact and node counts."""
         out = []
-        for project in sorted(projects.load_registry(root)):
+        for project in sorted(_safe_registry(root)):
             try:
                 curated = len(store.list_curated(root, project))
                 nodes = _node_count(root, project)
@@ -163,14 +184,17 @@ def build_server(
             raise ValueError("fact must not be empty")
         target = project or current_project
         if target is None:
-            available = ", ".join(sorted(projects.load_registry(root))) or "none"
+            available = ", ".join(sorted(_safe_registry(root))) or "none"
             raise ValueError(
                 "no project resolved for this save — pass project= "
                 f"(available: {available})"
             )
         store.ensure_tree(target, root)
         body = redact.redact(text, config.redact.extra_patterns)
-        slug = _fresh_slug(root, target, _slugify_fact(text))
+        # Slug from the REDACTED text — otherwise a secret in the first line
+        # would leak into the filename + frontmatter name (§10/§13). Redact-then-
+        # derive keeps secrets out of every store artifact, not just the body.
+        slug = _fresh_slug(root, target, _slugify_fact(body))
         path = store.upsert_curated(
             root, target, slug, body, provenance=["user-directed"]
         )
@@ -205,8 +229,11 @@ def build_server(
     if config.mcp.expose_resources:
         try:
             _register_node_resources(server, root)
-        except OSError:
-            pass  # invariant: resources/list stays valid even if the scan fails
+        except Exception:
+            # Invariant (§13): resources/list MUST stay a valid array. Any scan
+            # failure — corrupt registry, unreadable tree — registers zero
+            # resources rather than surfacing an error to the client.
+            pass
 
         @server.prompt(name="recall")
         def recall() -> str:

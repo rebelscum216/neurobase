@@ -121,6 +121,17 @@ def test_memory_read_node_bad_slug_is_not_an_error(root: Path) -> None:
     assert missing["found"] is False
 
 
+def test_memory_read_node_rejects_path_traversal_name(root: Path, tmp_path: Path) -> None:
+    # A node name that escapes nodes/ must NOT read an arbitrary store file.
+    _register(root, tmp_path, "alpha")
+    store.upsert_curated(root, "alpha", "secret-fact", "TOP SECRET", provenance=["t"])
+    res = _structured(
+        _server(root), "memory_read_node", project="alpha", name="../curated/secret-fact"
+    )
+    assert res["found"] is False
+    assert "body" not in res  # the curated fact's body must not leak through
+
+
 # --- memory_list_projects ------------------------------------------------
 
 
@@ -151,6 +162,21 @@ def test_memory_remember_redacts_before_writing(root: Path, tmp_path: Path) -> N
     res = _structured(srv, "memory_remember", fact="key is AKIAIOSFODNN7EXAMPLE do not leak")
     body = store.read_doc(Path(res["path"])).body
     assert "AKIAIOSFODNN7EXAMPLE" not in body
+
+
+def test_memory_remember_secret_in_first_line_does_not_leak_into_slug(
+    root: Path, tmp_path: Path
+) -> None:
+    # A secret on the first line must not survive in the slug / path / node name
+    # (the slug is derived from the redacted text).
+    _register(root, tmp_path, "alpha")
+    srv = _server(root, cwd=tmp_path / "alpha")
+    res = _structured(srv, "memory_remember", fact="AKIAIOSFODNN7EXAMPLE do not leak")
+    # Check the lowercased form — the slug is lowercased, so a case-sensitive
+    # check would pass even if the secret leaked.
+    secret = "akiaiosfodnn7example"
+    assert secret not in res["slug"].lower()
+    assert secret not in res["path"].lower()
 
 
 def test_memory_remember_does_not_clobber_same_first_line(root: Path, tmp_path: Path) -> None:
@@ -200,6 +226,28 @@ def test_recommendations_list_reads_proposals(root: Path) -> None:
             "path": str(proposals / "use-uv.md"),
         }
     ]
+
+
+# --- fail-soft on a corrupt registry (invariant) -------------------------
+
+
+def _corrupt_registry(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "registry.toml").write_text("this is [not valid toml", encoding="utf-8")
+
+
+def test_build_server_survives_corrupt_registry(root: Path) -> None:
+    _corrupt_registry(root)
+    # Must construct and answer resources/list validly, not raise on startup.
+    srv = _server(root, expose=True, cwd=root)
+    assert anyio.run(srv.list_resources) == []
+
+
+def test_search_and_list_projects_fail_soft_on_corrupt_registry(root: Path) -> None:
+    _corrupt_registry(root)
+    srv = _server(root)
+    assert _result(srv, "memory_search", query="anything") == []
+    assert _result(srv, "memory_list_projects") == []
 
 
 # --- recall prompt (Claude sugar) ----------------------------------------

@@ -64,6 +64,15 @@ def _snippet(terms: list[str], body: str) -> str:
     return lines[0][:_SNIPPET_CHARS] if lines else ""
 
 
+def _all_projects(root: Path) -> list[str]:
+    """Registry project slugs, fail-soft: a malformed registry yields ``[]``
+    (search is contractually fail-soft — a corrupt file must not raise)."""
+    try:
+        return list(projects.load_registry(root))
+    except Exception:
+        return []
+
+
 def _candidates(root: Path, project: str) -> Iterator[tuple[str, str, str]]:
     """Yield ``(name, kind, body)`` for a project's curated facts + status
     nodes. An invalid slug or missing tree yields nothing."""
@@ -95,7 +104,7 @@ def search(
     terms = _tokenize(query)
     if not terms:
         return []
-    targets = [project] if project is not None else sorted(projects.load_registry(root))
+    targets = [project] if project is not None else sorted(_all_projects(root))
     hits: list[SearchHit] = []
     for proj in targets:
         for name, kind, body in _candidates(root, proj):

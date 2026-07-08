@@ -140,9 +140,10 @@ lands.
   (`adapters/claude/install.py` + `core/backups.py`, spec §7/§10): it shows the
   exact settings.json diff, asks consent, backs the original up under
   `<root>/backups/<ts>/` with a manifest, then writes atomically — fenced
-  ownership means only entries whose command contains `neurobase hook ` are
+  ownership (spec §7) means only entries whose command invokes a `neurobase`
+  executable's `hook` subcommand (`<shim>/neurobase hook`, path-anchored) are
   ever created/replaced/removed, so every other key and hook is preserved, and
-  a malformed settings.json is refused rather than clobbered. 206 tests.
+  a malformed settings.json is refused rather than clobbered. 207 tests.
   **Still deferred** (needs the user's real Claude config + live sessions): the
   in-vivo session-A→session-B demo of the installed hooks. **Next: that live
   demo, then Phase 5** (Codex adapter → cross-agent MVP).

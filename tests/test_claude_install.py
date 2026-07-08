@@ -62,11 +62,35 @@ def test_owned_marker_leaves_foreign_similar_command() -> None:
     )
 
 
+def test_ownership_fence_is_path_anchored_not_bare_substring() -> None:
+    # Codex F1 (spec §7): the fence is `<shim>/neurobase hook`, not a bare
+    # `neurobase hook ` substring. A foreign command that mentions the phrase in
+    # prose — neurobase NOT preceded by a path separator — must be preserved.
+    foreign = {
+        "hooks": [{"type": "command", "command": '/bin/echo "run neurobase hook to install"'}]
+    }
+    existing = {"hooks": {"SessionEnd": [foreign]}}
+    result = install.build_settings(existing, SHIM, ["startup", "clear"])
+    assert foreign in result["hooks"]["SessionEnd"]  # untouched
+    assert not install._is_owned_group(foreign)
+
+
 def test_is_owned_group() -> None:
     owned = {"hooks": [{"type": "command", "command": "/x/neurobase hook claude session-end"}]}
+    # Windows-style path with .exe is still ours.
+    owned_win = {
+        "hooks": [{"type": "command", "command": r"C:\tools\neurobase.exe hook claude session-end"}]
+    }
     foreign = {"hooks": [{"type": "command", "command": "/x/other-tool run"}]}
+    # Prose mention (neurobase not preceded by a separator) is not ours.
+    prose = {"hooks": [{"type": "command", "command": "echo please run neurobase hook manually"}]}
+    # `neurobase hookX` must not match (word-boundary guard).
+    hookx = {"hooks": [{"type": "command", "command": "/x/neurobase hookXYZ"}]}
     assert install._is_owned_group(owned)
+    assert install._is_owned_group(owned_win)
     assert not install._is_owned_group(foreign)
+    assert not install._is_owned_group(prose)
+    assert not install._is_owned_group(hookx)
 
 
 def test_load_settings_missing_returns_empty(tmp_path: Path) -> None:

@@ -3,7 +3,8 @@
 Merges Neurobase's SessionEnd (scribe) + SessionStart (recall) hooks into a
 Claude Code ``settings.json`` — user (`~/.claude/settings.json`) or project
 (`<repo>/.claude/settings.json`). Ownership is fenced: an entry is
-Neurobase-owned **iff its command contains ``neurobase hook``**, and only such
+Neurobase-owned **iff its command invokes a ``neurobase`` executable's ``hook``
+subcommand** (spec §7: contains ``<shim>/neurobase hook``), and only such
 entries are ever created, replaced, or removed. Everything else in the file is
 preserved.
 """
@@ -12,14 +13,23 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
-# A hook entry is Neurobase-owned iff its command contains this (spec §7). The
-# trailing space avoids matching an unrelated command like ".../neurobase hookX".
-_OWNED_MARKER = "neurobase hook "
+# A hook entry is Neurobase-owned **iff its command invokes a ``neurobase``
+# executable's ``hook`` subcommand** (spec §7: command contains
+# ``<shim>/neurobase hook``). We match the *path component* — ``neurobase``
+# (optionally ``.exe``) preceded by a path separator or start-of-string, then
+# whitespace + ``hook`` + a word boundary — not a bare ``neurobase hook``
+# substring. This (a) excludes prose mentions like ``echo "run neurobase hook
+# ..."`` (neurobase is preceded by a space/quote, not a separator), (b) still
+# recognizes an entry written by an *older* shim path so init replaces it
+# instead of stacking a duplicate, and (c) matches Windows ``\neurobase.exe
+# hook`` commands. ``hook(?=\s|$)`` keeps the old anti-``hookX`` guarantee.
+_OWNED_RE = re.compile(r"(?:^|[/\\])neurobase(?:\.exe)?\s+hook(?=\s|$)")
 
 
 class SettingsParseError(RuntimeError):
@@ -60,7 +70,7 @@ def _is_owned_group(group: Any) -> bool:
     if not isinstance(group, dict):
         return False
     for entry in group.get("hooks", []) or []:
-        if isinstance(entry, dict) and _OWNED_MARKER in str(entry.get("command", "")):
+        if isinstance(entry, dict) and _OWNED_RE.search(str(entry.get("command", ""))):
             return True
     return False
 

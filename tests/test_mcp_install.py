@@ -74,6 +74,16 @@ def test_claude_is_mcp_registered() -> None:
     assert claude_install.is_mcp_registered({}) is False
 
 
+def test_claude_is_mcp_registered_rejects_stale_launch_shape() -> None:
+    # Right command but wrong args / type ⇒ not a valid registration for the
+    # current shim (would not start the server), but still "present".
+    stale_args = {"mcpServers": {"neurobase": {"type": "stdio", "command": SHIM, "args": ["bad"]}}}
+    assert claude_install.is_mcp_registered(stale_args, shim=SHIM) is False
+    assert claude_install.is_mcp_registered(stale_args) is True
+    stale_type = {"mcpServers": {"neurobase": {"command": SHIM, "args": ["mcp", "serve"]}}}
+    assert claude_install.is_mcp_registered(stale_type, shim=SHIM) is False
+
+
 # --- Codex (~/.codex/config.toml) ----------------------------------------
 
 
@@ -132,3 +142,9 @@ def test_codex_is_mcp_registered() -> None:
     assert codex_install.is_mcp_registered(reg, shim="/other") is False
     assert codex_install.is_mcp_registered("") is False
     assert codex_install.is_mcp_registered("{ broken toml") is False
+
+
+def test_codex_is_mcp_registered_rejects_stale_launch_shape() -> None:
+    stale = '[mcp_servers.neurobase]\ncommand = "%s"\nargs = ["bad"]\n' % SHIM
+    assert codex_install.is_mcp_registered(stale, shim=SHIM) is False
+    assert codex_install.is_mcp_registered(stale) is True  # still present

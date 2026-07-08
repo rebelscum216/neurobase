@@ -513,8 +513,11 @@ def remove_mcp_config(existing_text: str) -> str:
 
 
 def is_mcp_registered(existing_text: str, shim: str | None = None) -> bool:
-    """Whether ``[mcp_servers.neurobase]`` is present (and, if ``shim`` given,
-    maps to that command). Used by ``doctor``. Tolerant of unparseable text."""
+    """Whether ``[mcp_servers.neurobase]`` is present. With ``shim`` given,
+    require the **full launch shape** (``command: <shim>``,
+    ``args: ["mcp", "serve"]``) — a stale entry with the right command but wrong
+    args would not start the server, so ``doctor`` must not report it OK (§13).
+    Tolerant of unparseable text."""
     try:
         parsed = _parse_toml(existing_text)
     except ConfigParseError:
@@ -523,4 +526,6 @@ def is_mcp_registered(existing_text: str, shim: str | None = None) -> bool:
     entry = servers.get(MCP_SERVER_NAME) if isinstance(servers, dict) else None
     if not isinstance(entry, dict):
         return False
-    return shim is None or entry.get("command") == shim
+    if shim is None:
+        return True
+    return entry.get("command") == shim and entry.get("args") == ["mcp", "serve"]

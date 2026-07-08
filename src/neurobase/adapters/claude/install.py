@@ -208,10 +208,18 @@ def remove_mcp_config(existing: dict[str, Any]) -> dict[str, Any]:
 
 
 def is_mcp_registered(existing: dict[str, Any], shim: str | None = None) -> bool:
-    """Whether ``mcpServers.neurobase`` is present (and, if ``shim`` given,
-    points at that command). Used by ``doctor``."""
+    """Whether ``mcpServers.neurobase`` is present. With ``shim`` given, require
+    the **full launch shape** (``type: stdio``, ``command: <shim>``,
+    ``args: ["mcp", "serve"]``) — a stale entry with the right command but wrong
+    args would not start the server, so ``doctor`` must not report it OK (§13)."""
     servers = existing.get("mcpServers")
     entry = servers.get(MCP_SERVER_NAME) if isinstance(servers, dict) else None
     if not isinstance(entry, dict):
         return False
-    return shim is None or entry.get("command") == shim
+    if shim is None:
+        return True
+    return (
+        entry.get("type") == "stdio"
+        and entry.get("command") == shim
+        and entry.get("args") == ["mcp", "serve"]
+    )

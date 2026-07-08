@@ -246,3 +246,14 @@ def test_discover_rollout_newest_and_session_match(tmp_path: Path) -> None:
 
 def test_discover_rollout_none_when_empty(tmp_path: Path) -> None:
     assert scribe.discover_rollout(sessions_root=tmp_path / "nope") is None
+
+
+def test_discover_rollout_fails_closed_on_session_mismatch(tmp_path: Path) -> None:
+    """Codex F1 (spec §5/§11.4): a thread/session id is a hard requirement —
+    a newer, non-matching rollout must NOT be captured; discovery returns None."""
+    sessions = tmp_path / "sessions" / "2026" / "07" / "05"
+    sessions.mkdir(parents=True)
+    _write_rollout(sessions / "rollout-new.jsonl", [_meta("/x", ts="2026-07-05T23:59:00Z")])
+    root = tmp_path / "sessions"
+    # Newest exists, but its session_id ("019fsess") != the requested id.
+    assert scribe.discover_rollout(session_id="DIFFERENT", sessions_root=root) is None

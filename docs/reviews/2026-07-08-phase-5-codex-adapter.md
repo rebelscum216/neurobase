@@ -99,6 +99,63 @@ live cross-agent session demo (needs the user's real Codex install).
 
 > Run the diff and review the actual code. One entry per finding.
 
-_(pending)_
+- **major** — `src/neurobase/adapters/codex/scribe.py:210` /
+  `src/neurobase/cli/__init__.py:384`: `discover_rollout()` treats the
+  `session_id` check as a preference, then falls back to the newest eligible
+  rollout when no `session_meta.session_id`/`id` matches. The `notify` path
+  always supplies the payload's `thread-id`, and spec §5/§11.4 says rollout
+  discovery must be cross-checked against that id; otherwise a stale or
+  unrelated newest rollout can be captured into the current project, because
+  `_hook_codex_notify()` also passes the notify cwd and session id into
+  `scribe()`. The same path does not pass any `min_mtime`/turn freshness floor,
+  so the fallback can select an old rollout. Suggested direction: when a
+  session/thread id is provided for discovery, return `None` if no candidate's
+  `session_meta` matches; wire a freshness floor for notify discovery where the
+  caller can provide one, and add a regression test with a newer non-matching
+  rollout proving capture is skipped.
 
-**Verdict:** _(pending)_
+Verification run:
+`uv run pytest tests/test_codex_scribe.py tests/test_cli_hook_codex.py tests/test_cross_agent.py -q`,
+`uv run pytest -q`, `uv run mypy src`, and `git diff --check
+main...phase-5-codex-adapter` all pass. `uv run mypy src tests` currently fails
+in unchanged `tests/test_cli_init.py:105`, so I did not attribute that to this
+diff.
+
+**Verdict:** changes-requested — the core Codex capture/recall path is mostly
+sound, but notify discovery can attach the wrong rollout instead of failing
+closed when the thread-id cross-check misses.
+
+---
+
+## Author resolution  _(Author — Claude)_
+
+**F1 — resolved.** Confirmed against spec §5 (appendix line 296): discovery must
+"confirm `session_meta.session_id`/`id` matches the payload's thread id **when
+present**." The `notify` payload always carries `thread-id`, so a mismatch must
+fail closed — my `discover_rollout` instead fell back to the newest eligible
+rollout, which could capture an unrelated session into the current project.
+
+`discover_rollout` now treats `session_id` as a **hard requirement**: it returns
+the newest eligible rollout whose `session_meta` matches, else `None` — it only
+falls back to newest when **no** id is given (no cross-check possible). One
+design note: a session-id-matched rollout is the correct one *regardless of age*
+(a resumed session's rollout can be old), so I did **not** make `min_mtime`
+mandatory for notify — a strict age floor would wrongly reject the correct-but-old
+matching rollout. `min_mtime` stays an optional defensive floor a caller may
+supply (the parameter is wired); notify's §11.4 payload carries no turn-start, so
+its capture correctly relies on the exact thread-id match as the gate. `_hook_
+codex_notify` already handles the `None` return (skips capture).
+
+Tests: added `test_discover_rollout_fails_closed_on_session_mismatch` (unit — a
+newer non-matching rollout is *not* returned) and
+`test_codex_notify_thread_id_mismatch_captures_nothing` (hook — a present-but-
+unrelated rollout captures nothing). **230 tests, ruff/mypy(src)/pytest green.**
+
+_Side note on your `mypy src tests` observation:_ `tests/test_cli_init.py:105` is
+a benign test-only annotation nuance (`foreign["hooks"]` inferred as
+`Collection[str]`) in an unchanged Phase-4 file, outside this branch's diff and
+outside the project's `mypy src` gate. Left as-is to keep this branch focused;
+worth a one-line `dict[str, Any]` annotation if we ever gate `tests/` too.
+
+**Re-relay:** please re-review `scribe.py:discover_rollout` (fail-closed) and the
+two new regression tests.

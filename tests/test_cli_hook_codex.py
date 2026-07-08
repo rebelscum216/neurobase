@@ -124,6 +124,23 @@ def test_codex_notify_no_rollout_exits_zero(
     assert store.list_raw(root, "myrepo", unconsumed_only=False) == []
 
 
+def test_codex_notify_thread_id_mismatch_captures_nothing(
+    enabled: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex F1: a present-but-non-matching rollout must not be captured — the
+    thread-id cross-check fails closed rather than grabbing the newest."""
+    root, repo = enabled
+    sessions = tmp_path / "sessions" / "2026" / "07" / "05"
+    sessions.mkdir(parents=True)
+    _rollout(sessions / "rollout-other.jsonl", str(repo), session_id="019fsess")
+    monkeypatch.setattr(codex_scribe, "_SESSIONS_ROOT", tmp_path / "sessions")
+
+    notify = json.dumps({"type": "agent-turn-complete", "thread-id": "UNRELATED", "cwd": str(repo)})
+    result = runner.invoke(app, ["hook", "codex", "notify", notify, "--root", str(root)], input="")
+    assert result.exit_code == 0
+    assert store.list_raw(root, "myrepo", unconsumed_only=False) == []
+
+
 def test_codex_stop_garbage_exits_zero(enabled: tuple[Path, Path]) -> None:
     root, _ = enabled
     result = runner.invoke(

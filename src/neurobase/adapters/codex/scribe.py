@@ -184,8 +184,16 @@ def discover_rollout(
 ) -> Path | None:
     """Find the active rollout when the hook payload carries no path (the
     ``notify`` fallback never does — §11.4). Newest ``rollout-*.jsonl`` by mtime
-    with ``mtime >= min_mtime``; if ``session_id`` is given, prefer the newest
-    whose ``session_meta`` matches, else fall back to the newest eligible."""
+    with ``mtime >= min_mtime``.
+
+    ``session_id`` (the notify payload's thread id) is a **hard requirement**
+    when given — return the newest eligible rollout whose ``session_meta``
+    matches, else ``None`` (fail closed rather than capture an unrelated
+    session's rollout into this project — spec §5/§11.4). A matching rollout is
+    correct regardless of age (a resumed session's rollout can be old), so
+    ``min_mtime`` is only a defensive floor the caller may supply; notify's
+    payload carries no turn-start, so its capture relies on the id match. Only
+    when no id is given (no cross-check possible) do we fall back to newest."""
     base = sessions_root or _SESSIONS_ROOT
     if not base.exists():
         return None
@@ -212,7 +220,8 @@ def discover_rollout(
             meta = _read_session_meta(path)
             if meta and session_id in (meta.get("session_id"), meta.get("id")):
                 return path
-    return eligible[0]  # best-effort newest
+        return None  # id given but nothing matched → fail closed
+    return eligible[0]  # no id to cross-check → best-effort newest
 
 
 def scribe(

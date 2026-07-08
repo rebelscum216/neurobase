@@ -30,11 +30,11 @@ Homepage = "https://github.com/rebelscum216/neurobase"
 Repository = "https://github.com/rebelscum216/neurobase"
 Issues = "https://github.com/rebelscum216/neurobase/issues"
 
-# Command `neurobase` → the Typer app (decision D2). Typer instances are callable,
-# so this entry point runs the CLI. The fast `neurobase hook …` path (D4) gets a
-# Typer-light implementation in Phase 4/5.
+# Command `neurobase` → `main()` (decision D2/D4). `main` routes `neurobase
+# hook …` through a Typer-light fast path that always exits 0 (spec §4/§5) and
+# skips Typer's startup; every other command goes through the Typer app.
 [project.scripts]
-neurobase = "neurobase.cli:app"
+neurobase = "neurobase.cli:main"
 
 [build-system]
 requires = ["hatchling"]

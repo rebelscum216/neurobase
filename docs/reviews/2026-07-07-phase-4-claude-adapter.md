@@ -1,6 +1,6 @@
 ---
 slug: phase-4-claude-adapter
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: phase-4-claude-adapter
@@ -96,4 +96,53 @@ The Typer-light fast path for `hook` (optimization, not correctness).
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** approve | changes-requested — _one-line rationale._
+- severity: blocker
+  file: `src/neurobase/cli/__init__.py:272`
+  issue: The `hook` command is not fail-safe for CLI parse errors that happen
+  before the command body runs. The command is exposed directly as
+  `neurobase.cli:app`, so Typer/Click can still exit 2 before the `try/except`
+  at lines 292-300. I reproduced this with
+  `runner.invoke(app, ["hook", "claude", "session-start", "extra"], input="{}")`
+  and with `["hook", "claude", "session-start", "--root"]`; both returned
+  exit code 2. Spec §4 says the SessionEnd hook is deterministic and "Every
+  code path exits 0", and the same fail-safe property is called out for
+  SessionStart in §3. Because hooks are fail-safe-critical, parse-time exits are
+  still part of the hook entry point's behavioral surface, even if the installed
+  command normally passes the expected argv.
+  suggested direction: Put the hook path behind a parser shape that cannot
+  fail before dispatch, or add a dedicated hook entry wrapper that catches
+  Click/Typer `SystemExit`/usage errors and returns 0 for `hook`. At minimum,
+  restore `allow_extra_args` and add regression tests for extra argv and
+  malformed hook-test flags; a stronger fix is a Typer-light/manual fast path
+  for `neurobase hook ...` so hook safety does not depend on Typer parsing.
+  - **resolution:** resolved — real fail-safe violation, and I took the
+    stronger fix you pointed at (which is also what D12 wants). Two changes:
+    (1) the `hook` Typer command now takes only `ctx: typer.Context`
+    (`allow_extra_args=True, ignore_unknown_options=True`, no declared
+    options) and delegates to `run_hook(ctx.args)`, which parses agent/event
+    and the `--transcript/--cwd/--root/--reason` flags **manually**
+    (`_parse_hook_args`) — extra positionals, unknown flags, and value-less
+    known flags are all ignored, never a parse error. (2) The console-script
+    entry point moved from `:app` to `:main` (pyproject); `main()` routes any
+    `neurobase hook …` through `run_hook(sys.argv[2:])` and returns — so real
+    hook invocations skip Typer parsing entirely (the D12 fast path) and
+    cannot exit non-zero. Verified both reproduced cases now exit 0 through
+    both the Typer app (CliRunner) and the installed shim: `neurobase hook
+    claude session-start extra --root /tmp/nb` → 0; `... --root` (valueless)
+    → 0; `neurobase hook totally bogus args` → 0. Added 4 regression tests
+    (`test_hook_extra_positional_arg_exits_zero`,
+    `test_hook_valueless_flag_exits_zero`, `test_run_hook_fast_path_directly`,
+    `test_parse_hook_args_forms`). 187 tests, ruff/mypy/pytest green.
+
+Verification run (Author, post-fix): ruff/format/mypy green; `pytest` 187
+passed; the two argv cases from the finding exit 0 via CliRunner and the real
+`uv tool` shim.
+
+**Author's response to verdict:** the blocker was a real spec §4/§5 fail-safe
+hole in the CLI parse layer; fixed with the manual-parse hook command plus a
+Typer-light `main()` fast path (D12), and regression-tested against the exact
+argv you reproduced. Re-relaying.
+
+**Verdict:** changes-requested — one blocking fail-safe violation remains in the
+hook CLI entry path; the focused suite, full `pytest`, `ruff check`, `ruff
+format --check`, and `mypy src tests` otherwise pass. _(Awaiting re-review.)_

@@ -109,6 +109,76 @@ def test_hook_no_args_exits_zero() -> None:
     assert result.exit_code == 0
 
 
+def test_hook_extra_positional_arg_exits_zero(enabled: tuple[Path, Path]) -> None:
+    # Regression (Codex review): a malformed argv must not trip a Typer parse
+    # error (exit 2) before dispatch.
+    root, _ = enabled
+    result = runner.invoke(
+        app, ["hook", "claude", "session-start", "extra", "--root", str(root)], input="{}"
+    )
+    assert result.exit_code == 0
+
+
+def test_hook_valueless_flag_exits_zero(enabled: tuple[Path, Path]) -> None:
+    # Regression (Codex review): a known flag with no value must not exit 2.
+    result = runner.invoke(app, ["hook", "claude", "session-start", "--root"], input="{}")
+    assert result.exit_code == 0
+
+
+def test_run_hook_fast_path_directly(enabled: tuple[Path, Path], tmp_path: Path) -> None:
+    """The Typer-light fast path main() uses — parses args + dispatches, never
+    raises."""
+    root, repo = enabled
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "isSidechain": False,
+                "cwd": str(repo),
+                "message": {"role": "user", "content": "fast path prompt"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # run_hook reads stdin; feed it via monkeypatching is overkill — pass the
+    # transcript + cwd + root as flags (payload not needed).
+    cli.run_hook(
+        [
+            "claude",
+            "session-end",
+            "--transcript",
+            str(transcript),
+            "--cwd",
+            str(repo),
+            "--root",
+            str(root),
+        ]
+    )
+    raws = store.list_raw(root, "myrepo", unconsumed_only=False)
+    assert len(raws) == 1 and "fast path prompt" in raws[0].body
+
+
+def test_parse_hook_args_forms() -> None:
+    assert cli._parse_hook_args(["claude", "session-end"]) == ("claude", "session-end", {})
+    assert cli._parse_hook_args(["claude", "session-end", "--cwd", "/x"]) == (
+        "claude",
+        "session-end",
+        {"cwd": "/x"},
+    )
+    assert cli._parse_hook_args(["claude", "session-end", "--cwd=/y"]) == (
+        "claude",
+        "session-end",
+        {"cwd": "/y"},
+    )
+    # unknown flag, valueless flag, extra positional → all ignored, never crash
+    assert cli._parse_hook_args(["claude", "session-start", "extra", "--bogus", "--root"]) == (
+        "claude",
+        "session-start",
+        {},
+    )
+
+
 def test_session_end_scribe_failure_exits_zero(
     enabled: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

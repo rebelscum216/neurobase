@@ -269,32 +269,82 @@ def _hook_claude_session_start(
     recall.spawn_curate_if_stale(resolved_root, resolved_cwd)
 
 
+_HOOK_FLAGS = ("--transcript", "--cwd", "--root", "--reason")
+
+
+def _parse_hook_args(args: list[str]) -> tuple[str | None, str | None, dict[str, str]]:
+    """Manual, never-failing parse of ``hook`` args. Positionals → agent/event;
+    ``--flag value`` / ``--flag=value`` (known flags only) → opts; anything else
+    (extra positionals, unknown or value-less flags) is ignored. This is the
+    fast path (D12): hook safety must not depend on Typer/Click parsing, which
+    can exit 2 on a malformed argv *before* the body runs."""
+    positionals: list[str] = []
+    opts: dict[str, str] = {}
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok.startswith("--"):
+            if "=" in tok:
+                key, _, val = tok.partition("=")
+                if key in _HOOK_FLAGS:
+                    opts[key[2:]] = val
+            elif tok in _HOOK_FLAGS and i + 1 < len(args) and not args[i + 1].startswith("--"):
+                opts[tok[2:]] = args[i + 1]
+                i += 1
+            # unknown flag, or known flag with no value: ignore (never crash)
+        else:
+            positionals.append(tok)
+        i += 1
+    agent = positionals[0] if positionals else None
+    event = positionals[1] if len(positionals) > 1 else None
+    return agent, event, opts
+
+
+def run_hook(args: list[str]) -> None:
+    """Dispatch a hook invocation. Spec §4/§5: **always returns cleanly** —
+    never raises, never exits non-zero, never wedges an agent's session start
+    or teardown. On any error it captures nothing / injects nothing."""
+    try:
+        agent, event, opts = _parse_hook_args(args)
+        payload = _read_stdin_json()
+        if agent == "claude" and event == "session-end":
+            _hook_claude_session_end(
+                payload,
+                opts.get("transcript"),
+                opts.get("cwd"),
+                opts.get("root"),
+                opts.get("reason"),
+            )
+        elif agent == "claude" and event == "session-start":
+            _hook_claude_session_start(payload, opts.get("cwd"), opts.get("root"))
+        # codex (Phase 5) and any unknown agent/event: no-op.
+    except Exception:  # noqa: BLE001 - fail-safe: never wedge teardown
+        pass
+
+
 @app.command(
     name="hook",
-    context_settings={"ignore_unknown_options": True},
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     add_help_option=False,
 )
-def hook(
-    agent: str = typer.Argument(None, help="claude | codex"),
-    event: str = typer.Argument(None, help="session-start | session-end"),
-    transcript: str = typer.Option(None, "--transcript", help="Transcript path (testing)."),
-    cwd: str = typer.Option(None, "--cwd", help="Override cwd (testing)."),
-    root: str = typer.Option(None, "--root", help="Override the store root (testing)."),
-    reason: str = typer.Option(None, "--reason", help="SessionEnd reason (testing)."),
-) -> None:
+def hook(ctx: typer.Context) -> None:
     """Deterministic capture/inject entry point invoked by agent hooks.
 
     Spec §4/§5: **always exits 0** — never wedge an agent's session start or
-    teardown. On any error it captures nothing / injects nothing rather than
-    crash. Reads the hook payload as JSON on stdin; the ``--transcript`` /
-    ``--cwd`` / ``--root`` / ``--reason`` flags override for testing.
+    teardown. Reads the hook payload as JSON on stdin; ``--transcript`` /
+    ``--cwd`` / ``--root`` / ``--reason`` override for testing. All args are
+    parsed manually (``run_hook``) so a malformed argv can't trip a Typer
+    parse-error exit before dispatch; ``main()`` routes real ``neurobase hook``
+    invocations here without paying Typer's startup at all (D12 fast path).
     """
-    payload = _read_stdin_json()
-    try:
-        if agent == "claude" and event == "session-end":
-            _hook_claude_session_end(payload, transcript, cwd, root, reason)
-        elif agent == "claude" and event == "session-start":
-            _hook_claude_session_start(payload, cwd, root)
-        # codex (Phase 5) and any unknown agent/event: no-op, exit 0.
-    except Exception:  # noqa: BLE001 - fail-safe: capture/inject nothing, never wedge teardown
-        pass
+    run_hook(ctx.args)
+
+
+def main() -> None:
+    """Console-script entry point. ``neurobase hook …`` takes a Typer-light
+    fast path that **cannot exit non-zero** (spec §4/§5); everything else goes
+    through the normal Typer app."""
+    if len(sys.argv) > 1 and sys.argv[1] == "hook":
+        run_hook(sys.argv[2:])
+        return
+    app()

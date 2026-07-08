@@ -37,7 +37,9 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0003](0003-hook-latency-budget.md) | Hook latency budget | Accepted | S6 |
 | [0004](0004-codex-injection-fallback.md) | Codex injection — hook `additionalContext` doesn't reach the model | Superseded by 0005 | S2 |
 | [0005](0005-codex-injection-confirmed.md) | Codex injection — `additionalContext` does reach the model (corrects 0004) | Accepted | S2 |
+| [0006](0006-codex-hook-command-tokenization-and-trust.md) | Codex hooks — string-with-args `command`, stdin JSON payload, trust re-fires on edit | Accepted | Phase 5-init |
 
 All four Phase 0 spikes (S1, S2, S5, S6) are now closed. ADR-0004 was caught
 and reversed by Codex's own review of this repo's relay process — see
-ADR-0005 for the correction.
+ADR-0005 for the correction. ADR-0006 records the follow-on command-tokenization
+and trust-gate spike that unblocked the `init --agent codex` installer.

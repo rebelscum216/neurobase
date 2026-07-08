@@ -3,7 +3,7 @@
 A defined process for handing implementation work from an **Author** agent (Claude)
 to an independent **Reviewer** agent (Codex) and back, with a durable, greppable
 trail. This file is the **single source of truth** for the process; the Claude
-`code-review-relay` skill and the [AGENTS.md](../AGENTS.md) Reviewer section are thin
+`xcode-review` skill and the [AGENTS.md](../AGENTS.md) Reviewer section are thin
 pointers to it, so the protocol never drifts between agents.
 
 ## Why relay at all

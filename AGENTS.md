@@ -68,7 +68,7 @@ neurobase/
 │                                · adapters/codex/ recommender/ mcp/ (stubs)
 ├── tests/                    ← Phase 0 smoke + Phase 1/2/3/4 suites; spec-§11 fixtures land per phase
 ├── docs/                     ← canonical docs, ADRs, notes, code-review relay + reviews
-├── .claude/skills/           ← project skills (e.g. code-review-relay, the Author role)
+├── .claude/skills/           ← project skills (e.g. xcode-review, the Author role)
 └── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix (lint, format, types, tests)
 ```
 
@@ -164,11 +164,16 @@ lands.
   stop/start, argv JSON for notify; **always exits 0**). The MVP "Done when" is
   covered by `tests/test_cross_agent.py` (a Claude raw + a Codex raw fold into
   one fact set → **both** next-sessions recall the node) and the codex `stop`
-  capture is verified live through the installed shim. 228 tests. **Deferred to
-  Phase 5-init** (installer): `init --agent codex` (hooks.json + the
-  `[projects."<repo>"] hooks=".codex/hooks.json"` + `trust_level` config keys,
-  CamelCase events, notify fallback — spec §7). **Next: `init --agent codex`,
-  then the live cross-agent demo** (needs the user's real Codex config).
+  capture is verified live through the installed shim. `neurobase init --agent
+  codex [--user] [--yes]` is live: it writes CamelCase `SessionStart`/`Stop`
+  hooks to `hooks.json` using absolute shim command strings, and for project
+  scope surgically merges `hooks = ".codex/hooks.json"` +
+  `trust_level = "trusted"` into `~/.codex/config.toml` while preserving
+  unrelated comments/tables/keys. ADR-0006 records the live spike confirming
+  Codex tokenizes string commands, sends stdin JSON, and re-prompts trust after
+  hook edits; init prints that approval reminder. 266 tests. **Still deferred**
+  (needs the user's real Codex config): the live installed `init --agent codex`
+  run and full in-vivo cross-agent demo.
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a
@@ -211,7 +216,7 @@ This repo has a **defined cross-agent review process**: Claude authors, Codex
 reviews independently, findings come back, Claude resolves. The full protocol,
 roles, and reviewer checklist are in
 [docs/code-review-relay.md](docs/code-review-relay.md) — that file is the single
-source of truth; this section and the Claude `code-review-relay` skill are pointers.
+source of truth; this section and the Claude `xcode-review` skill are pointers.
 
 - **If you are Codex, you are the Reviewer.** When the user points you at a review
   file under `docs/reviews/`: read the brief, then **run the diff and review the
@@ -221,8 +226,8 @@ source of truth; this section and the Claude `code-review-relay` skill are point
   Append findings (severity · `file:line` · issue · suggested direction) and end
   with a verdict (`approve` | `changes-requested`). **Do not fix** — that's the
   Author's job.
-- **If you are Claude, you are the Author** — the `code-review-relay` skill
-  (`.claude/skills/code-review-relay/`) drives your half.
+- **If you are Claude, you are the Author** — the `xcode-review` skill
+  (`.claude/skills/xcode-review/`) drives your half.
 - **Keep Author and Reviewer as separate sessions.** The independent perspective is
   the entire point of the relay.
 

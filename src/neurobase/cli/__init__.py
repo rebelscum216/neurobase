@@ -19,6 +19,7 @@ import typer
 from neurobase import __version__
 from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.claude import recall, scribe
+from neurobase.adapters.codex import install as codex_install
 from neurobase.adapters.codex import recall as codex_recall
 from neurobase.adapters.codex import scribe as codex_scribe
 from neurobase.brain import resolve_brain
@@ -197,31 +198,38 @@ def doctor() -> None:
 
 @app.command()
 def init(
-    agent: str = typer.Option(..., "--agent", help="Which agent to install hooks for (claude)."),
+    agent: str = typer.Option(
+        ..., "--agent", help="Which agent to install hooks for (claude | codex)."
+    ),
     user: bool = typer.Option(
-        False, "--user", help="Install into ~/.claude/settings.json (default: project-local)."
+        False, "--user", help="Install into the agent's user config (default: project-local)."
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
     cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
 ) -> None:
     """Install Neurobase's hooks into an agent's config (consent-first, spec §7).
 
-    Shows the exact settings-JSON diff, asks for consent, backs up the original,
-    and writes idempotently — only hook entries Neurobase created are ever
-    touched. Currently supports ``--agent claude``.
+    Shows the exact config diff, asks for consent, backs up the original(s), and
+    writes idempotently — only hook entries Neurobase created are ever touched.
+    Supports ``--agent claude`` and ``--agent codex``.
     """
-    if agent != "claude":
+    resolved_root = store.resolve_root(None)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    if agent == "claude":
+        _init_claude(resolved_root, resolved_cwd, user=user, yes=yes)
+    elif agent == "codex":
+        _init_codex(resolved_root, resolved_cwd, user=user, yes=yes)
+    else:
         typer.secho(
-            f"unsupported agent {agent!r} — only 'claude' is available "
-            "(codex lands in Phase 5).",
+            f"unsupported agent {agent!r} — choose 'claude' or 'codex'.",
             fg=typer.colors.RED,
             err=True,
         )
         raise typer.Exit(code=1)
 
+
+def _init_claude(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bool) -> None:
     config = load_config()
-    resolved_root = store.resolve_root(None)
-    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
     path = claude_install.settings_path(user=user, cwd=resolved_cwd)
 
     try:
@@ -239,13 +247,7 @@ def init(
         typer.echo(f"Claude hooks already up to date in {path}.")
         return
 
-    diff = difflib.unified_diff(
-        before.splitlines(keepends=True),
-        after.splitlines(keepends=True),
-        fromfile=f"{path} (current)",
-        tofile=f"{path} (proposed)",
-    )
-    typer.echo("".join(diff))
+    typer.echo(_unified_diff(before, after, path))
 
     if not yes and not typer.confirm(f"Apply these changes to {path}?"):
         typer.echo("Aborted — no changes made.")
@@ -260,6 +262,87 @@ def init(
         fg=typer.colors.GREEN,
     )
     typer.echo("Run `neurobase enable` in each repo you want captured (opt-in).")
+
+
+def _init_codex(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bool) -> None:
+    """Install Codex hooks (spec §7). Writes a ``hooks.json`` and, for project
+    scope, surgically registers the project in ``~/.codex/config.toml`` so the
+    hook is discovered and trusted."""
+    project_root = resolved_cwd if user else projects.git_common_root(resolved_cwd) or resolved_cwd
+    hooks_path = codex_install.hooks_json_path(user=user, cwd=project_root)
+    try:
+        existing_hooks = codex_install.load_hooks(hooks_path)
+    except codex_install.HooksParseError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    shim = codex_install.shim_path()
+    new_hooks = codex_install.build_hooks(existing_hooks, shim)
+    hooks_before = codex_install.render_hooks(existing_hooks) if hooks_path.exists() else ""
+    hooks_after = codex_install.render_hooks(new_hooks)
+    hooks_changed = hooks_before != hooks_after
+
+    # config.toml is edited only for project scope (user hooks.json is
+    # auto-discovered and needs no [projects.*] table).
+    cfg_path = codex_install.config_path()
+    project_key = str(project_root)
+    cfg_before = ""
+    cfg_after = ""
+    cfg_changed = False
+    if not user:
+        try:
+            cfg_before = codex_install.load_config_text(cfg_path)
+            cfg_after = codex_install.merge_config(cfg_before, project_key)
+        except codex_install.ConfigParseError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+        cfg_changed = cfg_before != cfg_after
+
+    if not hooks_changed and not cfg_changed:
+        typer.echo("Codex hooks already up to date.")
+        return
+
+    if hooks_changed:
+        typer.echo(_unified_diff(hooks_before, hooks_after, hooks_path))
+    if cfg_changed:
+        typer.echo(_unified_diff(cfg_before, cfg_after, cfg_path))
+
+    targets = [hooks_path] + ([cfg_path] if not user else [])
+    target_desc = ", ".join(str(t) for t in targets)
+    if not yes and not typer.confirm(f"Apply these changes to {target_desc}?"):
+        typer.echo("Aborted — no changes made.")
+        return
+
+    backup_dir = backups.backup_files(resolved_root, targets)
+    if backup_dir is not None:
+        typer.echo(f"Backed up existing config to {backup_dir}")
+    if hooks_changed:
+        codex_install.write_hooks(hooks_path, new_hooks)
+    if cfg_changed:
+        codex_install.write_config(cfg_path, cfg_after)
+
+    typer.secho(
+        f"Installed Codex hooks in {hooks_path}. Takes effect next session.",
+        fg=typer.colors.GREEN,
+    )
+    typer.secho(
+        "IMPORTANT — approve the hook in Codex before it takes effect: editing "
+        "hooks.json invalidates its trust hash, so Codex re-prompts to approve "
+        "the hook on next launch. It will not fire until you approve it there.",
+        fg=typer.colors.YELLOW,
+    )
+    typer.echo("Run `neurobase enable` in each repo you want captured (opt-in).")
+
+
+def _unified_diff(before: str, after: str, path: Path) -> str:
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"{path} (current)",
+            tofile=f"{path} (proposed)",
+        )
+    )
 
 
 # --- Planned command surface (stubs until each command's phase lands) ---------

@@ -194,6 +194,19 @@ def test_memory_remember_errors_without_resolvable_project(root: Path, tmp_path:
         anyio.run(srv.call_tool, "memory_remember", {"fact": "orphan fact"})
 
 
+def test_memory_remember_invalid_explicit_project_is_documented_error(
+    root: Path, tmp_path: Path
+) -> None:
+    # A bad explicit project slug must surface the documented no-project error
+    # (§13 fail-soft), not a raw InvalidSlugError from ensure_tree.
+    _register(root, tmp_path, "alpha")
+    srv = _server(root, cwd=tmp_path / "alpha")
+    with pytest.raises(Exception) as exc:  # noqa: B017
+        anyio.run(srv.call_tool, "memory_remember", {"fact": "hi", "project": "Bad Slug!"})
+    msg = str(exc.value).lower()
+    assert "available" in msg and "invalid project slug" not in msg
+
+
 def test_memory_remember_explicit_project_overrides_cwd(root: Path, tmp_path: Path) -> None:
     _register(root, tmp_path, "beta")
     srv = _server(root, cwd=tmp_path / "unregistered")

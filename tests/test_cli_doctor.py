@@ -80,6 +80,18 @@ def test_doctor_reports_mcp_registration(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "registers neurobase" in after.output
 
 
+def test_doctor_warns_on_stale_mcp_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_tools(monkeypatch)
+    # Right command, wrong args ⇒ not startable ⇒ doctor must warn, not OK.
+    claude_install.write_settings(
+        claude_install.mcp_config_path(),
+        {"mcpServers": {"neurobase": {"type": "stdio", "command": SHIM, "args": ["bad"]}}},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert "unexpected command or args" in result.output
+    assert "registers neurobase →" not in result.output  # not reported OK
+
+
 def test_doctor_reports_installed_hooks_and_trust(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

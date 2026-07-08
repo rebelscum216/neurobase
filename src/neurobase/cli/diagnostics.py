@@ -357,8 +357,8 @@ def _claude_mcp_check(shim: str) -> Check:
         return _check(
             "claude mcp",
             "warn",
-            f"{path} registers neurobase at a different command",
-            "Run `neurobase init --agent claude` to update.",
+            f"{path} registers neurobase with an unexpected command or args",
+            "Run `neurobase init --agent claude` to repair it.",
         )
     return _check(
         "claude mcp",
@@ -385,8 +385,8 @@ def _codex_mcp_check(shim: str) -> Check:
         return _check(
             "codex mcp",
             "warn",
-            f"{path} registers neurobase at a different command",
-            "Run `neurobase init --agent codex` to update.",
+            f"{path} registers neurobase with an unexpected command or args",
+            "Run `neurobase init --agent codex` to repair it.",
         )
     return _check(
         "codex mcp",

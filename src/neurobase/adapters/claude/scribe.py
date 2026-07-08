@@ -167,6 +167,10 @@ def scribe(
         return None  # untracked directory
     if not store.memory_dir(project, root).exists():
         return None  # opt-in: no tree ⇒ write nothing
+    try:
+        store.ensure_store_metadata(root)  # D11: refuse a newer-schema store
+    except store.UnsupportedSchemaError:
+        return None  # fail closed — never write into an incompatible store
 
     prompts: list[str] = parsed["prompts"]
     summary: str = parsed["summary"]

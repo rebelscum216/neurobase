@@ -541,7 +541,6 @@ def _uninstall_codex(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
 
 _PLANNED: list[tuple[str, int, str]] = [
     ("recall", 4, "Print the memory that would be injected for a project."),
-    ("mcp", 7, "Run the MCP server exposing memory tools to any client."),
     ("recommend", 8, "Review skill/rule proposals mined from your history."),
     ("seed", 8, "Import existing notes / Claude auto-memory as curated facts."),
 ]
@@ -562,6 +561,29 @@ def _make_stub(name: str, phase: int, summary: str) -> Callable[[], None]:
 
 for _name, _phase, _summary in _PLANNED:
     app.command(name=_name)(_make_stub(_name, _phase, _summary))
+
+
+# --- mcp: the MCP server (Phase 7) --------------------------------------------
+
+mcp_app = typer.Typer(
+    name="mcp",
+    help="Run the MCP server exposing memory tools to any client.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(mcp_app, name="mcp")
+
+
+@mcp_app.command("serve")
+def mcp_serve(
+    root: str | None = typer.Option(None, "--root", help="Override the store root."),
+) -> None:
+    """Serve memory tools over stdio to any MCP client (Claude, Codex, …)."""
+    # Lazy import: the mcp SDK pulls in starlette/uvicorn/pydantic — keep it off
+    # the hot path for every other command (and the hook fast-path).
+    from neurobase.mcp import serve as _serve
+
+    _serve(store.resolve_root(root))
 
 
 def _read_stdin_json() -> dict[str, object]:

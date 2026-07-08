@@ -32,7 +32,10 @@ accumulated cross-agent corpus for recurring patterns and proposes — never
 auto-installs — promotions into the standard **SKILL.md** and
 **AGENTS.md/CLAUDE.md** formats, learning from which proposals you accept. All of
 it runs on the user's machine, on the user's existing agent subscriptions, with
-zero cloud dependency and zero telemetry.
+zero cloud dependency and zero telemetry. A later local UI sits on the same
+proposal store: review recommendations, inspect evidence, accept/edit/reject,
+and turn accepted skills/rules on or off without leaving the local-first trust
+boundary.
 
 **Non-goals (permanent):** hosted backend or sync service; telemetry of any kind;
 vector/graph database in the core; brokering anyone's subscription credentials;
@@ -246,12 +249,24 @@ loop closed.
   recency-weight; proposal threshold default: ≥3 occurrences over ≥2 sessions
   (any agent mix).
 - **Proposals:** files under `<root>/proposals/<slug>.md` (frontmatter: status
-  proposed|accepted|rejected|superseded, type skill|rule, target, evidence,
-  scores) — the store pattern reused, human-readable, git-diffable.
+  proposed|accepted|rejected|superseded, type skill|rule, target, enabled,
+  emitted_path, evidence, scores) — the store pattern reused, human-readable,
+  git-diffable. The proposal store is also the future UI's data model: every
+  recommendation keeps its rationale, evidence, current state, and managed
+  artifact pointer.
 - **Review:** `neurobase recommend` (list/show/accept/edit/reject). Accept →
   render **SKILL.md** folder (user or project scope, user's choice) or fenced
   rule block into **CLAUDE.md / AGENTS.md**, shown as a diff, consent, backup —
-  never auto-installed. Reject → recorded with optional reason.
+  never auto-installed. Accepted artifacts are managed by Neurobase so they can
+  later be disabled/re-enabled without deleting history. Reject → recorded with
+  optional reason.
+- **Activation controls:** `neurobase recommend enable|disable <slug>` toggles
+  accepted proposals. For skills, disable preserves the generated folder but
+  marks it inactive by moving it behind a Neurobase-owned disabled path or
+  writing an agreed disabled marker; for rules, disable removes only the owned
+  fenced block from the target file. Re-enable restores the same managed artifact
+  through the usual diff/consent/backup flow. No proposal is activated,
+  deactivated, or edited silently.
 - **Ledger + metrics** (`<root>/recommender/ledger.jsonl`): per proposal —
   accepted/rejected/edited; 30-day survival (artifact still present/unmodified —
   checked opportunistically at curate time); recurrence-reduction (does the
@@ -265,6 +280,22 @@ Code actually loads; reject visibly suppresses similar candidates next run;
 ledger metrics render.
 **Demo:** the headline reel — `neurobase recommend` proposes a skill from your
 real history, you accept, the *next session uses it*.
+
+### Future Phase — Local recommender UI *(post-CLI, not a v1 gate)*
+**Goal:** make the recommender feel like the app's front door instead of a CLI
+report.
+**Deliverables:** local-only UI over the same `<root>/proposals/` +
+`recommender/ledger.jsonl` data: recommendation inbox, proposal detail view,
+evidence browser (curated facts/raw refs/nodes), diff preview, accept/edit/reject,
+enable/disable toggles for accepted skills/rules, and basic metrics
+(accepted/rejected, survival, recurrence-reduction). The UI never phones home
+and does not gain powers the CLI lacks; it calls the same consent-first write
+paths and shows the same diffs/backups.
+**Done when:** a user can review all proposed skills/rules, accept one, disable
+it, and re-enable it from the UI, with the underlying standard files changing
+exactly as the CLI would.
+**Demo:** open the local UI, toggle a recommended skill off/on, then verify the
+next agent session sees the enabled state only.
 
 ### Phase 9 — 0.1.0 public release *(1 session)*
 **Goal:** shippable open source, honestly documented.
@@ -284,8 +315,9 @@ SQLite shadow index behind `neurobase index` (FTS5 → sqlite-vec; markdown stay
 truth) · native scheduler (`schedule --install`, launchd/systemd/schtasks +
 doctor checks) · Ollama backend · third agent via the adapter guide (Gemini CLI /
 Cursor — AGENTS.md route makes read-side cheap) · `recall <topic>` explicit pull
-· Obsidian starter vault config · basic-memory importer · PEP 541 claim on
-`neurobase` · multi-machine story (git-sync the store; docs only, no service).
+· local recommender UI if it does not land before release · Obsidian starter
+vault config · basic-memory importer · PEP 541 claim on `neurobase` ·
+multi-machine story (git-sync the store; docs only, no service).
 
 ## 7. Risk register
 

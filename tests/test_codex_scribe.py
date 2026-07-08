@@ -148,9 +148,7 @@ def test_ide_context_capped(enabled: tuple[Path, Path], tmp_path: Path) -> None:
     assert "x" * (scribe.MAX_IDE_CHARS + 1) not in body
 
 
-def test_consecutive_duplicate_prompts_skipped(
-    enabled: tuple[Path, Path], tmp_path: Path
-) -> None:
+def test_consecutive_duplicate_prompts_skipped(enabled: tuple[Path, Path], tmp_path: Path) -> None:
     root, repo = enabled
     events = [
         _meta(str(repo)),

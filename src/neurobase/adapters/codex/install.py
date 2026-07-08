@@ -125,6 +125,11 @@ def _merge_event(existing_groups: Any, owned_group: dict[str, Any]) -> list[Any]
     return kept
 
 
+def _remove_owned_event(existing_groups: Any) -> list[Any]:
+    """Drop Neurobase-owned groups and keep every foreign group verbatim."""
+    return [g for g in (existing_groups or []) if not _is_owned_group(g)]
+
+
 def build_hooks(existing: dict[str, Any], shim: str) -> dict[str, Any]:
     """Return the hooks.json dict with Neurobase's Codex hooks installed —
     preserving every non-owned key and handler. The whole file is wrapped in a
@@ -137,6 +142,24 @@ def build_hooks(existing: dict[str, Any], shim: str) -> dict[str, Any]:
     hooks["SessionStart"] = _merge_event(hooks.get("SessionStart"), _start_group(shim))
     hooks["Stop"] = _merge_event(hooks.get("Stop"), _stop_group(shim))
     result["hooks"] = hooks
+    return result
+
+
+def remove_owned_hooks(existing: dict[str, Any]) -> dict[str, Any]:
+    """Return ``existing`` with only Neurobase-owned hook groups removed."""
+    result = copy.deepcopy(existing)
+    hooks = result.get("hooks")
+    if not isinstance(hooks, dict):
+        return result
+    new_hooks: dict[str, Any] = {}
+    for event, groups in hooks.items():
+        kept = _remove_owned_event(groups)
+        if kept:
+            new_hooks[event] = kept
+    if new_hooks:
+        result["hooks"] = new_hooks
+    else:
+        result.pop("hooks", None)
     return result
 
 
@@ -302,6 +325,20 @@ def _update_table(lines: list[str], header_idx: int, updates: dict[str, str]) ->
     return "\n".join(result)
 
 
+def _remove_table_key(lines: list[str], header_idx: int, key: str) -> str:
+    body_end = len(lines)
+    for j in range(header_idx + 1, len(lines)):
+        if _ANY_HEADER_RE.match(lines[j]):
+            body_end = j
+            break
+    result = [
+        line
+        for j, line in enumerate(lines)
+        if not (header_idx < j < body_end and _assigns_key(line, key))
+    ]
+    return "\n".join(result)
+
+
 def merge_config(existing_text: str, project_key: str, hooks_rel: str = PROJECT_HOOKS_REL) -> str:
     """Surgically ensure ``[projects."<project_key>"]`` sets
     ``trust_level = "trusted"`` and ``hooks = "<hooks_rel>"``, preserving all
@@ -349,6 +386,37 @@ def merge_config(existing_text: str, project_key: str, hooks_rel: str = PROJECT_
         and got.get("hooks") == hooks_rel
     ):
         raise ConfigParseError("surgical config edit did not produce the expected keys")
+    return new_text
+
+
+def remove_project_hooks_config(
+    existing_text: str, project_key: str, hooks_rel: str = PROJECT_HOOKS_REL
+) -> str:
+    """Remove Neurobase's project ``hooks`` setting from config.toml.
+
+    ``trust_level`` and unrelated project keys are intentionally left alone:
+    directory trust can be user-owned, while ``hooks = ".codex/hooks.json"`` is
+    the Neurobase discovery edge created by init.
+    """
+    parsed = _parse_toml(existing_text)
+    projects = parsed.get("projects")
+    entry = projects.get(project_key) if isinstance(projects, dict) else None
+    if not isinstance(entry, dict) or entry.get("hooks") != hooks_rel:
+        return existing_text
+
+    lines = existing_text.split("\n")
+    header_idx = _find_table_header(lines, ["projects", project_key])
+    if header_idx is None:
+        raise ConfigParseError(
+            f'cannot surgically edit [projects."{project_key}"] '
+            "(defined in a form this installer does not rewrite)"
+        )
+    new_text = _remove_table_key(lines, header_idx, "hooks")
+    check = _parse_toml(new_text)
+    projects_out = check.get("projects", {})
+    got = projects_out.get(project_key, {}) if isinstance(projects_out, dict) else {}
+    if isinstance(got, dict) and got.get("hooks") == hooks_rel:
+        raise ConfigParseError("surgical config edit did not remove the hooks key")
     return new_text
 
 

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+import neurobase.cli as cli
 from neurobase.cli import app
 
 runner = CliRunner()
@@ -18,6 +19,14 @@ runner = CliRunner()
 
 def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _which_agents(name: str) -> str | None:
+    return {
+        "claude": "/usr/bin/claude",
+        "codex": "/usr/bin/codex",
+        "neurobase": "/usr/local/bin/neurobase",
+    }.get(name)
 
 
 @pytest.fixture
@@ -132,6 +141,38 @@ def test_init_unsupported_agent_exits_1(env: Path) -> None:
     result = runner.invoke(app, ["init", "--agent", "gemini"])
     assert result.exit_code == 1
     assert "gemini" in result.output
+
+
+def test_guided_init_yes_enables_repo_and_installs_detected_agents(
+    env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(cli.shutil, "which", _which_agents)
+
+    result = runner.invoke(app, ["init", "--cwd", str(repo), "--yes"])
+
+    assert result.exit_code == 0
+    assert "Enabled project 'repo'" in result.output
+    assert (tmp_path / "store" / "projects" / "repo" / "memory").is_dir()
+    assert (repo / ".claude" / "settings.json").exists()
+    assert (repo / ".codex" / "hooks.json").exists()
+    assert (env / ".codex" / "config.toml").exists()
+
+
+def test_guided_init_no_detected_agents_still_enables_repo(
+    env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(cli.shutil, "which", lambda _: None)
+
+    result = runner.invoke(app, ["init", "--cwd", str(repo), "--yes"])
+
+    assert result.exit_code == 0
+    assert "Enabled project 'repo'" in result.output
+    assert "No supported agents found" in result.output
+    assert (tmp_path / "store" / "projects" / "repo" / "memory").is_dir()
 
 
 # --- init --agent codex (spec §7) -----------------------------------------

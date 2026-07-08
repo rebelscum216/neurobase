@@ -39,6 +39,14 @@ def test_idempotent() -> None:
     assert install.render(once) == install.render(twice)
 
 
+def test_remove_owned_settings_preserves_foreign_hooks() -> None:
+    owned = install.build_settings({}, SHIM, ["startup", "clear"])
+    foreign = {"hooks": [{"type": "command", "command": "/usr/bin/audit"}]}
+    owned["hooks"]["PreToolUse"] = [foreign]
+    result = install.remove_owned_settings(owned)
+    assert result == {"hooks": {"PreToolUse": [foreign]}}
+
+
 def test_replaces_owned_group_not_stacking() -> None:
     # An old Neurobase entry (different shim path) should be replaced, not kept.
     old_cmd = "/old/path/neurobase hook claude session-end"
@@ -138,3 +146,17 @@ def test_backup_files_writes_manifest(tmp_path: Path) -> None:
 def test_backup_files_none_when_nothing_exists(tmp_path: Path) -> None:
     root = tmp_path / "store"
     assert backups.backup_files(root, [tmp_path / "missing.json"]) is None
+
+
+def test_restore_backup_round_trips_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    target = tmp_path / "settings.json"
+    target.write_text("before", encoding="utf-8")
+    backup_dir = backups.backup_files(root, [target])
+    assert backup_dir is not None
+    target.write_text("after", encoding="utf-8")
+
+    restored = backups.restore_backup(root, backup_dir.name)
+
+    assert restored == [target.resolve()]
+    assert target.read_text(encoding="utf-8") == "before"

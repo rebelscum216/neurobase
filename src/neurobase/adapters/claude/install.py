@@ -94,6 +94,11 @@ def _merge_event(existing_groups: Any, owned_group: dict[str, Any]) -> list[Any]
     return kept
 
 
+def _remove_owned_event(existing_groups: Any) -> list[Any]:
+    """Drop Neurobase-owned groups and keep every foreign group verbatim."""
+    return [g for g in (existing_groups or []) if not _is_owned_group(g)]
+
+
 def build_settings(existing: dict[str, Any], shim: str, sources: list[str]) -> dict[str, Any]:
     """Return the settings dict with Neurobase's Claude hooks installed —
     preserving every non-owned key and hook."""
@@ -105,6 +110,29 @@ def build_settings(existing: dict[str, Any], shim: str, sources: list[str]) -> d
     hooks["SessionEnd"] = _merge_event(hooks.get("SessionEnd"), _end_group(shim))
     hooks["SessionStart"] = _merge_event(hooks.get("SessionStart"), _start_group(shim, sources))
     result["hooks"] = hooks
+    return result
+
+
+def remove_owned_settings(existing: dict[str, Any]) -> dict[str, Any]:
+    """Return ``existing`` with only Neurobase-owned hook groups removed.
+
+    This is the surgical uninstall counterpart to ``build_settings``: unrelated
+    top-level keys, events, and hook groups are preserved byte-for-byte after
+    JSON round-trip rendering.
+    """
+    result = copy.deepcopy(existing)
+    hooks = result.get("hooks")
+    if not isinstance(hooks, dict):
+        return result
+    new_hooks: dict[str, Any] = {}
+    for event, groups in hooks.items():
+        kept = _remove_owned_event(groups)
+        if kept:
+            new_hooks[event] = kept
+    if new_hooks:
+        result["hooks"] = new_hooks
+    else:
+        result.pop("hooks", None)
     return result
 
 

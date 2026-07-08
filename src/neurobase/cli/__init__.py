@@ -8,6 +8,7 @@ phases land, replace a stub with its real command.
 
 from __future__ import annotations
 
+import difflib
 import json
 import sys
 from collections.abc import Callable
@@ -16,9 +17,10 @@ from pathlib import Path
 import typer
 
 from neurobase import __version__
+from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.claude import recall, scribe
 from neurobase.brain import resolve_brain
-from neurobase.core import projects, store
+from neurobase.core import backups, projects, store
 from neurobase.core.config import load_config
 from neurobase.curator import curate as run_curate
 from neurobase.curator import is_stale, read_fact_count_trend
@@ -191,11 +193,77 @@ def doctor() -> None:
         raise typer.Exit(code=1)
 
 
+@app.command()
+def init(
+    agent: str = typer.Option(..., "--agent", help="Which agent to install hooks for (claude)."),
+    user: bool = typer.Option(
+        False, "--user", help="Install into ~/.claude/settings.json (default: project-local)."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+) -> None:
+    """Install Neurobase's hooks into an agent's config (consent-first, spec §7).
+
+    Shows the exact settings-JSON diff, asks for consent, backs up the original,
+    and writes idempotently — only hook entries Neurobase created are ever
+    touched. Currently supports ``--agent claude``.
+    """
+    if agent != "claude":
+        typer.secho(
+            f"unsupported agent {agent!r} — only 'claude' is available "
+            "(codex lands in Phase 5).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    config = load_config()
+    resolved_root = store.resolve_root(None)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    path = claude_install.settings_path(user=user, cwd=resolved_cwd)
+
+    try:
+        existing = claude_install.load_settings(path)
+    except claude_install.SettingsParseError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    shim = claude_install.shim_path()
+    new_settings = claude_install.build_settings(existing, shim, config.inject.sources)
+
+    before = claude_install.render(existing) if path.exists() else ""
+    after = claude_install.render(new_settings)
+    if before == after:
+        typer.echo(f"Claude hooks already up to date in {path}.")
+        return
+
+    diff = difflib.unified_diff(
+        before.splitlines(keepends=True),
+        after.splitlines(keepends=True),
+        fromfile=f"{path} (current)",
+        tofile=f"{path} (proposed)",
+    )
+    typer.echo("".join(diff))
+
+    if not yes and not typer.confirm(f"Apply these changes to {path}?"):
+        typer.echo("Aborted — no changes made.")
+        return
+
+    backup_dir = backups.backup_files(resolved_root, [path])
+    if backup_dir is not None:
+        typer.echo(f"Backed up {path} to {backup_dir}")
+    claude_install.write_settings(path, new_settings)
+    typer.secho(
+        f"Installed Claude hooks in {path}. Takes effect next session.",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo("Run `neurobase enable` in each repo you want captured (opt-in).")
+
+
 # --- Planned command surface (stubs until each command's phase lands) ---------
 
 _PLANNED: list[tuple[str, int, str]] = [
     ("recall", 4, "Print the memory that would be injected for a project."),
-    ("init", 6, "Interactive setup: detect agents, choose store root, install hooks."),
     ("uninstall", 6, "Remove Neurobase-owned hooks; leave the store intact."),
     ("mcp", 7, "Run the MCP server exposing memory tools to any client."),
     ("recommend", 8, "Review skill/rule proposals mined from your history."),

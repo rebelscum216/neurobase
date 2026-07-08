@@ -134,12 +134,18 @@ lands.
   header, 6000-char cap (drop whole trailing nodes), detached
   `curate --if-stale` spawn (D8), fail-safe (any error ⇒ emit nothing). Live
   `neurobase hook claude session-end|session-start` (stdin JSON, **always
-  exits 0** — never wedges teardown). 183 tests; the loop verified live
-  through the installed shim (SessionEnd raw → curate → SessionStart emits the
-  injected context). **Deferred to a follow-up** (needs the user's real Claude
-  config + live sessions): `init --agent claude` (settings.json diff/consent/
-  backup, spec §7) and the in-vivo session-A→session-B demo. **Next: that
-  install step, then Phase 5** (Codex adapter → cross-agent MVP).
+  exits 0** — never wedges teardown). The loop is verified live through the
+  installed shim (SessionEnd raw → curate → SessionStart emits the injected
+  context). `neurobase init --agent claude [--user] [--yes]` is now live
+  (`adapters/claude/install.py` + `core/backups.py`, spec §7/§10): it shows the
+  exact settings.json diff, asks consent, backs the original up under
+  `<root>/backups/<ts>/` with a manifest, then writes atomically — fenced
+  ownership means only entries whose command contains `neurobase hook ` are
+  ever created/replaced/removed, so every other key and hook is preserved, and
+  a malformed settings.json is refused rather than clobbered. 206 tests.
+  **Still deferred** (needs the user's real Claude config + live sessions): the
+  in-vivo session-A→session-B demo of the installed hooks. **Next: that live
+  demo, then Phase 5** (Codex adapter → cross-agent MVP).
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a

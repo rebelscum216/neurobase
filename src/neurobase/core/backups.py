@@ -15,6 +15,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
+class BackupRestoreError(RuntimeError):
+    """A requested backup cannot be restored."""
+
+
 def _timestamp() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
 
@@ -41,3 +45,39 @@ def backup_files(root: Path, paths: Iterable[Path]) -> Path | None:
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
     return backup_dir
+
+
+def restore_backup(root: Path, timestamp: str) -> list[Path]:
+    """Restore every file listed in ``<root>/backups/<timestamp>/manifest.json``.
+
+    This is intentionally wholesale disaster recovery, not normal uninstall.
+    """
+    if Path(timestamp).name != timestamp:
+        raise BackupRestoreError("backup timestamp must be a single directory name")
+    backup_dir = root / "backups" / timestamp
+    manifest_path = backup_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise BackupRestoreError(f"backup manifest not found: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise BackupRestoreError(f"backup manifest is not valid JSON: {exc}") from exc
+    if not isinstance(manifest, list):
+        raise BackupRestoreError("backup manifest is not a JSON list")
+
+    restored: list[Path] = []
+    for entry in manifest:
+        if not isinstance(entry, dict):
+            raise BackupRestoreError("backup manifest contains a non-object entry")
+        original = entry.get("original_abs_path")
+        stored = entry.get("stored_as")
+        if not isinstance(original, str) or not isinstance(stored, str):
+            raise BackupRestoreError("backup manifest entry is missing paths")
+        stored_path = Path(stored)
+        if not stored_path.exists():
+            raise BackupRestoreError(f"backed-up file is missing: {stored_path}")
+        original_path = Path(original)
+        original_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(stored_path, original_path)
+        restored.append(original_path)
+    return restored

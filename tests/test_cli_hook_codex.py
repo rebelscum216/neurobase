@@ -87,7 +87,17 @@ def test_codex_stop_rollout_flag_override(enabled: tuple[Path, Path], tmp_path: 
     # No transcript_path in the payload; --rollout supplies it (testing path).
     result = runner.invoke(
         app,
-        ["hook", "codex", "stop", "--rollout", str(rollout), "--cwd", str(repo), "--root", str(root)],  # noqa: E501
+        [
+            "hook",
+            "codex",
+            "stop",
+            "--rollout",
+            str(rollout),
+            "--cwd",
+            str(repo),
+            "--root",
+            str(root),
+        ],  # noqa: E501
         input="{}",
     )
     assert result.exit_code == 0
@@ -103,9 +113,7 @@ def test_codex_notify_discovers_rollout_and_writes(
     _rollout(sessions / "rollout-abc.jsonl", str(repo), session_id="019fsess")
     monkeypatch.setattr(codex_scribe, "_SESSIONS_ROOT", tmp_path / "sessions")
 
-    notify = json.dumps(
-        {"type": "agent-turn-complete", "thread-id": "019fsess", "cwd": str(repo)}
-    )
+    notify = json.dumps({"type": "agent-turn-complete", "thread-id": "019fsess", "cwd": str(repo)})
     result = runner.invoke(app, ["hook", "codex", "notify", notify, "--root", str(root)], input="")
     assert result.exit_code == 0
     raws = store.list_raw(root, "myrepo", unconsumed_only=False)

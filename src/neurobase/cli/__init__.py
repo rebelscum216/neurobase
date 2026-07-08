@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -23,6 +24,7 @@ from neurobase.adapters.codex import install as codex_install
 from neurobase.adapters.codex import recall as codex_recall
 from neurobase.adapters.codex import scribe as codex_scribe
 from neurobase.brain import resolve_brain
+from neurobase.cli import diagnostics
 from neurobase.core import backups, projects, store
 from neurobase.core.config import load_config
 from neurobase.curator import curate as run_curate
@@ -174,32 +176,34 @@ def curate(
 
 
 @app.command()
-def doctor() -> None:
-    """Diagnose the install: which brain backend resolves, and why (Phase 2).
-
-    (Shim + agent + store-health checks land with their phases; Phase 2 covers
-    the brain section — build-plan Phase 2 demo.)
-    """
+def doctor(
+    cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+) -> None:
+    """Diagnose the install: shim, store, brain, agents, hooks, and trust."""
     config = load_config()
-    brain, resolution = resolve_brain(config)
-    label = resolution.backend
-    if resolution.version:
-        label += f" ({resolution.version})"
-    if brain is not None:
-        typer.secho(f"brain: {label} — {resolution.reason}", fg=typer.colors.GREEN)
-    else:
-        typer.secho(
-            f"brain: none — {resolution.reason} (configured backend: {config.brain.backend})",
-            fg=typer.colors.RED,
-            err=True,
-        )
+    resolved_root = store.resolve_root(None)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    checks = diagnostics.collect_checks(config, resolved_root, resolved_cwd)
+    for check in checks:
+        symbol = {"ok": "✓", "warn": "!", "error": "✗"}[check.status]
+        color = {
+            "ok": typer.colors.GREEN,
+            "warn": typer.colors.YELLOW,
+            "error": typer.colors.RED,
+        }[check.status]
+        typer.secho(f"{symbol} {check.name}: {check.detail}", fg=color)
+        if check.remedy:
+            typer.echo(f"  remedy: {check.remedy}")
+    if diagnostics.has_errors(checks):
         raise typer.Exit(code=1)
 
 
 @app.command()
 def init(
-    agent: str = typer.Option(
-        ..., "--agent", help="Which agent to install hooks for (claude | codex)."
+    agent: str | None = typer.Option(
+        None,
+        "--agent",
+        help="Which agent to install hooks for (claude | codex). Omit for guided setup.",
     ),
     user: bool = typer.Option(
         False, "--user", help="Install into the agent's user config (default: project-local)."
@@ -215,7 +219,9 @@ def init(
     """
     resolved_root = store.resolve_root(None)
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
-    if agent == "claude":
+    if agent is None:
+        _init_guided(resolved_root, resolved_cwd, user=user, yes=yes)
+    elif agent == "claude":
         _init_claude(resolved_root, resolved_cwd, user=user, yes=yes)
     elif agent == "codex":
         _init_codex(resolved_root, resolved_cwd, user=user, yes=yes)
@@ -226,6 +232,47 @@ def init(
             err=True,
         )
         raise typer.Exit(code=1)
+
+
+def _init_guided(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bool) -> None:
+    """Unified Phase-6 setup flow: choose root, enable repo, install detected
+    agents through the existing per-agent consent paths."""
+    if not yes:
+        chosen_root = typer.prompt("Store root", default=str(resolved_root))
+        resolved_root = store.resolve_root(chosen_root)
+
+    enable_repo = yes or typer.confirm(f"Enable this repo in Neurobase ({resolved_cwd})?")
+    if enable_repo:
+        try:
+            project_slug = projects.register_project(resolved_root, resolved_cwd)
+            mem = store.ensure_tree(project_slug, resolved_root)
+        except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"Enabled project '{project_slug}' at {mem}")
+
+    detected = [name for name in ("claude", "codex") if shutil.which(name) is not None]
+    if not detected:
+        typer.secho(
+            "No supported agents found on PATH; install Claude/Codex or run "
+            "`neurobase init --agent <agent>` explicitly.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    selected: list[str] = []
+    for name in detected:
+        if yes or typer.confirm(f"Install Neurobase hooks for {name}?"):
+            selected.append(name)
+    if not selected:
+        typer.echo("No agent hooks selected.")
+        return
+
+    for name in selected:
+        if name == "claude":
+            _init_claude(resolved_root, resolved_cwd, user=user, yes=yes)
+        elif name == "codex":
+            _init_codex(resolved_root, resolved_cwd, user=user, yes=yes)
 
 
 def _init_claude(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bool) -> None:
@@ -345,11 +392,155 @@ def _unified_diff(before: str, after: str, path: Path) -> str:
     )
 
 
+_PendingWrite = tuple[Path, str, str, Callable[[], None]]
+
+
+@app.command()
+def uninstall(
+    agent: str = typer.Option(
+        "all", "--agent", help="Which agent to uninstall hooks for (claude | codex | all)."
+    ),
+    user: bool = typer.Option(
+        False, "--user", help="Uninstall from the agent's user config (default: project-local)."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    purge_store: bool = typer.Option(
+        False, "--purge-store", help="Also delete the Neurobase store root."
+    ),
+    restore_backup: str | None = typer.Option(
+        None,
+        "--restore-backup",
+        help="Restore a specific backup timestamp wholesale instead of surgical uninstall.",
+    ),
+    cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+) -> None:
+    """Remove Neurobase-owned hooks. The store is left intact unless
+    ``--purge-store`` is passed explicitly."""
+    resolved_root = store.resolve_root(None)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+
+    if restore_backup is not None:
+        if purge_store:
+            typer.secho(
+                "--restore-backup cannot be combined with --purge-store.", fg=typer.colors.RED
+            )
+            raise typer.Exit(code=1)
+        if not yes and not typer.confirm(
+            f"Restore backup {restore_backup!r} from {resolved_root}/backups?"
+        ):
+            typer.echo("Aborted — no changes made.")
+            return
+        try:
+            restored = backups.restore_backup(resolved_root, restore_backup)
+        except backups.BackupRestoreError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+        for path in restored:
+            typer.echo(f"Restored {path}")
+        return
+
+    if agent not in {"claude", "codex", "all"}:
+        typer.secho(
+            f"unsupported agent {agent!r} — choose 'claude', 'codex', or 'all'.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    writes: list[_PendingWrite] = []
+    try:
+        if agent in {"claude", "all"}:
+            writes.extend(_uninstall_claude(resolved_cwd, user=user))
+        if agent in {"codex", "all"}:
+            writes.extend(_uninstall_codex(resolved_cwd, user=user))
+    except (
+        claude_install.SettingsParseError,
+        codex_install.HooksParseError,
+        codex_install.ConfigParseError,
+    ) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    if not writes and not purge_store:
+        typer.echo("No Neurobase hooks found.")
+        return
+
+    for path, before, after, _writer in writes:
+        typer.echo(_unified_diff(before, after, path))
+
+    actions = [str(path) for path, *_rest in writes]
+    if purge_store:
+        actions.append(f"DELETE store {resolved_root}")
+    target_desc = ", ".join(actions)
+    if not yes and not typer.confirm(f"Apply these uninstall changes to {target_desc}?"):
+        typer.echo("Aborted — no changes made.")
+        return
+
+    backup_dir = backups.backup_files(resolved_root, [path for path, *_rest in writes])
+    if backup_dir is not None:
+        typer.echo(f"Backed up existing config to {backup_dir}")
+    for _path, _before, _after, writer in writes:
+        writer()
+    if purge_store and resolved_root.exists():
+        shutil.rmtree(resolved_root)
+        typer.echo(f"Deleted store {resolved_root}")
+    typer.secho("Uninstalled Neurobase-owned hooks.", fg=typer.colors.GREEN)
+
+
+def _uninstall_claude(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
+    path = claude_install.settings_path(user=user, cwd=resolved_cwd)
+    if not path.exists():
+        return []
+    existing = claude_install.load_settings(path)
+    new_settings = claude_install.remove_owned_settings(existing)
+    before = claude_install.render(existing)
+    after = claude_install.render(new_settings)
+    if before == after:
+        return []
+    return [(path, before, after, lambda: claude_install.write_settings(path, new_settings))]
+
+
+def _uninstall_codex(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
+    project_root = resolved_cwd if user else projects.git_common_root(resolved_cwd) or resolved_cwd
+    writes: list[_PendingWrite] = []
+
+    hooks_path = codex_install.hooks_json_path(user=user, cwd=project_root)
+    if hooks_path.exists():
+        existing_hooks = codex_install.load_hooks(hooks_path)
+        new_hooks = codex_install.remove_owned_hooks(existing_hooks)
+        hooks_before = codex_install.render_hooks(existing_hooks)
+        hooks_after = codex_install.render_hooks(new_hooks)
+        if hooks_before != hooks_after:
+            writes.append(
+                (
+                    hooks_path,
+                    hooks_before,
+                    hooks_after,
+                    lambda: codex_install.write_hooks(hooks_path, new_hooks),
+                )
+            )
+
+    if not user:
+        cfg_path = codex_install.config_path()
+        if cfg_path.exists():
+            cfg_before = codex_install.load_config_text(cfg_path)
+            cfg_after = codex_install.remove_project_hooks_config(cfg_before, str(project_root))
+            if cfg_before != cfg_after:
+                writes.append(
+                    (
+                        cfg_path,
+                        cfg_before,
+                        cfg_after,
+                        lambda: codex_install.write_config(cfg_path, cfg_after),
+                    )
+                )
+    return writes
+
+
 # --- Planned command surface (stubs until each command's phase lands) ---------
 
 _PLANNED: list[tuple[str, int, str]] = [
     ("recall", 4, "Print the memory that would be injected for a project."),
-    ("uninstall", 6, "Remove Neurobase-owned hooks; leave the store intact."),
     ("mcp", 7, "Run the MCP server exposing memory tools to any client."),
     ("recommend", 8, "Review skill/rule proposals mined from your history."),
     ("seed", 8, "Import existing notes / Claude auto-memory as curated facts."),

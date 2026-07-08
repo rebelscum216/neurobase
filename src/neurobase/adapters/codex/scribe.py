@@ -128,9 +128,7 @@ def parse_rollout(rollout_path: Path) -> dict[str, Any]:
     }
 
 
-def _assemble_body(
-    prompts: list[str], summary: str, ide_context: str
-) -> str:
+def _assemble_body(prompts: list[str], summary: str, ide_context: str) -> str:
     kept = [p[:MAX_PROMPT_CHARS] for p in prompts[-MAX_PROMPTS:]]
     summary = summary[:MAX_SUMMARY_CHARS]
     lines = [

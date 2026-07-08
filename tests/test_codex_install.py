@@ -46,6 +46,14 @@ def test_build_hooks_idempotent() -> None:
     assert install.render_hooks(once) == install.render_hooks(twice)
 
 
+def test_remove_owned_hooks_preserves_foreign_events() -> None:
+    owned = install.build_hooks({}, SHIM)
+    foreign = {"hooks": [{"type": "command", "command": "/usr/bin/audit"}]}
+    owned["hooks"]["PreToolUse"] = [foreign]
+    result = install.remove_owned_hooks(owned)
+    assert result == {"hooks": {"PreToolUse": [foreign]}}
+
+
 def test_build_hooks_replaces_owned_group_not_stacking() -> None:
     old_cmd = "/old/path/neurobase hook codex session-start"
     existing = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": old_cmd}]}]}}
@@ -197,6 +205,23 @@ def test_merge_config_idempotent_with_escaped_quote_path() -> None:
     once = install.merge_config("", weird)
     twice = install.merge_config(once, weird)
     assert twice == once
+
+
+def test_remove_project_hooks_config_preserves_trust_and_other_keys() -> None:
+    existing = (
+        f'[projects."{KEY}"]\n'
+        'trust_level = "trusted"\n'
+        'hooks = ".codex/hooks.json"\n'
+        'approved_commands = ["ls"]\n'
+    )
+    out = install.remove_project_hooks_config(existing, KEY)
+    entry = _project(out)
+    assert entry == {"trust_level": "trusted", "approved_commands": ["ls"]}
+
+
+def test_remove_project_hooks_config_noops_foreign_hooks_value() -> None:
+    existing = f'[projects."{KEY}"]\nhooks = "foreign/hooks.json"\n'
+    assert install.remove_project_hooks_config(existing, KEY) == existing
 
 
 def test_load_config_text_missing_returns_empty(tmp_path: Path) -> None:

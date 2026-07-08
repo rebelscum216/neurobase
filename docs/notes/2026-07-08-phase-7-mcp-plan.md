@@ -65,7 +65,7 @@ spec section) rather than discovering them mid-build.
 | # | Question | Leaning / default |
 |---|---|---|
 | D-a | `memory_search` ranking: pure substring/grep, or BM25? | Ship **grep + simple term-frequency scoring** in v1; BM25 is backlog (SQLite FTS5 line already there). Keep the interface stable so the impl can swap. |
-| D-b | `memory_remember` slug + placement: how does a user-directed fact avoid the curator "owns curated body" rule? | Write to `curated/` with a generated slug (slugify first line, dedupe suffix) and provenance `user-directed`; it survives the next curate pass because provenance is merged, not clobbered. **Confirm curator won't silently rewrite it.** |
+| D-b | `memory_remember` durability: is a user-directed fact protected from the curator, or a normal curated fact the curator may later fold/tombstone? | **Correction (Codex F1):** provenance gives it *no* protection. The curator sees only `{slug, body}` — provenance is not in `_facts_payload` ([`curator/engine.py:62`](../../src/neurobase/curator/engine.py)) — and it can supersede or tombstone any slug on a later pass ([`engine.py:187`](../../src/neurobase/curator/engine.py)); `upsert_curated` merges provenance only on a same-slug re-upsert and overwrites the body wholesale, `agent_last=curator` ([`store.py:252`](../../src/neurobase/core/store.py)). So a remembered fact persists only *because the curator's plan omits unchanged facts*, not by protection. **Real fork to lock:** (1) treat it as an ordinary curated fact, accept curator authority (simplest, but "remember this" can silently vanish); or (2) make `user-directed` provenance **prompt-visible** so the curator treats it as pinned — a spec §2 curator-prompt change. **Recommend (2)**: honoring an explicit user save matches the human-authority principle. Either way, write to `curated/` with a slugified-first-line slug (dedupe suffix) + provenance `user-directed`, and **test the chosen contract** end-to-end (remember → curate pass → assert survival/supersession). |
 | D-c | `memory_search`/`read_node` project scoping when `project?` omitted: search all projects, or resolve from server CWD? | Omitted ⇒ **all projects** (server has no session CWD to trust). Explicit `project` filters. |
 | D-d | Dual-exposure default: resources on or off by default? | **Off** by default; `[mcp] expose_resources = true` opts in. `resources/list` still returns `[]` validly when off. |
 | D-e | Redaction on `memory_remember` input — reuse `core/redact` before write? | **Yes**, same D13 pass the scribes use. A user pasting a secret into `remember` must not persist it raw. |
@@ -121,7 +121,9 @@ Resources + prompt:
 ### E. Wiring + deps
 - Replace the `mcp` stub command with a real `serve` subcommand
   (`neurobase mcp serve`, stdio).
-- Add `mcp>=<pinned>` to `pyproject.toml` deps; refresh `uv.lock`.
+- Add the `mcp` SDK to `pyproject.toml` deps as an **exact pin** `mcp==<x.y.z>`
+  (not a lower bound — see §7 SDK-drift risk); record the version in the ADR;
+  refresh `uv.lock`.
 - `[mcp]` config dataclass in `core/config.py` (`expose_resources`, etc.).
 
 ---
@@ -164,13 +166,16 @@ Resources + prompt:
 - **Scope creep from Phase 8.** `recommendations_list` is the seam. Wire the
   read path and return `[]`; do **not** build the miner/ranker here. If tempted,
   stop — that's a separate 2–3 session phase.
-- **`memory_remember` vs curator ownership.** The store comment says the curator
-  owns curated bodies wholesale. Verify a `user-directed` fact isn't rewritten
-  or dropped on the next curate pass before calling this done (D-b).
+- **`memory_remember` vs curator authority.** The curator can supersede/tombstone
+  any slug and never sees provenance, so a `user-directed` fact is *not* protected
+  by default (Codex F1). Lock D-b's fork — pin via a prompt-visible provenance
+  (spec §2 change) or accept curator authority — and test the chosen contract
+  before calling this done.
 - **Codex `resources/list` probe.** If this ever errors, Codex may drop the
   whole server. The invariant test above is non-negotiable.
-- **SDK surface drift.** Pin the `mcp` version; note the pinned version in the
-  ADR so `doctor`/CI can flag a mismatch later.
+- **SDK surface drift.** Exact-pin `mcp==<x.y.z>` in deps (§4.E) — a lower bound
+  would let CI/users silently pick up a newer, differently-shaped SDK. Record the
+  version in the ADR so `doctor`/CI can flag a mismatch later.
 
 ## 8. Explicitly out of scope (defer)
 

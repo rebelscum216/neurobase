@@ -198,12 +198,14 @@ def test_doctor_recognizes_user_scoped_codex_hooks(
     repo.mkdir()
     user_hooks = tmp_path / "home" / ".codex" / "hooks.json"
     codex_install.write_hooks(user_hooks, codex_install.build_hooks({}, SHIM))
+    # Escape backslashes so a Windows path is a valid TOML basic-string key.
+    key = str(user_hooks).replace("\\", "\\\\")
     codex_install.write_config(
         tmp_path / "home" / ".codex" / "config.toml",
         (
             "[hooks.state]\n"
-            f'"{user_hooks}:session_start:0:0" = {{ trusted_hash = "abc" }}\n'
-            f'"{user_hooks}:stop:0:0" = {{ trusted_hash = "def" }}\n'
+            f'"{key}:session_start:0:0" = {{ trusted_hash = "abc" }}\n'
+            f'"{key}:stop:0:0" = {{ trusted_hash = "def" }}\n'
         ),
     )
 

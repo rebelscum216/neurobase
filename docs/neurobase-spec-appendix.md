@@ -577,6 +577,768 @@ No rollout/transcript path is present — §5's rollout-discovery algorithm
 `session_meta.session_id`/`id`) is **required**, not a fallback for an edge
 case, whenever `notify` is the active wiring.
 
+## 12. Recommender contract (`recommender/`, Phase 8)
+
+`neurobase recommend` and `neurobase seed` turn the corpus that every other
+layer of Neurobase already builds — curated facts, status nodes, raw captures,
+MCP proposal reads (§13) — into human-reviewed proposals for durable agent
+behavior: **SKILL.md** folders and fenced **AGENTS.md / CLAUDE.md** rule
+blocks. The recommender mines, ranks, and evidences candidates; it **never**
+writes an artifact without the same consent → diff → backup discipline the
+`init` installers use (§7/§10), and it never phones home — no hosted sync, no
+telemetry, no vector index (all Backlog, per the execution plan's "Out of
+scope"). Decisions D14–D21 below are recorded in
+[ADR-0007](adr/0007-recommender-contract.md); this section is their
+implementation-ready contract. MUST clauses are traced in parens to the named
+test each resolves, from the execution plan's workstreams B–H
+(`docs/notes/2026-07-09-phase-8-recommender-plan.md`); a clause with no named
+test is marked **Advisory** and is not gated by a test in this pass.
+
+### Invariants
+
+- **Never auto-install.** `recommend accept` is the only write path for an
+  artifact, and it MUST show the exact diff before writing regardless of
+  `--yes` (`--yes` skips the confirmation prompt, never the diff) (workstream
+  F: "accept requires consent unless `--yes`"; workstream G: "diff/backup/
+  consent").
+- **`recommend list` / `recommend show` MUST always answer with a valid
+  (possibly empty) result** over a missing `<root>/proposals/` dir, an empty
+  ledger, or one unreadable proposal file — never an unhandled exception to the
+  CLI exit code. A malformed proposal file is skipped, not fatal (workstream F:
+  "list/show on empty proposals"; workstream E: "malformed proposal files
+  skipped"; mirrors the §13 `resources/list` fail-soft invariant).
+- **The miner never writes.** `miner.py` returns candidates only; only the
+  ranker/proposal-store step touches `<root>/proposals/` — the same
+  brain/apply separation the curator uses (spec §2). (Advisory as a
+  standalone clause — no workstream test names "the miner didn't write" by
+  itself; it's enforced structurally by module boundaries and indirectly
+  covered by every ranker/proposal-store test in workstream E, which all
+  assume candidates arrive as plain data, not as a side effect of mining.)
+- **An unparseable miner response MUST leave `<root>/proposals/` byte-for-byte
+  unchanged** and log a warning; it MUST NOT raise past `recommend run`
+  (workstream D: "unparseable miner JSON leaves proposals unchanged" — mirrors
+  curator decision D9).
+- **`accepted` and `rejected` proposals MUST NOT be silently reset to
+  `proposed`** by a later `recommend run` — only an explicit candidate
+  `supersedes` may retire a still-`proposed` (never a decided) proposal, and
+  only into `superseded`, never back into `proposed` (workstream E:
+  "rejected/accepted proposals are not silently reset to proposed").
+- **Every artifact write (`accept`) MUST back up every file it is about to
+  modify** under `<root>/backups/<ts>/manifest.json` via the existing
+  `core/backups.py:backup_files`, before the first modification — no parallel
+  backup mechanism (workstream G: "diff/backup/consent"; "rollback-safe backup
+  manifest").
+- **Secrets MUST be redacted (§10/D13, `core/redact.py:redact`) before a
+  seeded fact touches disk** (workstream B: "redaction before curated write").
+  **A proposal's draft body MUST be redacted at the moment it is first
+  persisted** — by the ranker/proposal-store write on `recommend run`
+  (§12.6, workstream E: "a secret-shaped string in a miner candidate's draft
+  is redacted before the proposal file is ever written") and again by
+  `recommend edit`'s save (§12.7, workstream F: "`recommend edit`'s saved
+  draft is redacted before it replaces the proposal's stored body") — so
+  `<root>/proposals/<slug>.md` never carries an unredacted draft, at any
+  point in its lifecycle, not only from the moment `show`/`accept` read it.
+  `accept`'s render/write (§12.8) redacts the artifact body **again** as
+  belt-and-suspenders on the one durable, often git-committed write surface
+  in this contract (workstream G: "accept's rendered artifact is redacted
+  before the diff is shown or the artifact file is written") — this is a
+  **promotion from the plan's implicit "the miner shouldn't propose secrets"
+  framing to an explicit, deterministic, multi-point pass**, new in this
+  spec: the miner prompt's "never propose secrets" instruction (§12.5)
+  remains, but every persist point is now backstopped by code, not left to
+  rely on the model alone.
+- **`neurobase seed` MUST require an explicit `--from-dir <path>` or
+  `--from-claude-memory`; it MUST NOT crawl any directory the user did not
+  name** (workstream B: "`seed` requires an explicit `--from-dir` or
+  `--from-claude-memory`; omitting both is a CLI error"). This also governs
+  `--from-claude-memory`'s own scope: absent an explicit `--project` or
+  `--all-projects`, it MUST resolve and import exactly the one project implied
+  by the CLI's launch cwd, never silently loop over every registered
+  project's auto-memory directory (workstream B: "`--from-claude-memory` with
+  neither `--project` nor `--all-projects` imports exactly the single project
+  resolved from launch cwd; an unresolvable cwd is a CLI error") — see
+  §12.3's discovery-path rules for the concrete mechanism.
+- **A rule-emitter write MUST touch only its own slug-scoped fenced block**,
+  leaving every other byte of AGENTS.md/CLAUDE.md — including other proposals'
+  blocks — untouched (workstream G: "unrelated content preserved byte-for-byte
+  outside the owned block").
+- **A skill-emitter write MUST NOT silently overwrite a file it did not
+  create.** See §12.8's ownership rule (ADR-0007 D20): a target is
+  Neurobase-owned iff it carries `neurobase_managed: true` and
+  `neurobase_slug == <slug>` (workstream G: "skill emitter treats a target
+  SKILL.md as owned only via `neurobase_managed`+`neurobase_slug`, never
+  silently overwriting a foreign file").
+
+### 12.1 Proposal file format (`<root>/proposals/<slug>.md`)
+
+One file per proposal, the store's frontmatter+body pattern reused verbatim
+(`core/store.write_doc`/`read_doc`); `<slug>` matches `^[a-z0-9-]+$` (spec §1's
+`SLUG_RE`). Frontmatter is machine state; the body is the human proposal.
+
+| Key | Type | Notes |
+|---|---|---|
+| `name` | str | The slug, duplicated into frontmatter — matches the `curated/` convention and is what MCP `recommendations_list` already reads (`src/neurobase/mcp/server.py:204`) |
+| `status` | `proposed \| accepted \| rejected \| superseded` | Machine state; see the reset invariant above |
+| `type` | `skill \| rule` | Which emitter renders it |
+| `target` | `user-skill \| project-skill \| AGENTS.md \| CLAUDE.md` | Artifact family. For a **`rule`** proposal this is fixed at mining time and stable for the proposal's whole lifecycle — there is exactly one artifact family per rule proposal (§12.7), and `accept` never rewrites it. For a **`skill`** proposal the miner's value is only an advisory default scope; `recommend accept --target user\|project` is authoritative, and a successful accept updates `target` to whichever scope was actually used (overriding the miner's default if the flag said otherwise). Either way, the concrete filesystem path an accept produced lives in the separate `installed_path` field below, never encoded into `target` itself — one field never has to carry two kinds of information |
+| `project` | str, optional | Source project, when the candidate is project-scoped (a `cross-project-convention` candidate may have none) |
+| `candidate_type` | `repeated-correction \| repeated-workflow \| repeated-instruction \| cross-project-convention` | From the miner, unchanged |
+| `scores` | `{recurrence, breadth, recency, total}` (numbers) | See §12.6 for the formula |
+| `evidence` | list of structured refs | `{"kind":"curated","project":"...","slug":"..."}` \| `{"kind":"raw","project":"...","file":"..."}` \| `{"kind":"proposal","slug":"..."}` — the structured shape workstream C's corpus loader and evidence tests require; this supersedes D14's original bare-slug wording per the plan review's F2 fix, and is the only shape this spec defines |
+| `supersedes` | list of str, default `[]` | Prior proposal slugs this one retires, mirroring `curated/`'s own `supersedes` field (`core/store.py:upsert_curated`) — a small, deliberate addition beyond the execution plan's original D14 field list, needed so a superseding write has somewhere to record what it replaced (workstream E's design bullet "supersede proposals only by explicit candidate `supersedes`" otherwise has no on-disk trace — **Advisory**: that bullet is workstream E's design prose, not one of its four named `Tests:` items; §12.6 recommends a dedicated test for the supersede-transition rule this field supports) |
+| `installed_path` | str \| null | Set by `accept` to the absolute path actually written (a SKILL.md path, or the AGENTS.md/CLAUDE.md file the rule block landed in); `null` until accepted. Purely informational bookkeeping — `status: accepted` governs behavior, this is only where to go look (and what §12.9's survival check stats). A second, deliberate addition beyond the plan's original D14 field list |
+| `created_at` / `updated_at` | ISO8601 | Same convention as `curated/`'s `updated_at` |
+
+The example below is real `store.write_doc` output (frontmatter dumped via
+`yaml.safe_dump(frontmatter, sort_keys=False, default_flow_style=False,
+allow_unicode=True)`), not hand-pretty-printed — nested mappings/lists render
+block-style (each key/item on its own line), never the inline `{...}` shape a
+hand-written example might suggest; an empty list (`supersedes: []`) is the
+one case PyYAML always renders in flow form even under
+`default_flow_style=False`:
+
+```markdown
+---
+name: prefer-uv-run-over-pip
+status: proposed
+type: rule
+target: AGENTS.md
+project: neurobase
+candidate_type: repeated-instruction
+scores:
+  recurrence: 5
+  breadth: 6
+  recency: 0.86
+  total: 25.8
+evidence:
+- kind: curated
+  project: neurobase
+  slug: use-uv-not-pip
+- kind: raw
+  project: neurobase
+  file: 2026-07-03T10-00-00Z_claude_ab12cd34.md
+- kind: raw
+  project: neurobase
+  file: 2026-07-06T14-20-00Z_codex_ef56gh78.md
+supersedes: []
+created_at: '2026-07-09T12:00:00Z'
+updated_at: '2026-07-09T12:00:00Z'
+installed_path: null
+---
+
+# Prefer `uv run` over bare `pip`/`python`
+
+**Rationale:** corrected 5 times across 3 sessions (2 agents) — contributors
+keep reaching for `pip install` / `python foo.py` instead of `uv run`.
+
+**Evidence summary:** curated fact `use-uv-not-pip`; raw corrections in 2
+sessions (Claude, Codex).
+
+**Draft artifact body:**
+
+> Always invoke Python via `uv run <cmd>`, never bare `python`/`pip` — this
+> repo's toolchain is uv-managed end to end.
+
+**Caveats:** doesn't yet distinguish CI-only invocations, which already use
+`uv run` in `.github/workflows/`.
+```
+
+### 12.2 Ledger format (`<root>/recommender/ledger.jsonl`)
+
+Append-only JSONL, one event per line, mirroring `.curator-log.jsonl`'s
+append-only pass log (`curator/engine.py:_log_pass`).
+
+| Field | Type | Notes |
+|---|---|---|
+| `at` | ISO8601 | Event time |
+| `slug` | str | Proposal slug |
+| `event` | `proposed \| accepted \| rejected \| edited` | One line per event; a proposal accumulates multiple lines over its life |
+| `candidate_type` | str, optional | Carried for the miner's ledger-summary input (§12.5) |
+| `target` | str, optional | Resolved target, present from `accepted` onward |
+| `reason` | str, optional | `reject --reason TEXT` |
+
+```jsonl
+{"at":"2026-07-09T12:00:00Z","slug":"prefer-uv-run-over-pip","event":"proposed","candidate_type":"repeated-instruction"}
+{"at":"2026-07-09T12:05:00Z","slug":"prefer-uv-run-over-pip","event":"edited"}
+{"at":"2026-07-09T12:06:00Z","slug":"prefer-uv-run-over-pip","event":"accepted","target":"AGENTS.md"}
+```
+
+`recommend edit` MUST append exactly one `edited` line per edit and MUST
+persist the user's revised body/draft on the proposal file itself, not just in
+the ledger (workstream F: "edit updates the proposal body/draft and appends an
+edited ledger event"). `accept`/`reject` MUST each append exactly one line
+(workstream F: "reject updates proposal + ledger").
+
+A malformed line anywhere in the ledger (partial append, corrupt JSON — the
+ledger accumulates across many independent CLI invocations, so this is a
+realistic failure mode, not a hypothetical one) MUST be skipped, not fatal, by
+every reader (`recommend show`'s ledger-history print, `status --recommender`'s
+metrics computation) — the exact precedent `curator/engine.py:
+read_fact_count_trend` already sets (`except json.JSONDecodeError: continue`)
+(workstream H: "a malformed line in `recommender/ledger.jsonl` is skipped, not
+fatal, by metrics computation").
+
+### 12.3 Seed import contract (`neurobase seed`)
+
+Extends the existing §10 "Seeder mapping" (Claude auto-memory → curated
+facts), which already fixes: one topic file → one curated fact; slug from
+frontmatter `name` else slugified filename; body verbatim (keep
+`[[wikilinks]]`); provenance `seed:claude-memory/<filename>` /
+`seed:<dir>/<relpath>`; skip files > 20KB. §10's own wording only states the
+frontmatter-`name`-else-filename slug rule for the `--from-claude-memory`
+mapping; for `--from-dir` it says only "slug from filename," silent on
+frontmatter. Phase 8 makes an explicit, acknowledged extension to §10 rather
+than a silent reinterpretation: **both** `--from-claude-memory` and
+`--from-dir` use the same rule — slug = frontmatter `name` if the file has one
+and it's a valid slug, else slugified filename — and both skip files > 20KB.
+Arbitrary markdown notes under `--from-dir` are not guaranteed to carry a
+`name` key, which is fine: the "else slugified filename" branch is exactly the
+fallback for that common case.
+
+Phase 8 adds the machinery §10 left implicit:
+
+- **Directory recursion vs. individual-file fail-soft are two separate rules,
+  not one hedged rule:**
+  - A wholly bad, missing, or unreadable **top-level** `--from-dir <path>`
+    target is a **hard CLI error** — there is nothing to import, so the
+    command exits non-zero and writes nothing (§12.10).
+  - Within a valid top-level directory, `seed` **MUST recurse** into every
+    nested subdirectory (a "markdown-ish" file is `*.md`/`*.markdown`;
+    `MEMORY.md`-named index files are skipped exactly as §10 already
+    specifies for `--from-claude-memory`), and an individual
+    unreadable/undecodable/oversized **file** anywhere in that tree is
+    skipped and counted, not fatal — the run continues and exits 0 (workstream
+    B: "bad directory / unreadable file fail-soft" covers the file-level half
+    of this; "directory recursion imports a nested file (e.g.
+    `notes/sub/file.md`)" covers the recursion half).
+- **MUST redact (§10/D13) before writing** the curated fact — no unredacted
+  personal text ever lands in `curated/` (workstream B: "redaction before
+  curated write").
+- **MUST be idempotent on rerun**: dedupe by `(slug, sha256(raw file bytes))`.
+  A rerun over an unchanged source tree MUST NOT create duplicate curated
+  facts or duplicate provenance entries; a changed source file re-imports as
+  an update to the same slug (reusing `core/store.upsert_curated`'s
+  provenance-merge behavior) (workstream B: "idempotent import"). One caveat
+  on that reuse: `upsert_curated` unconditionally stamps
+  `frontmatter["agent_last"] = "curator"` on every call
+  (`core/store.py:upsert_curated`), with no parameter to override it. A
+  seed-imported fact was never touched by the curator, so the importer MUST
+  either pass an override (a small, additive parameter on `upsert_curated`,
+  e.g. `agent_last: str = "curator"`) or patch `agent_last` to `"seed"` on the
+  written file immediately after the call — either way, `agent_last` MUST NOT
+  silently read `curator` for a fact the curator never produced.
+- **MUST fail soft** on an unreadable/undecodable individual file inside a
+  valid `--from-dir` target — skip that file (counted, not silent) without
+  raising past the CLI and without abandoning files already imported earlier
+  in the same run; a wholly bad/missing **top-level** target is instead a hard,
+  non-zero-exit CLI error, per the recursion bullet above (workstream B: "bad
+  directory / unreadable file fail-soft").
+- **MUST preserve the source path** in `provenance` (`seed:<source>/<relpath>`)
+  and in the curated fact's `evidence`-adjacent bookkeeping so the corpus
+  loader (§12.4) can cite it (workstream B: "provenance and source metadata").
+- **MUST require an explicit flag** — no default directory, no environment
+  auto-discovery beyond what `--from-claude-memory`'s documented, fixed
+  well-known path already covers (this restates the Invariants section's
+  rule above; same workstream B tests cover it here).
+
+**`--from-claude-memory`'s discovery path is live-verified, not guessed.**
+Claude Code's per-project auto-memory directory is
+`~/.claude/projects/<cwd-with-every-'/'-replaced-by-'-'>/memory/` — confirmed
+on disk (`/Users/x/Projects/neurobase` →
+`~/.claude/projects/-Users-x-Projects-neurobase/memory/`, containing exactly
+`MEMORY.md` — the index, skipped — plus topic files with frontmatter
+`name`/`description`/`metadata.type`, precisely the shape §10's existing
+"Seeder mapping" section already specifies). This resolves the execution
+plan's own flagged risk ("`--from-claude-memory` may need a small discovery
+spike if the local layout is inconsistent across machines") without a spike.
+
+**Scope is single-project by default — this is load-bearing, not a
+convenience default.** The Invariants section's "MUST NOT crawl any directory
+the user did not name" rule applies here in full: `--from-claude-memory` with
+no `--project` MUST resolve **exactly one** project — the one
+`core/projects.py:resolve_project(root, cwd)` derives from the CLI's own
+launch cwd (the same "resolve from cwd, don't guess across the registry"
+convention ADR-0008's D-c already established for MCP reads) — and import only
+that project's auto-memory directory
+(`projects.load_registry(root)[slug][0]`, the first registered root). An
+unresolvable cwd (untracked, no registry match) is a hard CLI error ("run
+`--from-claude-memory` from inside a registered project, or pass an explicit
+`--project <slug>`"), not a silent fall-through to every registered project.
+`--project <slug>` names one *other* specific project explicitly. Importing
+from more than one project in a single invocation requires a separate,
+explicitly-named opt-in flag, `--all-projects` — never the command's default
+behavior — and even under `--all-projects`, a project with no auto-memory
+directory present is silently skipped, not an error, since most projects won't
+have one. If Claude Code ever changes the on-disk convention this section
+verified, `--from-dir` remains the always-available, format-agnostic
+fallback.
+
+### 12.4 Corpus loader
+
+A pure read-side aggregator (`recommender/corpus.py`) the miner runs over.
+Inputs, across **every** registered project (spec §10 registry):
+
+1. Active curated facts (`store.list_curated`, uncapped — the curator already
+   keeps this small by design, spec §2).
+2. Recent raw captures, capped (Default, `[recommend]` config, ADR-0007 D17):
+   `raw_lookback_days = 30` and `raw_cap_per_project = 200`, whichever yields
+   fewer files per project — bounding miner prompt size without an arbitrary
+   global cutoff (workstream C: "raw cap enforced").
+3. Ledger summaries: per-`candidate_type` reject counts, and rejected proposal
+   bodies for near-duplicate suppression — see **near-duplicate detection**
+   below (ADR-0007 D18).
+
+**Near-duplicate detection (ADR-0007 D18), defined once here and reused by the
+miner's prompt-building step (§12.5) and the ranker's suppression check
+(§12.6):** deterministic, not LLM-judged — normalized token-overlap
+(Jaccard) similarity between two bodies, lower-cased word tokens (the same
+tokenization shape `core/search.py`'s `_tokenize` already uses).
+`near_duplicate_threshold` Default `0.6` (§12.11). A fresh candidate is a
+near-duplicate of a rejected proposal when their similarity meets or exceeds
+the threshold. Computing this in plain code (not asking the model to judge
+it) is what makes workstream D's fake-brain test — "rejected near-duplicate
+summary reaches prompt" — exercisable without a fake brain that also has to
+fake good similarity judgment.
+
+Rules:
+
+- **MUST traverse every project in the registry** (`core/projects.load_registry`)
+  (workstream C: "all-project registry traversal").
+- **MUST skip a missing or malformed project tree** rather than aborting the
+  whole pass — one corrupt project must not blind the miner to every other
+  project (workstream C: "missing/bad project tree skips").
+- **Evidence references MUST use the structured shape** from §12.1 and MUST
+  serialize cleanly into proposal frontmatter (workstream C: "evidence
+  references serialize into proposal frontmatter").
+
+**Evidence resolution is fail-soft (Advisory — no workstream test names this
+directly; folded in here because §12.1's evidence list is written once and
+never pruned, so a later reader must handle rot):** a `raw` evidence item
+resolves via
+`store.memory_dir(project)/raw/<file>`; a `curated` item resolves via
+`curated/<slug>.md` (or, if tombstoned/pruned, `.tombstones/<slug>.md`, else
+"not found"); a `proposal` item resolves via `proposals/<slug>.md`. The
+loader and `recommend show` report a missing target as an unresolved evidence
+item rather than raising, and never drop it from the frontmatter list —
+evidence is an append-only historical record, not a live index.
+
+### 12.5 Miner contract (`recommender/miner.py`)
+
+Exactly the curator's brain-injection pattern (spec §2): `mine(root, brain) ->
+list[dict]` calls the injectable `Brain.plan_json` (reusing
+`brain/base.py:parse_plan_json`'s lenient, fence-tolerant parser as-is — which
+is why the response envelope below is a JSON **object**, not a bare array:
+`parse_plan_json` requires a top-level mapping).
+
+**Candidate JSON** (one entry per candidate):
+
+| Field | Type | Notes |
+|---|---|---|
+| `slug` | str | Kebab-case, `^[a-z0-9-]+$` |
+| `type` | `skill \| rule` | |
+| `candidate_type` | enum (§12.1) | |
+| `title` | str | |
+| `rationale` | str | |
+| `draft` | str | The artifact body draft |
+| `target` | str | Family/scope hint (`AGENTS.md`/`CLAUDE.md`/`user-skill`/`project-skill`) — advisory default for `type: skill` (§12.1), authoritative for `type: rule` |
+| `evidence` | list of structured refs (§12.1) | The ground truth for occurrence/breadth — see below |
+| `occurrences` | int | Miner's own count — **advisory display only** |
+| `projects` / `agents` | list of str | Miner's own claim — **advisory display only** |
+| `supersedes` | list of str, optional | Prior proposal slugs |
+
+**MUST-derive-from-evidence rule** (workstream E: "ranker recomputes
+occurrences/breadth/sessions from evidence, ignoring a miner's inflated
+self-reported counts"): the ranker (§12.6) recomputes
+`occurrences`/`sessions`/`agents`/`projects` strictly from `len(evidence)` and
+the corpus loader's per-file metadata (a `raw` evidence item's frontmatter
+carries `agent`+`session_id`; a `curated` item's `provenance` resolves back
+through its own `raw/<file>` entries) — never from the miner's self-reported
+counts, which are display text only. This keeps ranking deterministic and
+testable with a fake brain that only needs to emit a correct `evidence` list,
+not correct arithmetic.
+
+**Prompt requirements** (write your own text meeting these, mirroring spec
+§2.1's convention):
+
+- Establish role: mining a cross-agent engineering-memory corpus for recurring
+  **durable** behavior, not one-off facts.
+- **MUST instruct**: include only candidates evidenced at least `K` times
+  (`min_occurrences`, §12.6) unless explicitly seeded as high-confidence.
+- **MUST instruct**: never propose secrets, credentials, or private personal
+  content (mirrors D13's framing).
+- **MUST include** a compact ledger-derived summary — per-`candidate_type`
+  reject counts, and near-duplicate rejected proposal snippets (§12.4's
+  near-duplicate function selects which ones) — and **MUST instruct** the
+  model to avoid re-proposing them (workstream D: "rejected near-duplicate
+  summary reaches prompt").
+- Response **MUST be only JSON**, of the form `{"candidates": [...]}`.
+
+**Fail-soft rules:**
+
+- An unparseable response ⇒ `mine()` returns `[]` and `recommend run` leaves
+  `<root>/proposals/` untouched (Invariants, above).
+- A structurally invalid candidate (missing `slug`/`draft`, bad slug, disallowed
+  `type`/`candidate_type`) is **skipped with a warning**, not fatal to the rest
+  of the batch (workstream D: "invalid candidates skipped with warnings").
+- A genuine `BrainError` (timeout, non-2xx, retries exhausted —
+  `brain/base.py:call_with_retry` re-raises `BrainError` once retries are
+  exhausted) is caught the same way the curator already catches it
+  (`curator/engine.py:curate`'s `except BrainError as exc:` → a `status:
+  "error"` summary, never an uncaught exception): `mine()`/`recommend run`
+  catch `BrainError` broadly, not just the malformed-JSON subset above,
+  leaving `<root>/proposals/` untouched and reporting the error (Advisory — no
+  workstream test names this beyond the JSON-parse case, but it mirrors an
+  already-shipped curator precedent).
+
+### 12.6 Ranker + proposal store (`recommender/ranker.py`, `recommender/proposals.py`)
+
+**Breadth derivation** (from the evidence list, per §12.5's derive-from-evidence
+rule): `sessions` = count of distinct `session_id`s reachable from evidence;
+`agents` = count of distinct `agent`s; `projects` = count of distinct
+`project`s. `breadth = sessions × max(agents, 1) × max(projects, 1)` — the
+build plan's literal "breadth (sessions·agents·projects)" read as a product. A
+referenced raw file that no longer resolves (D21 — hand-deleted, or otherwise
+gone) simply doesn't contribute a session/agent to this count — fail-soft,
+not fatal, and it can only ever *under*-count breadth, never crash the
+ranker.
+
+**Recency weight:** `recency_weight = max(0.05, 0.5 ** (days_since_last_occurrence
+/ recency_halflife_days))`, `recency_halflife_days` Default `30` (§12.11). The
+floor keeps a real but aging pattern from scoring exactly zero.
+
+**Score:** `total = recurrence × breadth × recency_weight`, where
+`recurrence = max(1, len(evidence))` — the exact same number written to
+`scores.recurrence` in the frontmatter (§12.1). One name for one number: the
+candidate JSON's self-reported `occurrences` (§12.5) is display-only and never
+feeds this formula, so "recurrence" in prose, `scores.recurrence` on disk, and
+the threshold gate below are never three different things wearing different
+names. (The `min_occurrences` config key, §12.11, keeps the execution plan's
+original name for continuity — it gates the same `len(evidence)` value that
+§12.1's frontmatter calls `recurrence`.)
+
+**Threshold gate (Default, config-overridable, §12.11 — MUST enforce
+*some* gate; the specific numbers are the tuned defaults):**
+`len(evidence) >= min_occurrences` (default `3`) **and**
+`sessions >= min_breadth_sessions` (default `2`), any agent mix — matching the
+build plan's locked ranker defaults (workstream E: "threshold enforcement"). A
+candidate that fails either half of the gate is silently dropped, not an
+error — it may qualify on a later `recommend run` as more evidence
+accumulates.
+
+**Write behavior:**
+
+- **Decline a near-duplicate of a still-rejected proposal**, independent of
+  whatever the miner prompt already discouraged (§12.4/§12.5, ADR-0007 D18) —
+  belt and suspenders: the ranker re-checks similarity against every
+  `rejected` proposal's body before writing a new `proposed` file, so a miner
+  that ignores its own prompt instruction still can't resurrect a rejected
+  candidate. (Advisory — this specific ranker-side re-check has no workstream
+  test of its own yet; workstream D's "rejected near-duplicate summary reaches
+  prompt" only tests the miner-input side.)
+- **Upsert same slug, except over a user's own edit**, when a fresh
+  candidate's slug matches an existing `proposed` (not yet decided) proposal —
+  refresh body/scores/evidence, keep `created_at`, bump `updated_at`. The one
+  exception: if the proposal's ledger contains an `edited` event more recent
+  than its last `proposed`/upsert write, the ranker MUST NOT silently
+  overwrite the user's hand-edited body/draft — it either skips the refresh
+  entirely (leaving the edited proposal exactly as the user left it) or
+  refreshes only `scores`/`evidence`/`updated_at` while preserving the edited
+  body/draft verbatim; either way the miner's fresh draft never replaces text
+  a human already revised without a new decision or a new explicit edit. This
+  closes a gap the original draft left open: the "never silently reset a
+  decided proposal" protection (below) covered `accepted`/`rejected` but not
+  an edited-but-still-`proposed` proposal, which is exactly what `recommend
+  edit` exists to protect (workstream E: "a proposal edited by the user is
+  not silently overwritten by a subsequent `recommend run`").
+- **Supersede only via explicit candidate `supersedes`**: when a candidate
+  lists prior slugs there, **only the ones still `status: proposed`** flip to
+  `status: superseded` (recorded in the new proposal's `supersedes`
+  frontmatter either way, for the linkage). A named slug that is already
+  `accepted`/`rejected` is left completely alone — the very next bullet's
+  "MUST NOT overwrite" rule outranks this one, so `supersedes` can retire an
+  undecided proposal but can never reach into a decided one. (Advisory — no
+  workstream test names this specific supersede-transition rule; recommend
+  adding one to workstream E, e.g. "supersede only retires a still-proposed
+  slug, never a decided one," alongside its existing "not silently reset to
+  proposed" test.) An installed, `accepted` artifact has **no v1 uninstall
+  command** — `recommend reject` is a hard CLI error on an already-`accepted`
+  proposal for exactly this reason (§12.7); a user retires an installed
+  artifact only by hand-editing or deleting it directly (spec, out of scope;
+  ADR-0007 Consequences).
+- **MUST NOT overwrite an `accepted`/`rejected` proposal's body/status** with a
+  fresh `proposed` render on a later `recommend run` (Invariants, above;
+  workstream E: "rejected/accepted proposals are not silently reset to
+  proposed").
+- **`recommend list` MUST sort deterministically**: `total` score descending,
+  tie-broken by `created_at` ascending, then `name` ascending (workstream E:
+  "stable ordering"). This is the CLI's own sort contract; MCP
+  `recommendations_list` (`src/neurobase/mcp/server.py:211`) intentionally
+  orders independently — alphabetically by filename/slug, matching a plain
+  `sorted(proposals_dir.glob("*.md"))` — since it surfaces raw summaries
+  rather than a ranked review queue. If the two orderings should ever unify,
+  that is a follow-up change to the Phase-7 MCP tool with its own test, not
+  implied by this contract.
+- **A malformed proposal file (bad frontmatter, unparseable YAML) MUST be
+  skipped** on any load (`recommend list`/`show`/`run`), not fatal (workstream
+  E: "malformed proposal files skipped").
+
+### 12.7 CLI commands (`neurobase recommend` / `neurobase seed`)
+
+| Command | Args | Effect | Consent / writes |
+|---|---|---|---|
+| `seed` | `--from-dir <path>` and/or `--from-claude-memory` `[--project <slug>]` `[--all-projects]` | Recursive import as curated facts, provenance `seed:*` (§12.3); `--from-claude-memory` defaults to the single project resolved from launch cwd, `--project`/`--all-projects` widen that scope explicitly | Writes `curated/` directly — an explicit, user-invoked import into the user's own store, same directness as `memory_remember` (§13); redacted first, no diff/consent gate (there is no prior state to diff against) |
+| `recommend list` | `[--project <slug>]` `[--status <state>]` | Prints proposal summaries: slug, status, type, target, total score | Read-only |
+| `recommend show <slug>` | — | Prints the full proposal: rationale, evidence (marking unresolved items), draft body, scores, ledger history | Read-only |
+| `recommend run` | `[--dry-run]` | Corpus load → miner → ranker; upserts `proposed` proposals. `--dry-run` prints candidates and scores, writes nothing (workstream F: "dry-run prints candidates without writes") | Writes `<root>/proposals/*.md` (unless `--dry-run`); never touches agent config files |
+| `recommend edit <slug>` | — | Opens `$EDITOR` (or, non-interactively, prints for redirection) on the proposal body/draft; on save, overwrites body/draft and appends an `edited` ledger event | Writes proposal file + ledger only; `status` unchanged |
+| `recommend accept <slug>` | `[--target user\|project]` `[--yes]` | Renders the artifact (§12.8), diffs against the current target, asks consent (`--yes` skips the prompt, never the diff), backs up touched files, writes, flips `status: accepted`, sets `installed_path` (and, for `type: skill`, resolves `target` to the scope actually used), appends `accepted` | Writes artifact(s) + proposal + ledger; backup first (workstream F: "accept requires consent unless `--yes`") |
+| `recommend reject <slug>` | `[--reason TEXT]` | Flips `status: rejected`, records `reason`, appends `rejected` | Writes proposal + ledger only (workstream F: "reject updates proposal + ledger") |
+| `status --recommender` | — | Prints precision, edited rate, survival, recurrence-reduction, or "insufficient data" per §12.9 | Read-only; may opportunistically refresh a survival check |
+
+`--target` is meaningful only for `type: skill` proposals (it selects
+`user-skill` vs `project-skill`); `recommend accept` on a `type: rule`
+proposal ignores `--target` and uses the proposal's own `target`
+(`AGENTS.md`/`CLAUDE.md`) — there is exactly one artifact family per rule
+proposal, decided at mining time.
+
+**Blocked-status rules (new in this spec, beyond the execution plan's original
+command table — no workstream F test names any of these three directly yet;
+recommend adding "accept/reject/edit on a decided proposal is a hard,
+named-status CLI error" to workstream F's test list before this ships):**
+
+- `accept`/`edit` on a proposal whose `status` is already `rejected` or
+  `superseded` is a hard CLI error naming the blocking status — a rejected or
+  retired proposal is never silently reopened.
+- `reject` on a proposal whose `status` is already `accepted`, `rejected`, or
+  `superseded` is *also* a hard CLI error naming the blocking status. The
+  `accepted` case is deliberate and load-bearing, not an oversight: v1 has no
+  command that uninstalls an accepted artifact (ADR-0007 Consequences), so
+  `reject` must not be usable as a backdoor that flips an accepted proposal's
+  metadata to `rejected` while the real installed artifact sits untouched and
+  now out of sync with its own proposal record.
+- `accept` on an already-`accepted` proposal is the one case that stays
+  allowed — re-running it re-renders the artifact and re-diffs against
+  whatever is on disk now, which is what makes the no-op rule below possible
+  and satisfies workstream G's "idempotent accept" test.
+- `edit` on an already-`accepted` proposal is allowed: it updates the stored
+  draft for a possible future re-`accept`, but by itself never touches the
+  installed artifact — only a subsequent `accept` renders any edit made after
+  acceptance.
+
+If the rendered artifact is already byte-for-byte identical to what
+`accept` would write, `accept` is a no-op: it reports "already up to date"
+and performs no backup, no write, and no ledger event (`status` unchanged).
+
+### 12.8 Artifact emitters (`recommender/emit_skill.py`, `recommender/emit_rules.py`)
+
+Both emitters share the accept flow's diff → consent → backup steps
+(`core/backups.py:backup_files`, the same function `init` uses) — no parallel
+mechanism — and both honor the unchanged-diff no-op described in §12.7.
+
+**Project-root resolution** (needed by both emitters' project-scope path, and
+shared rather than reinvented per-emitter): `accept` can run from any cwd,
+not necessarily inside the proposal's own repo, so `<project-root>` is never
+the CLI's launch cwd — it is the proposal's `project` field looked up in
+`registry.toml` (`projects.load_registry(root)[proposal.project][0]`, the
+first registered root), the same "trust the registry, not the launch cwd"
+principle spec §13/D-c already established for MCP reads. Because
+`load_registry` returns a plain `dict[str, list[str]]`
+(`core/projects.py:load_registry`), a stale `proposal.project` — one that was
+deregistered or renamed after the proposal was written — is looked up with an
+explicit membership check, never a bare index: if `proposal.project` is not
+`None` and not a key in the current registry, that is a hard CLI error naming
+the stale project (§12.10), never an uncaught `KeyError`. `--target project`
+on a proposal with no `project` (a cross-project candidate) is a separate
+hard, immediate CLI error — "this proposal has no single source project;
+accept with `--target user`, or edit `project`/`target` in the proposal file
+first" — rather than guessing at one.
+
+**Skill emitter.** Target path: `~/.claude/skills/<slug>/SKILL.md` (user scope)
+or `<project-root>/.claude/skills/<slug>/SKILL.md` (project scope), matching
+this repo's own skill layout (e.g. `.claude/skills/xcode-review/SKILL.md`).
+Required shape (design intent, not yet a named test — see below): frontmatter
+`name` (must equal `slug`) and `description`; body must contain at least one
+`#` H1 heading. Two additional, Neurobase-internal frontmatter keys are
+written purely for ownership detection, never surfaced to the agent as part
+of the skill's contract (**ADR-0007 D20**): `neurobase_managed: true` and
+`neurobase_slug: <slug>`.
+
+- **Required-shape validation is Advisory, not a gated MUST, in this pass.**
+  The execution plan's workstream G describes this ("validates required
+  headings/frontmatter according to the local skill format") as design intent
+  under its "Skill emitter:" heading, but names it in none of its four actual
+  `Tests:` items (diff/backup/consent; idempotent accept; rollback-safe
+  backup manifest; unrelated content preserved byte-for-byte outside the
+  owned block). Recommend adding an explicit test (e.g. "skill emitter rejects
+  a draft with no H1 / missing frontmatter before it ever reaches the
+  diff/consent step") before this validation is treated as contractually
+  gated.
+- **Ownership rule:** a target file is Neurobase-owned **iff** it already has
+  `neurobase_managed: true` and `neurobase_slug == <slug>` (workstream G:
+  "skill emitter treats a target SKILL.md as owned only via
+  `neurobase_managed`+`neurobase_slug`, never silently overwriting a foreign
+  file"). Re-accepting an owned file diffs the rendered body against the
+  existing one and overwrites on consent — idempotent (workstream G:
+  "idempotent accept" exercises the owned-file path). A target that exists
+  but is **not** owned — including one whose frontmatter fails to parse at
+  all, which is treated identically to "not owned" rather than propagating a
+  parse error out of the ownership check — is still written only through the
+  same single diff → consent → backup gate, but the CLI's diff view calls out
+  explicitly that this will replace non-Neurobase content, so the user isn't
+  surprised by what "diff" means here; the always-taken backup (any
+  pre-existing file is backed up before its first modification, per the
+  Invariants) is what makes this reversible rather than requiring a second
+  confirmation mechanism.
+- **Never touches a sibling skill folder** — only `<slug>/SKILL.md` under the
+  chosen scope is read or written (workstream G: "unrelated content preserved
+  byte-for-byte outside the owned block").
+
+**Rule emitter.** Writes a fenced, slug-scoped block into the target
+AGENTS.md/CLAUDE.md, following the exact convention `core/linkify.py` already
+established for its `lineage:auto` block — an HTML-comment-delimited section
+that a rerun replaces wholesale rather than stacking:
+
+```
+<!-- neurobase:rule:<slug> (generated by `neurobase recommend accept` — hand edits inside this block are overwritten on the next accept of this proposal) -->
+<rule body — the proposal's draft artifact, verbatim markdown>
+<!-- /neurobase:rule:<slug> -->
+```
+
+- **Fenced rule ownership markers:** the `<slug>` inside the markers is what
+  makes ownership unambiguous per-proposal — accepting proposal `X` locates
+  and replaces only the block bounded by `neurobase:rule:X` markers (anywhere
+  in the file, preserving its position), or appends a new block at
+  end-of-file under a `## Neurobase-managed rules` heading (created on first
+  append) if no such block exists yet. (Advisory — workstream A's plan
+  describes this marker convention as a contract requirement, but no named
+  workstream G test yet exercises marker-parsing locating the correct
+  slug-scoped block among several co-existing ones; recommend adding one
+  alongside "unrelated content preserved byte-for-byte outside the owned
+  block.")
+- **MUST preserve every other byte of the file** — other prose, other
+  proposals' blocks, and manual edits outside any Neurobase block are
+  untouched (workstream G: "unrelated content preserved byte-for-byte outside
+  the owned block").
+- Removing an already-accepted rule block is **out of scope for v1** — no
+  command deletes it; a user who deletes it by hand keeps it deleted (later
+  accepts of *other* slugs cannot resurrect it, since each block is
+  slug-scoped).
+
+**Redaction on the write path (promoted to a MUST — new in this spec, beyond
+the execution plan's original text, closing a gap the plan-review pass
+flagged):** both emitters MUST run the rendered artifact body through
+`core/redact.py:redact` before it is shown in `recommend show`'s draft view
+and again immediately before `accept` writes it, exactly as `seed` already
+does for curated facts (§12.3) and the scribes already do for raw captures.
+AGENTS.md/CLAUDE.md/SKILL.md are durable, often git-committed artifacts —
+the one place in this contract where a redaction miss is worse than a miss in
+the local-only store, so this is the one exception to "prompt instruction is
+enough": the miner prompt's "never propose secrets" instruction (§12.5)
+remains, but it is now backstopped by the same deterministic pass every other
+write path already gets, not left as the sole line of defense — belt-and-
+suspenders on top of the draft already being redacted when it was first
+persisted (Invariants, above) (workstream G: "accept's rendered artifact is
+redacted before the diff is shown or the artifact file is written").
+
+### 12.9 Metrics (`status --recommender`)
+
+Resolves the plan review's round-2 nit — "nail down whether an edited-then-
+accepted proposal counts once or twice" — by using **two distinct
+denominators** (**ADR-0007 D19**), so an intermediate edit never dilutes
+precision. This split is the metrics contract's load-bearing rule and is
+stated here explicitly and without hedging:
+
+- **`decided`** = count of proposals whose *current* `status` is `accepted` or
+  `rejected` (excludes `proposed` and `superseded`). One proposal contributes
+  at most 1 to `decided`, regardless of how many `edited` events preceded its
+  final decision.
+- **`precision = accepted / decided`** (`0` decided ⇒ "insufficient data").
+  `precision` and `edited_rate` are computed **only** over this
+  proposal-counted `decided` denominator — never over raw ledger event
+  counts.
+- **`edited_rate`** = (count of `decided` proposals whose ledger contains ≥1
+  `edited` event) / `decided` — "what fraction of decisions needed a hand
+  edit first," not a raw event count, so it can't exceed 1.0 and doesn't
+  double-count an edited-then-accepted proposal.
+- **`reviewed_events`** — a separate, secondary, explicitly **event-counted**
+  activity metric, kept for parity with the execution plan's original
+  "reviewed" wording (workstream H: "accepted/rejected/edited counts"). It is
+  the literal, raw count of `accepted` + `rejected` + `edited` ledger *lines*
+  — one proposal edited three times before acceptance contributes 4 to
+  `reviewed_events` (3 `edited` + 1 `accepted`) but exactly 1 to `decided`.
+  `reviewed_events` is reported alongside the other metrics and is **never**
+  used as the denominator of `precision` or `edited_rate` — that would be the
+  exact double-counting bug the plan review's round-2 nit flagged. (No
+  workstream H test names this exact "edited-then-accepted counts once, not
+  once-per-line" behavior yet — Advisory; recommend adding one, e.g. "a
+  proposal edited three times before acceptance contributes exactly 1 to
+  `decided` and 4 to `reviewed_events`," alongside workstream H's existing
+  "accepted/rejected/edited counts" test.)
+- **Survival**: for each `accepted` proposal, the artifact is checked
+  opportunistically at curate time. Before `survival_window_days` (Default
+  `30`, §12.11) have elapsed since acceptance, an absent/modified artifact
+  reports "insufficient data," **never** `false` — only past the window does a
+  missing-or-modified artifact flip `survival: false` (workstream H: "missing
+  artifact marks survival false only after the configured window").
+- **Recurrence reduction** (Advisory/best-effort — not named by a workstream
+  test, and never a gating MUST; the build plan itself calls this metric
+  "opportunistic" v1): after acceptance, the near-duplicate function (§12.4,
+  ADR-0007 D18) checks whether new evidence of the same `candidate_type` + a
+  similar body keeps appearing; reported as a ratio pre/post acceptance, or
+  "insufficient data" when history is too thin. This is the one metric in
+  §12.9 that is explicitly best-effort rather than a MUST-have contract.
+- **Empty ledger** ⇒ every metric reports "insufficient data," never a crash
+  or a divide-by-zero (workstream H: "metrics on empty ledger").
+- **A malformed ledger line** is skipped, not fatal, by this computation —
+  see §12.2's ledger-reader rule.
+
+### 12.10 Fail-soft quick reference
+
+Every row below is already a MUST or a stated behavior in full somewhere
+above; this table is purely a scan aid (mirrors §13's own "Invariants" table
+style) so an implementer can check "does this failure mode have a defined
+behavior" in one place without re-reading the whole section.
+
+| Situation | Behavior | Where |
+|---|---|---|
+| Unparseable miner JSON | `mine()` returns `[]`; `<root>/proposals/` untouched | §12.5, Invariants |
+| A genuine `BrainError` (timeout, exhausted retries) from the miner's brain call | Caught broadly, not just the JSON-parse subset; `<root>/proposals/` untouched, error reported | §12.5 |
+| Invalid candidate (bad slug/enum/missing field) | Skipped with a warning; rest of batch still writes | §12.5 |
+| Candidate fails the recurrence/session gate | Silently dropped, not an error — may qualify next run | §12.6 |
+| Near-duplicate of a `rejected` proposal | Silently suppressed, logged, not written | §12.6 |
+| Fresh candidate matches a `proposed` slug the user has since `edit`-ed | Refresh does not silently clobber the user's edited body/draft | §12.6 |
+| Malformed `proposals/*.md` | Skipped on any scan (list/show/run/rank/dup-check) | §12.6, Invariants |
+| No `<root>/proposals/` at all | `list`/`show`/`metrics` degrade to empty — matches `recommendations_list`'s own `[]` contract | Invariants |
+| `accept`/`edit` on `rejected`/`superseded` | Hard CLI error naming the blocking status; never reopened | §12.7 |
+| `reject` on `accepted`/`rejected`/`superseded` | Hard CLI error naming the blocking status; no v1 uninstall-by-reject | §12.7 |
+| `accept` with an unchanged diff | No-op, "already up to date," no write, no backup, no ledger event | §12.7 |
+| `accept --target project` with no `project` on the proposal | Hard CLI error; never guesses a project | §12.8 |
+| `accept` where `proposal.project` no longer exists in `registry.toml` | Hard CLI error naming the stale project; never a bare `KeyError` | §12.8 |
+| `accept` onto a foreign (non-Neurobase) SKILL.md, including one with unparseable frontmatter | Treated as "not owned"; written only through the single diff/consent/backup gate, diff view calls it out explicitly | §12.8 |
+| Missing/unreadable project tree during corpus load | That project skipped, others still mined | §12.4 |
+| Referenced evidence file later missing/pruned | Reported "unresolved," never dropped from frontmatter, never raises | §12.4 |
+| `seed` bad top-level directory | Hard CLI error (nothing to import) | §12.3 |
+| `seed` unreadable/oversized individual file | Skipped and counted; run continues, exits 0 | §12.3 |
+| `seed --from-claude-memory` with no `--project` and no `--all-projects` | Resolves exactly one project from launch cwd; unresolvable cwd is a hard CLI error | §12.3 |
+| Malformed line in `recommender/ledger.jsonl` | Skipped, not fatal, by `recommend show` and `status --recommender` | §12.2, §12.9 |
+| Empty ledger | Every metric reports "insufficient data," never a crash/divide-by-zero | §12.9 |
+
+### 12.11 Config (extends §10's `config.toml`)
+
+A new `[recommend]` table, all keys optional/Default, following the existing
+`Config` dataclass pattern (`core/config.py`):
+
+```toml
+[recommend]
+min_occurrences = 3          # ranker gate (§12.6)
+min_breadth_sessions = 2     # ranker gate (§12.6)
+recency_halflife_days = 30   # §12.6 recency weight
+raw_lookback_days = 30       # corpus loader cap (§12.4, ADR-0007 D17)
+raw_cap_per_project = 200    # corpus loader cap (§12.4, ADR-0007 D17)
+near_duplicate_threshold = 0.6  # §12.5/§12.6 (ADR-0007 D18)
+survival_window_days = 30    # §12.9
+```
+
 ## 13. MCP server contract (`mcp/`, Phase 7)
 
 `neurobase mcp serve` runs a **stdio** MCP server (official `mcp` SDK,

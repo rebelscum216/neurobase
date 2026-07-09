@@ -110,6 +110,12 @@ Tests:
 - redaction before curated write
 - bad directory / unreadable file fail-soft
 - provenance and source metadata
+- directory recursion imports a nested file (e.g. `notes/sub/file.md`)
+- `seed` requires an explicit `--from-dir` or `--from-claude-memory`;
+  omitting both is a CLI error
+- `--from-claude-memory` with neither `--project` nor `--all-projects`
+  imports exactly the single project resolved from launch cwd; an
+  unresolvable cwd is a CLI error
 
 ### C. Corpus loader and evidence model
 
@@ -188,6 +194,12 @@ Tests:
 - stable ordering
 - rejected/accepted proposals are not silently reset to proposed
 - malformed proposal files skipped
+- a secret-shaped string in a miner candidate's draft is redacted before the
+  proposal file is ever written
+- ranker recomputes occurrences/breadth/sessions from evidence, ignoring a
+  miner's inflated self-reported counts
+- a proposal edited by the user is not silently overwritten by a subsequent
+  `recommend run`
 
 ### F. `neurobase recommend`
 
@@ -208,6 +220,8 @@ Tests:
 - list/show on empty proposals
 - dry-run prints candidates without writes
 - edit updates the proposal body/draft and appends an `edited` ledger event
+- `recommend edit`'s saved draft is redacted before it replaces the
+  proposal's stored body
 - accept requires consent unless `--yes`
 - reject updates proposal + ledger
 
@@ -231,6 +245,12 @@ Tests:
 - idempotent accept
 - rollback-safe backup manifest
 - unrelated content preserved byte-for-byte outside the owned block
+- skill emitter treats a target SKILL.md as owned only via
+  `neurobase_managed`+`neurobase_slug`, never silently overwriting a foreign
+  file
+- accept's rendered artifact is redacted before the diff is shown or the
+  artifact file is written (belt-and-suspenders on top of the draft already
+  being redacted at write time)
 
 ### H. Metrics
 
@@ -251,6 +271,8 @@ Tests:
 - metrics on empty ledger
 - accepted/rejected/edited counts
 - missing artifact marks survival false only after the configured window
+- a malformed line in `recommender/ledger.jsonl` is skipped, not fatal, by
+  metrics computation
 
 ## Review slices
 

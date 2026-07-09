@@ -1,6 +1,6 @@
 ---
 slug: ci-local-gate-guardrails
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: ci-local-gate-guardrails
@@ -84,6 +84,16 @@ all six matrix jobs go green.
 
 > Run the diff and review the actual code. One entry per finding.
 
-_(none yet)_
+No findings.
 
-**Verdict:** _pending._
+Verification:
+- `uv run python scripts/ci.py` passed: ruff check, ruff format --check, mypy,
+  and pytest (`287` tests).
+- `sh -n .githooks/pre-push` passed.
+- Workflow parsed with the unchanged 3-OS x 2-Python matrix and a single
+  `uv run python scripts/ci.py` gate step.
+- `git diff --check main...HEAD` passed.
+- `.githooks/pre-push` is committed as mode `100755`.
+
+**Verdict:** approve — the local/CI gate is centralized as claimed, the
+pre-push guard is opt-in and portable, and the Windows fixes are test-only.

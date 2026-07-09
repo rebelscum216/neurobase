@@ -85,7 +85,17 @@ Codex picked up the next steps and verified the branch locally:
   warning is unrelated to MCP server registration: Codex hook trust has no
   `trusted_hash` yet and needs approval on next Codex launch.
 
-Still not autonomously completed: interactive in-agent tool calls (`/mcp`,
-Claude `@`-mention, Codex `memory_search` from inside a live session). Those are
-the Router/user-facing demo step before merge if we want the strictest reading
-of Phase 7's "both agents call the tools live" gate.
+Final live demo evidence from the Router/user-facing step:
+
+- Claude Code successfully called Neurobase MCP `memory_list_projects` and saw
+  the `neurobase` project.
+- Claude Code successfully called Neurobase MCP `memory_search` for
+  `"Phase 7 MCP"`; the empty result was expected before any curated fact/node
+  had been saved.
+- A follow-up Codex-side MCP query called `memory_list_projects` through the
+  Neurobase stdio server and saw `{"project":"neurobase","curated_count":1,
+  "node_count":0}` after the Claude-side save.
+
+That satisfies the practical Phase 7 live MCP gate: both agents can see/call the
+server, the tools-only path works, and the server remains valid with an empty
+node/resource set.

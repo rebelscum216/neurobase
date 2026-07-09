@@ -18,6 +18,7 @@ launch cwd, falling back to an explicit ``project`` argument.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from pathlib import Path
 
@@ -169,9 +170,7 @@ def build_server(
                 nodes = _node_count(root, project)
             except store.InvalidSlugError:
                 continue
-            out.append(
-                {"project": project, "curated_count": curated, "node_count": nodes}
-            )
+            out.append({"project": project, "curated_count": curated, "node_count": nodes})
         return out
 
     @server.tool()
@@ -198,9 +197,7 @@ def build_server(
         # would leak into the filename + frontmatter name (§10/§13). Redact-then-
         # derive keeps secrets out of every store artifact, not just the body.
         slug = _fresh_slug(root, target, _slugify_fact(body))
-        path = store.upsert_curated(
-            root, target, slug, body, provenance=["user-directed"]
-        )
+        path = store.upsert_curated(root, target, slug, body, provenance=["user-directed"])
         return {"project": target, "slug": slug, "path": str(path)}
 
     @server.tool()
@@ -230,13 +227,11 @@ def build_server(
         return out
 
     if config.mcp.expose_resources:
-        try:
+        # Invariant (§13): resources/list MUST stay a valid array. Any scan
+        # failure — corrupt registry, unreadable tree — registers zero resources
+        # rather than surfacing an error to the client.
+        with contextlib.suppress(Exception):
             _register_node_resources(server, root)
-        except Exception:
-            # Invariant (§13): resources/list MUST stay a valid array. Any scan
-            # failure — corrupt registry, unreadable tree — registers zero
-            # resources rather than surfacing an error to the client.
-            pass
 
         @server.prompt(name="recall")
         def recall() -> str:

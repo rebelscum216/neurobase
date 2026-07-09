@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -37,7 +38,7 @@ def _server(root: Path, *, expose: bool = False, cwd: Path | None = None):
     )
 
 
-def _call(server, tool: str, **args) -> object:
+def _call(server, tool: str, **args) -> Any:
     """Return a tool's Python value regardless of FastMCP's content shape:
     list-returning tools carry structured output (a tuple); bare-dict tools
     emit one JSON content block."""

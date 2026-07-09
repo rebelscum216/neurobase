@@ -292,7 +292,12 @@ def _init_claude(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bo
     h_after = claude_install.render(new_settings)
     if h_before != h_after:
         writes.append(
-            (hooks_path, h_before, h_after, lambda: claude_install.write_settings(hooks_path, new_settings))
+            (
+                hooks_path,
+                h_before,
+                h_after,
+                lambda: claude_install.write_settings(hooks_path, new_settings),
+            )
         )
 
     # MCP server — always user scope (~/.claude.json), spec §13 / decision D-d.
@@ -537,7 +542,12 @@ def _uninstall_claude(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
         mcp_after = claude_install.render(mcp_new)
         if mcp_before != mcp_after:
             writes.append(
-                (mcp_path, mcp_before, mcp_after, lambda: claude_install.write_settings(mcp_path, mcp_new))
+                (
+                    mcp_path,
+                    mcp_before,
+                    mcp_after,
+                    lambda: claude_install.write_settings(mcp_path, mcp_new),
+                )
             )
     return writes
 
@@ -577,7 +587,7 @@ def _uninstall_codex(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
                     cfg_path,
                     cfg_before,
                     cfg_after,
-                    lambda text=cfg_after: codex_install.write_config(cfg_path, text),
+                    lambda: codex_install.write_config(cfg_path, cfg_after),
                 )
             )
     return writes

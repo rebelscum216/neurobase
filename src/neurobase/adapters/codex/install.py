@@ -490,9 +490,7 @@ def merge_mcp_config(existing_text: str, shim: str) -> str:
     got = check.get("mcp_servers", {})
     got = got.get(MCP_SERVER_NAME, {}) if isinstance(got, dict) else {}
     if not (
-        isinstance(got, dict)
-        and got.get("command") == shim
-        and got.get("args") == ["mcp", "serve"]
+        isinstance(got, dict) and got.get("command") == shim and got.get("args") == ["mcp", "serve"]
     ):
         raise ConfigParseError("surgical mcp config edit did not produce the expected keys")
     return new_text

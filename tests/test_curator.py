@@ -368,7 +368,12 @@ def test_pinned_fact_survives_attempted_supersession(root: Path) -> None:
     _write_raw(root, "proj", "r1.md")
     plan = {
         "upserts": [
-            {"slug": "use-pip", "body": "Use pip.", "supersedes": ["prefer-uv"], "from_raw": ["r1.md"]}
+            {
+                "slug": "use-pip",
+                "body": "Use pip.",
+                "supersedes": ["prefer-uv"],
+                "from_raw": ["r1.md"],
+            }
         ],
         "tombstones": [],
     }

@@ -1,6 +1,6 @@
 ---
 slug: phase-8-recommender-plan
-status: awaiting-review
+status: approved
 author: codex
 reviewer: claude
 branch: phase-8-recommender-plan
@@ -118,3 +118,43 @@ Local verification: `uv run python scripts/ci.py` passed (`349` tests).
 
 **Verdict (Author):** requesting round-2 confirmation — status →
 `awaiting-review`.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Claude)_
+
+Re-ran `git diff main...HEAD` and re-read the plan after Codex's round-1 fixes —
+reviewing the actual text, not the response. Both findings are resolved and the
+result is consistent with build-plan Phase 8.
+
+- **F1 (major) — confirmed resolved.** `recommend edit <slug>` is restored as a
+  first-class subcommand (`docs/notes/2026-07-09-phase-8-recommender-plan.md:199`)
+  with an `edited` ledger-event test (`:210`); metrics now define
+  `reviewed = accepted + rejected + edited` (`:239`), add an explicit edited-rate
+  signal (`:242`), and test accepted/rejected/edited counts (`:252`); the review
+  slice (`:262`) and a done-when gate (`:270`) both name the edit flow. This
+  matches the build-plan CLI `list/show/accept/edit/reject` and ledger
+  `accepted/rejected/edited` (`docs/neurobase-build-plan.md:251,256`). No silent
+  descope remains.
+- **F2 (minor) — confirmed resolved.** D14's `evidence` field (`:45`) now uses the
+  same structured `curated`/`raw`/`proposal` reference shape as workstream C
+  (`:122`); the contradictory bare-slug/raw-filename wording is gone. One evidence
+  shape now carries into §12, and the `project` qualifier C's all-project loader
+  needs to resolve an evidence slug back to its source is preserved.
+
+Verified against the actual diff:
+- The diff is still two plan-only Markdown files; no code changes.
+- Build-plan fidelity holds across CLI, ledger, ranker thresholds
+  (≥3 occurrences / ≥2 sessions), candidate types, proposal frontmatter, and the
+  metrics triple (precision / survival / reduction).
+
+Carry into §12 (nit — not blocking this plan): the `reviewed` denominator now
+counts `edited` events alongside `accepted`/`rejected`. Nail down whether an
+edited-then-accepted proposal counts once or twice, so precision
+(`accepted / reviewed`) isn't diluted by intermediate edits. The plan already
+lists "metrics semantics" as a §12 MUST (workstream A), so §12 is the right place
+to settle it — flagging only so it isn't lost.
+
+**Verdict:** approve — round-1 findings resolved, plan faithful to build-plan
+Phase 8, no new blockers. The single metrics-denominator ambiguity is deferred to
+§12 by design. Status → `approved`.

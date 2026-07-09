@@ -42,7 +42,10 @@ Proposal files live at `<root>/proposals/<slug>.md`; slugs match the existing
 - `candidate_type`: `repeated-correction | repeated-workflow |
   repeated-instruction | cross-project-convention`
 - `scores`: recurrence, breadth, recency, total
-- `evidence`: curated fact slugs and/or raw filenames
+- `evidence`: structured references, e.g.
+  `{"kind":"curated","project":"...","slug":"..."}`,
+  `{"kind":"raw","project":"...","file":"..."}`, or
+  `{"kind":"proposal","slug":"..."}`
 - `created_at`, `updated_at`
 
 The markdown body is the human proposal: title, rationale, evidence summary,
@@ -193,6 +196,8 @@ Subcommands:
 - `recommend list [--project] [--status]`
 - `recommend show <slug>`
 - `recommend run [--dry-run]`
+- `recommend edit <slug>` (opens/prints an editable draft, then records an
+  edited proposal body or draft artifact without installing it)
 - `recommend accept <slug> [--target user|project] [--yes]`
 - `recommend reject <slug> [--reason TEXT]`
 
@@ -202,6 +207,7 @@ Tests:
 
 - list/show on empty proposals
 - dry-run prints candidates without writes
+- edit updates the proposal body/draft and appends an `edited` ledger event
 - accept requires consent unless `--yes`
 - reject updates proposal + ledger
 
@@ -230,9 +236,12 @@ Tests:
 
 Add `status --recommender` or `neurobase recommend metrics`:
 
-- precision: accepted / reviewed
+- precision: accepted / reviewed, where reviewed includes accepted, rejected,
+  and edited proposal events
 - survival: accepted artifact still present and unmodified after 30 days
 - recurrence reduction: candidate pattern appears less often after acceptance
+- edited rate: edited / reviewed, so the recommender can distinguish useful
+  but not-quite-right proposals from outright misses
 
 V1 can compute survival/reduction opportunistically and report "insufficient
 data" when history is too thin.
@@ -240,7 +249,7 @@ data" when history is too thin.
 Tests:
 
 - metrics on empty ledger
-- accepted/rejected counts
+- accepted/rejected/edited counts
 - missing artifact marks survival false only after the configured window
 
 ## Review slices
@@ -250,7 +259,7 @@ Keep Phase 8 out of one mega-review:
 1. **Plan/spec review** — this note, spec §12, ADR-0007.
 2. **Seed + corpus loader** — no LLM writes yet.
 3. **Miner + ranker + proposal store** — fake-brain tests, no artifact writes.
-4. **Recommend CLI + accept/reject + emitters** — consent/diff/backup heavy.
+4. **Recommend CLI + edit/accept/reject + emitters** — consent/diff/backup heavy.
 5. **Metrics + dogfood demo** — real corpus run, follow-up docs.
 
 ## Done when
@@ -258,6 +267,7 @@ Keep Phase 8 out of one mega-review:
 - Seeded corpus yields at least 3 sensible proposals on this machine.
 - At least 1 proposal is worth accepting.
 - Accept produces a valid SKILL.md that Claude Code loads.
+- Edit records an `edited` ledger event and preserves the user's revised draft.
 - Reject suppresses similar candidates on the next run.
 - Ledger metrics render without crashing and show meaningful reviewed counts.
 - `recommendations_list` over MCP shows proposal summaries.

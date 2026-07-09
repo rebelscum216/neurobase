@@ -25,7 +25,9 @@ def _hermetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # dev machine's own.
     home = tmp_path / "home"
     home.mkdir()
+    # Windows Path.home() reads USERPROFILE, not HOME — set both to isolate.
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("NEUROBASE_ROOT", str(tmp_path / "store"))
     monkeypatch.delenv("NEUROBASE_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

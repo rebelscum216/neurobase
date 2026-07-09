@@ -31,11 +31,15 @@ def _which_agents(name: str) -> str | None:
 
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolate HOME (so config_path()/`--user` scope resolve into tmp, never the
-    real home) and pin the backup store root. Returns the isolated home dir."""
+    """Isolate the home dir (so config_path()/`--user` scope resolve into tmp,
+    never the real home) and pin the backup store root. Returns the isolated
+    home dir."""
     home = tmp_path / "home"
     home.mkdir()
+    # HOME is honored by Path.home() on POSIX; Windows reads USERPROFILE. Set
+    # both so user-scope agent-config paths isolate to tmp on every platform.
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("NEUROBASE_ROOT", str(tmp_path / "store"))
     return home
 

@@ -31,6 +31,26 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+def test_uninstall_removes_mcp_registration(env: Path, tmp_path: Path) -> None:
+    # Register the MCP server in both agents' user configs, then uninstall.
+    claude_mcp = env / ".claude.json"
+    claude_install.write_settings(
+        claude_mcp, claude_install.build_mcp_config({"userID": "x"}, SHIM)
+    )
+    codex_cfg = env / ".codex" / "config.toml"
+    codex_cfg.parent.mkdir(parents=True)
+    codex_install.write_config(codex_cfg, codex_install.merge_mcp_config("", SHIM))
+
+    result = runner.invoke(app, ["uninstall", "--agent", "all", "--yes"])
+    assert result.exit_code == 0
+
+    claude_after = json.loads(claude_mcp.read_text(encoding="utf-8"))
+    assert "mcpServers" not in claude_after
+    assert claude_after["userID"] == "x"  # unrelated keys preserved
+    config_after = tomllib.loads(codex_cfg.read_text(encoding="utf-8"))
+    assert "neurobase" not in config_after.get("mcp_servers", {})
+
+
 def test_uninstall_claude_removes_owned_hooks_and_preserves_foreign(
     env: Path, tmp_path: Path
 ) -> None:

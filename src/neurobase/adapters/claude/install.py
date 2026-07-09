@@ -146,3 +146,80 @@ def write_settings(path: Path, settings: dict[str, Any]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(render(settings), encoding="utf-8")
     tmp.replace(path)
+
+
+# --- MCP server registration (Phase 7, spec §13) ----------------------------
+# Claude Code stores MCP servers in ``~/.claude.json`` under ``mcpServers`` (the
+# same shape ``claude mcp add`` writes). Registration is user-scope (one per
+# machine). The server key ``neurobase`` is Neurobase's reserved name — we
+# own that entry and preserve every other key in the file byte-for-byte.
+
+MCP_SERVER_NAME = "neurobase"
+
+
+def mcp_config_path() -> Path:
+    """User-scope MCP config — ``~/.claude.json``."""
+    return Path.home() / ".claude.json"
+
+
+def load_mcp_config(path: Path) -> dict[str, Any]:
+    """Parse ``~/.claude.json`` (``{}`` if absent). Raises ``SettingsParseError``
+    rather than clobber a malformed file."""
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise SettingsParseError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SettingsParseError(f"{path} is not a JSON object")
+    return data
+
+
+def build_mcp_config(existing: dict[str, Any], shim: str) -> dict[str, Any]:
+    """Return the config with Neurobase's stdio MCP server registered under
+    ``mcpServers.neurobase``, preserving every other key and server."""
+    result = copy.deepcopy(existing)
+    servers = result.get("mcpServers")
+    servers = dict(servers) if isinstance(servers, dict) else {}
+    servers[MCP_SERVER_NAME] = {
+        "type": "stdio",
+        "command": shim,
+        "args": ["mcp", "serve"],
+        "env": {},
+    }
+    result["mcpServers"] = servers
+    return result
+
+
+def remove_mcp_config(existing: dict[str, Any]) -> dict[str, Any]:
+    """Return ``existing`` with only the ``mcpServers.neurobase`` entry removed;
+    everything else is preserved. Drops the ``mcpServers`` key if it empties."""
+    result = copy.deepcopy(existing)
+    servers = result.get("mcpServers")
+    if not isinstance(servers, dict) or MCP_SERVER_NAME not in servers:
+        return result
+    servers = {k: v for k, v in servers.items() if k != MCP_SERVER_NAME}
+    if servers:
+        result["mcpServers"] = servers
+    else:
+        result.pop("mcpServers", None)
+    return result
+
+
+def is_mcp_registered(existing: dict[str, Any], shim: str | None = None) -> bool:
+    """Whether ``mcpServers.neurobase`` is present. With ``shim`` given, require
+    the **full launch shape** (``type: stdio``, ``command: <shim>``,
+    ``args: ["mcp", "serve"]``) — a stale entry with the right command but wrong
+    args would not start the server, so ``doctor`` must not report it OK (§13)."""
+    servers = existing.get("mcpServers")
+    entry = servers.get(MCP_SERVER_NAME) if isinstance(servers, dict) else None
+    if not isinstance(entry, dict):
+        return False
+    if shim is None:
+        return True
+    return (
+        entry.get("type") == "stdio"
+        and entry.get("command") == shim
+        and entry.get("args") == ["mcp", "serve"]
+    )

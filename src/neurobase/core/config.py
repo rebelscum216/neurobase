@@ -43,12 +43,21 @@ class RedactConfig:
 
 
 @dataclass
+class McpConfig:
+    # Dual-exposure of nodes as MCP resources (Phase 7, decision D-d). Off by
+    # default: the tool baseline is universal; resources are Claude-only sugar.
+    # `resources/list` returns [] validly when off — never an error.
+    expose_resources: bool = False
+
+
+@dataclass
 class Config:
     store: StoreConfig = field(default_factory=StoreConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     curate: CurateConfig = field(default_factory=CurateConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
     redact: RedactConfig = field(default_factory=RedactConfig)
+    mcp: McpConfig = field(default_factory=McpConfig)
 
 
 def config_path() -> Path:
@@ -72,4 +81,5 @@ def load_config(path: Path | None = None) -> Config:
         curate=CurateConfig(**data.get("curate", {})),
         inject=InjectConfig(**data.get("inject", {})),
         redact=RedactConfig(**data.get("redact", {})),
+        mcp=McpConfig(**data.get("mcp", {})),
     )

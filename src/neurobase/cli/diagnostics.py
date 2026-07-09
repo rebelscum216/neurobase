@@ -340,6 +340,62 @@ def _codex_hook_checks(cwd: Path, shim: str) -> list[Check]:
     return checks
 
 
+def _claude_mcp_check(shim: str) -> Check:
+    """Is the neurobase MCP server registered in ~/.claude.json (spec §13)?"""
+    path = claude_install.mcp_config_path()
+    if not path.exists():
+        return _check(
+            "claude mcp", "warn", f"{path} does not exist", "Run `neurobase init --agent claude`."
+        )
+    try:
+        existing = claude_install.load_mcp_config(path)
+    except claude_install.SettingsParseError as exc:
+        return _check("claude mcp", "error", f"{path} is invalid JSON: {exc}")
+    if claude_install.is_mcp_registered(existing, shim):
+        return _check("claude mcp", "ok", f"{path} registers neurobase → {shim}")
+    if claude_install.is_mcp_registered(existing):
+        return _check(
+            "claude mcp",
+            "warn",
+            f"{path} registers neurobase with an unexpected command or args",
+            "Run `neurobase init --agent claude` to repair it.",
+        )
+    return _check(
+        "claude mcp",
+        "warn",
+        f"{path} has no neurobase MCP server",
+        "Run `neurobase init --agent claude`.",
+    )
+
+
+def _codex_mcp_check(shim: str) -> Check:
+    """Is the neurobase MCP server registered in ~/.codex/config.toml (spec §13)?"""
+    path = codex_install.config_path()
+    if not path.exists():
+        return _check(
+            "codex mcp", "warn", f"{path} does not exist", "Run `neurobase init --agent codex`."
+        )
+    try:
+        text = codex_install.load_config_text(path)
+    except codex_install.ConfigParseError as exc:
+        return _check("codex mcp", "error", f"{path} is invalid TOML: {exc}")
+    if codex_install.is_mcp_registered(text, shim):
+        return _check("codex mcp", "ok", f"{path} registers neurobase → {shim}")
+    if codex_install.is_mcp_registered(text):
+        return _check(
+            "codex mcp",
+            "warn",
+            f"{path} registers neurobase with an unexpected command or args",
+            "Run `neurobase init --agent codex` to repair it.",
+        )
+    return _check(
+        "codex mcp",
+        "warn",
+        f"{path} has no neurobase MCP server",
+        "Run `neurobase init --agent codex`.",
+    )
+
+
 def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
     which = shutil.which
     shim = claude_install.shim_path()
@@ -351,6 +407,8 @@ def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
         _agent_check("codex", which),
         _claude_hook_check(cwd, shim),
         *_codex_hook_checks(cwd, shim),
+        _claude_mcp_check(shim),
+        _codex_mcp_check(shim),
     ]
 
 

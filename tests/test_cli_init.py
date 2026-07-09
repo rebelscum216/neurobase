@@ -254,13 +254,39 @@ def test_init_codex_consent_no_aborts(env: Path, tmp_path: Path) -> None:
     assert not (tmp_path / "store" / "backups").exists()
 
 
-def test_init_codex_user_scope_skips_config(env: Path, tmp_path: Path) -> None:
+def test_init_codex_user_scope_skips_projects_table_but_registers_mcp(
+    env: Path, tmp_path: Path
+) -> None:
     result = runner.invoke(app, ["init", "--agent", "codex", "--user", "--yes"])
     assert result.exit_code == 0
     hooks_doc = json.loads((env / ".codex" / "hooks.json").read_text())
     assert any(c.endswith("hook codex session-start") for c in _codex_hook_commands(hooks_doc))
-    # User scope: global hooks.json is auto-discovered — no config.toml table.
-    assert not (env / ".codex" / "config.toml").exists()
+    # User scope: global hooks.json is auto-discovered — no [projects.*] table.
+    # But the MCP server IS registered (user-scope, spec §13), so config.toml
+    # now exists with the mcp_servers table and no projects table.
+    config = tomllib.loads((env / ".codex" / "config.toml").read_text())
+    assert "projects" not in config
+    assert config["mcp_servers"]["neurobase"]["args"] == ["mcp", "serve"]
+
+
+def test_init_claude_registers_mcp_server(env: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = runner.invoke(app, ["init", "--agent", "claude", "--cwd", str(repo), "--yes"])
+    assert result.exit_code == 0
+    mcp = json.loads((env / ".claude.json").read_text())
+    entry = mcp["mcpServers"]["neurobase"]
+    assert entry["type"] == "stdio"
+    assert entry["args"] == ["mcp", "serve"]
+
+
+def test_init_codex_registers_mcp_server(env: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = runner.invoke(app, ["init", "--agent", "codex", "--cwd", str(repo), "--yes"])
+    assert result.exit_code == 0
+    config = tomllib.loads((env / ".codex" / "config.toml").read_text())
+    assert config["mcp_servers"]["neurobase"]["args"] == ["mcp", "serve"]
 
 
 def test_init_codex_idempotent_second_run(env: Path, tmp_path: Path) -> None:

@@ -337,3 +337,57 @@ def test_node_text_outer_fence_stripped(root: Path) -> None:
     node = store.read_doc(store.memory_dir("proj", root) / "nodes" / "proj-status.md")
     assert node.body.startswith("# Node")
     assert "```" not in node.body.split("## Synthesized from")[0]
+
+
+# --- pinned user-directed facts (spec §2, decision D-b) ------------------
+
+
+def _pinned_fact(root: Path, project: str, slug: str, body: str) -> None:
+    store.ensure_tree(project, root)
+    store.upsert_curated(root, project, slug, body, provenance=["user-directed"])
+
+
+def test_pinned_fact_is_not_tombstoned_or_reworded(root: Path) -> None:
+    _pinned_fact(root, "proj", "prefer-uv", "Prefer uv over pip.")
+    _write_raw(root, "proj", "r1.md")
+    # Adversarial plan: try to both reword (upsert same slug) and tombstone it.
+    plan = {
+        "upserts": [{"slug": "prefer-uv", "body": "Use pip.", "from_raw": ["r1.md"]}],
+        "tombstones": [{"slug": "prefer-uv", "reason": "outdated"}],
+    }
+    engine.curate(root, "proj", FakeBrain(plan))
+    facts = {d.get("name"): d.body for d in store.list_curated(root, "proj")}
+    # Survived (not tombstoned) and unchanged content (not reworded). A linkify
+    # lineage footer (spec §6) may be appended — check content, not equality.
+    assert facts["prefer-uv"].startswith("Prefer uv over pip.")
+    assert "Use pip." not in facts["prefer-uv"]
+
+
+def test_pinned_fact_survives_attempted_supersession(root: Path) -> None:
+    _pinned_fact(root, "proj", "prefer-uv", "Prefer uv over pip.")
+    _write_raw(root, "proj", "r1.md")
+    plan = {
+        "upserts": [
+            {
+                "slug": "use-pip",
+                "body": "Use pip.",
+                "supersedes": ["prefer-uv"],
+                "from_raw": ["r1.md"],
+            }
+        ],
+        "tombstones": [],
+    }
+    engine.curate(root, "proj", FakeBrain(plan))
+    slugs = {d.get("name") for d in store.list_curated(root, "proj")}
+    assert "prefer-uv" in slugs  # supersession did not remove the pinned fact
+    assert "use-pip" in slugs  # the new fact still lands
+
+
+def test_non_pinned_fact_can_still_be_tombstoned(root: Path) -> None:
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "temp-fact", "ephemeral", provenance=["claude:scribe"])
+    _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [], "tombstones": [{"slug": "temp-fact", "reason": "stale"}]}
+    engine.curate(root, "proj", FakeBrain(plan))
+    slugs = {d.get("name") for d in store.list_curated(root, "proj")}
+    assert "temp-fact" not in slugs  # the guard is specific to pinned facts

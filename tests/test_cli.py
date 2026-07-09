@@ -32,7 +32,7 @@ def test_no_args_shows_help() -> None:
 
 
 def test_stub_command_exits_nonzero() -> None:
-    result = runner.invoke(app, ["curate"])
+    result = runner.invoke(app, ["recommend"])
     assert result.exit_code == 1
 
 

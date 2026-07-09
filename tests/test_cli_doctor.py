@@ -66,6 +66,32 @@ def test_doctor_exits_nonzero_when_nothing_resolves(monkeypatch: pytest.MonkeyPa
     assert "brain: none" in result.output
 
 
+def test_doctor_reports_mcp_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_tools(monkeypatch)
+    # The mcp checks always run (as warnings before registration).
+    before = runner.invoke(app, ["doctor"])
+    assert "claude mcp" in before.output
+    assert "codex mcp" in before.output
+    # Register the Claude MCP server (user scope) → doctor reports it ok.
+    claude_install.write_settings(
+        claude_install.mcp_config_path(), claude_install.build_mcp_config({}, SHIM)
+    )
+    after = runner.invoke(app, ["doctor"])
+    assert "registers neurobase" in after.output
+
+
+def test_doctor_warns_on_stale_mcp_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_tools(monkeypatch)
+    # Right command, wrong args ⇒ not startable ⇒ doctor must warn, not OK.
+    claude_install.write_settings(
+        claude_install.mcp_config_path(),
+        {"mcpServers": {"neurobase": {"type": "stdio", "command": SHIM, "args": ["bad"]}}},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert "unexpected command or args" in result.output
+    assert "registers neurobase →" not in result.output  # not reported OK
+
+
 def test_doctor_reports_installed_hooks_and_trust(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

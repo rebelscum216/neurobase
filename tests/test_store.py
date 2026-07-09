@@ -345,7 +345,7 @@ def test_rebuild_index_lists_nodes_and_active_fact_count(root: Path) -> None:
     store.soft_delete_curated(root, "proj", "fact-b")
 
     index_path = store.rebuild_index(root, "proj")
-    content = index_path.read_text()
+    content = index_path.read_text(encoding="utf-8")  # em-dash: cp1252 mangles it on Windows
     assert "# Memory index — proj" in content
     assert "[proj-status](nodes/proj-status.md) — Proj Status" in content
     assert "_1 active curated facts._" in content

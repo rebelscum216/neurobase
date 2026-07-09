@@ -93,6 +93,26 @@ uv tool install neurobase-cli     # command: `neurobase`
 (`neurobase-cli` because `neurobase` is taken on PyPI — decision D2. `pip install`
 will also work; `uv` recommended, not required.)
 
+## Contributing
+
+Start with **[AGENTS.md](AGENTS.md)** (the contributor guide). Before every push,
+run the full local gate — not just the tests:
+
+```bash
+make ci                       # ruff check + ruff format --check + mypy + pytest
+# or, without make (e.g. on Windows):
+uv run python scripts/ci.py
+```
+
+`scripts/ci.py` is the single source of truth for those four checks, and CI runs
+the *same* script on every OS in the matrix, so local and CI can't drift. To have
+Git block a red push automatically, opt into the committed pre-push hook once per
+clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## License
 
 [Apache-2.0](LICENSE). Copyright © 2026 The Neurobase Authors.

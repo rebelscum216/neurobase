@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+# Opt-in pre-push guard. Runs the full CI gate (scripts/ci.py) before every push
+# so a red build can't reach the remote — the same gate CI runs, so if this
+# passes, CI's ruff/format/mypy/pytest steps will too.
+#
+# Enable it once per clone (it lives in the repo, but Git won't use it until you
+# point core.hooksPath at it):
+#
+#     git config core.hooksPath .githooks
+#
+# Emergency bypass (then fix forward): git push --no-verify
+set -eu
+
+echo "pre-push: running the full CI gate (scripts/ci.py) ..."
+if ! uv run python scripts/ci.py; then
+	echo "" >&2
+	echo "pre-push: CI gate FAILED — push aborted. Fix the above, or bypass with" >&2
+	echo "          'git push --no-verify' if you truly must." >&2
+	exit 1
+fi
+echo "pre-push: gate is green — pushing."

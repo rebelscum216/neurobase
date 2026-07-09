@@ -66,8 +66,11 @@ neurobase/
 │                                · recommender/ mcp/ (stubs)
 ├── tests/                    ← Phase 0 smoke + Phase 1–6 suites; spec-§11 fixtures land per phase
 ├── docs/                     ← canonical docs, ADRs, notes, code-review relay + reviews
+├── scripts/ci.py             ← the single-source-of-truth CI gate (local + CI run it)
+├── Makefile                  ← `make ci` → scripts/ci.py; local dev shortcuts
+├── .githooks/pre-push        ← opt-in gate guard (git config core.hooksPath .githooks)
 ├── .claude/skills/           ← project skills (e.g. xcode-review, the Author role)
-└── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix (lint, format, types, tests)
+└── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix; each job runs scripts/ci.py
 ```
 
 `core/` (Phase 1 + `linkify` Phase 3), `brain/` (Phase 2), `curator/` (Phase
@@ -189,6 +192,11 @@ in. Replace a stub with real code when its phase lands.
 ```bash
 uv sync                     # install deps into a managed venv (bootstraps Python)
 uv run neurobase --help     # run the CLI from the dev env
+
+make ci                     # ← the FULL gate, exactly as CI runs it
+uv run python scripts/ci.py # the same gate without make (Windows / no-make)
+
+# The four checks the gate bundles, individually:
 uv run pytest               # run the suite — the contract enforcer
 uv run ruff check .         # lint
 uv run ruff format .        # format
@@ -196,9 +204,19 @@ uv run mypy src tests       # types (lenient to start)
 uv run pre-commit install   # optional: enable the pre-commit hooks
 ```
 
-CI runs `ruff check`, `ruff format --check`, `mypy src tests`, and `pytest` on a
-3-OS × 2-Python matrix — keep all four green. To validate the installed shim
-(not just the dev env): `uv tool install .` then `neurobase --help`.
+**Run the full gate before every push — not just `pytest`.** [`scripts/ci.py`](scripts/ci.py)
+is the single source of truth for the four checks (`ruff check` · `ruff format
+--check` · `mypy src tests` · `pytest`); CI invokes that *same* script on the
+3-OS × 2-Python matrix, so local and CI can't drift. Opt into the committed
+pre-push hook to have Git enforce it automatically:
+
+```bash
+git config core.hooksPath .githooks   # once per clone; runs scripts/ci.py on push
+```
+
+After pushing, watch `gh run watch` until every matrix job is green before
+calling the work done. To validate the installed shim (not just the dev env):
+`uv tool install .` then `neurobase --help`.
 
 ## Where to put things
 

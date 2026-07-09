@@ -58,3 +58,34 @@ outward-facing / decisions — do NOT do the live steps autonomously:
    demos against the real `~/.claude` / `~/.codex` configs.
 
 After Phase 7 merges, the next buildable phase is **Phase 8 (the recommender)**.
+
+## Update — Codex follow-up verification
+
+Codex picked up the next steps and verified the branch locally:
+
+- `uv run python scripts/ci.py` initially caught one stale smoke test:
+  `tests/test_cli.py::test_stub_command_exits_nonzero` still used `curate` as a
+  stub example even though `curate` has been real since Phase 3. Updated the
+  test to use `recommend`, which remains a Phase 8 stub.
+- Re-ran the shared gate: **green** (`ruff check`, `ruff format --check`,
+  `mypy src tests`, `pytest`; `349 passed`).
+- Ran a real stdio MCP client smoke against
+  `uv run neurobase mcp serve --root <tmp>`: listed the five baseline tools,
+  `resources/list` returned `[]`, and `memory_list_projects` +
+  `memory_search` returned expected data from a temporary store.
+- Confirmed both real agent CLIs see the installed MCP server:
+  - `claude mcp get neurobase` → user-scope stdio server, status
+    `✔ Connected`, command
+    `/Users/dev/.local/share/uv/tools/neurobase-cli/bin/neurobase`,
+    args `mcp serve`.
+  - `codex mcp get neurobase` → enabled stdio server, same command and args.
+- Installed-shim doctor:
+  `/Users/dev/.local/share/uv/tools/neurobase-cli/bin/neurobase doctor`
+  reports both Claude and Codex MCP registrations as ✓. The only remaining
+  warning is unrelated to MCP server registration: Codex hook trust has no
+  `trusted_hash` yet and needs approval on next Codex launch.
+
+Still not autonomously completed: interactive in-agent tool calls (`/mcp`,
+Claude `@`-mention, Codex `memory_search` from inside a live session). Those are
+the Router/user-facing demo step before merge if we want the strictest reading
+of Phase 7's "both agents call the tools live" gate.

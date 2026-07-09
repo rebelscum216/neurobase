@@ -7,7 +7,6 @@ User-scope registration: Claude ``~/.claude.json`` mcpServers.neurobase; Codex
 
 from __future__ import annotations
 
-import json
 import tomllib
 
 import pytest
@@ -108,7 +107,7 @@ def test_codex_merge_is_idempotent() -> None:
 
 
 def test_codex_merge_updates_stale_entry_without_duplicating() -> None:
-    stale = "[mcp_servers.neurobase]\ncommand = \"/old/neurobase\"\nargs = [\"mcp\", \"serve\"]\n"
+    stale = '[mcp_servers.neurobase]\ncommand = "/old/neurobase"\nargs = ["mcp", "serve"]\n'
     result = codex_install.merge_mcp_config(stale, SHIM)
     parsed = tomllib.loads(result)
     assert parsed["mcp_servers"]["neurobase"]["command"] == SHIM
@@ -145,6 +144,6 @@ def test_codex_is_mcp_registered() -> None:
 
 
 def test_codex_is_mcp_registered_rejects_stale_launch_shape() -> None:
-    stale = '[mcp_servers.neurobase]\ncommand = "%s"\nargs = ["bad"]\n' % SHIM
+    stale = f'[mcp_servers.neurobase]\ncommand = "{SHIM}"\nargs = ["bad"]\n'
     assert codex_install.is_mcp_registered(stale, shim=SHIM) is False
     assert codex_install.is_mcp_registered(stale) is True  # still present

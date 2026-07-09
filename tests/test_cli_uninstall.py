@@ -34,7 +34,9 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_uninstall_removes_mcp_registration(env: Path, tmp_path: Path) -> None:
     # Register the MCP server in both agents' user configs, then uninstall.
     claude_mcp = env / ".claude.json"
-    claude_install.write_settings(claude_mcp, claude_install.build_mcp_config({"userID": "x"}, SHIM))
+    claude_install.write_settings(
+        claude_mcp, claude_install.build_mcp_config({"userID": "x"}, SHIM)
+    )
     codex_cfg = env / ".codex" / "config.toml"
     codex_cfg.parent.mkdir(parents=True)
     codex_install.write_config(codex_cfg, codex_install.merge_mcp_config("", SHIM))

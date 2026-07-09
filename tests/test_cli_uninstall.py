@@ -22,7 +22,9 @@ SHIM = "/abs/shim/neurobase"
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
+    # Windows Path.home() reads USERPROFILE, not HOME — set both to isolate.
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("NEUROBASE_ROOT", str(tmp_path / "store"))
     monkeypatch.setattr(claude_install, "shim_path", lambda: SHIM)
     monkeypatch.setattr(codex_install, "shim_path", lambda: SHIM)

@@ -385,6 +385,34 @@ def reject_proposal(
     return status
 
 
+def accept_proposal(
+    root: Path,
+    slug: str,
+    *,
+    target: str,
+    installed_path: Path,
+    now: datetime | None = None,
+) -> None:
+    """Record a successful artifact installation after the write completes."""
+    doc = load_proposal(root, slug)
+    if doc is None:
+        raise ValueError(f"proposal {slug!r} not found or malformed")
+    status = str(doc.get("status") or "proposed")
+    if status in {"rejected", "superseded"}:
+        raise ValueError(f"cannot accept proposal {slug!r}: status is {status}")
+    stamp = _iso(now if now is not None else datetime.now(UTC))
+    frontmatter = dict(doc.frontmatter)
+    frontmatter.update(
+        status="accepted", target=target, installed_path=str(installed_path), updated_at=stamp
+    )
+    store.write_doc(doc.file_path, frontmatter, doc.body)
+    record = {"at": stamp, "slug": slug, "event": "accepted", "target": target}
+    path = ledger_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 # --- body rendering + redaction ---------------------------------------------
 
 

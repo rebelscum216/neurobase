@@ -31,7 +31,7 @@ from neurobase.core.config import load_config
 from neurobase.curator import curate as run_curate
 from neurobase.curator import is_stale, read_fact_count_trend
 from neurobase.recommender import corpus as recommend_corpus
-from neurobase.recommender import miner, proposals, ranker
+from neurobase.recommender import emitters, miner, proposals, ranker
 from neurobase.recommender import seed as seed_import
 
 app = typer.Typer(
@@ -899,6 +899,44 @@ def recommend_reject(
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"Rejected proposal {slug}.")
+
+
+@recommend_app.command("accept")
+def recommend_accept(
+    slug: str,
+    target: str | None = typer.Option(None, "--target", help="Skill scope: user or project."),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    root: str | None = typer.Option(None, "--root"),
+) -> None:
+    """Diff, confirm, back up, and install one proposal artifact."""
+    resolved_root = store.resolve_root(root)
+    _check_store_schema(resolved_root)
+    doc = proposals.load_proposal(resolved_root, slug)
+    if doc is None:
+        typer.secho(f"proposal {slug!r} not found or malformed", err=True)
+        raise typer.Exit(code=1)
+    try:
+        artifact = emitters.prepare(resolved_root, doc, skill_scope=target)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    if artifact.before == artifact.after:
+        typer.echo("Already up to date.")
+        return
+    if artifact.foreign:
+        typer.secho("Warning: target is not Neurobase-owned and will be replaced.", fg="yellow")
+    typer.echo(_unified_diff(artifact.before, artifact.after, artifact.path))
+    if not yes and not typer.confirm(f"Install proposal {slug} to {artifact.path}?"):
+        typer.echo("Aborted — no changes made.")
+        return
+    backup_dir = backups.backup_files(resolved_root, [artifact.path])
+    if backup_dir is not None:
+        typer.echo(f"Backed up existing artifact to {backup_dir}")
+    emitters.write_atomic(artifact)
+    proposals.accept_proposal(
+        resolved_root, slug, target=artifact.target, installed_path=artifact.path
+    )
+    typer.echo(f"Accepted proposal {slug}: {artifact.path}")
 
 
 # --- mcp: the MCP server (Phase 7) --------------------------------------------

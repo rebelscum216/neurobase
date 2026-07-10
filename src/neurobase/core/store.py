@@ -257,10 +257,21 @@ def upsert_curated(
     *,
     provenance: Iterable[str] = (),
     supersedes: list[str] | None = None,
+    agent_last: str = "curator",
+    extra_frontmatter: dict[str, Any] | None = None,
 ) -> Path:
     """Merge provenance (prior + new, order-preserving dedupe); ``supersedes``
     is the new value if given, else kept from the prior file. Body is
-    overwritten wholesale — the curator owns curated content."""
+    overwritten wholesale — the curator owns curated content.
+
+    ``agent_last`` defaults to ``"curator"`` (unchanged behavior for every
+    existing caller); pass an override (e.g. ``"seed"``) for a caller other
+    than the curator so this field never silently claims the curator touched
+    a fact it never saw (spec §12.3). ``extra_frontmatter`` additively merges
+    caller-owned keys (e.g. a seed importer's ``source_digest``) into the
+    written frontmatter — the core keys below always win on collision, so a
+    caller can never use it to overwrite ``name``/``status``/``provenance``/
+    ``supersedes``/``agent_last``/``updated_at``."""
     _require_slug(slug, "fact slug")
     path = memory_dir(project, root) / "curated" / f"{slug}.md"
     prior_provenance: list[str] = []
@@ -269,12 +280,13 @@ def upsert_curated(
         existing = read_doc(path)
         prior_provenance = list(existing.get("provenance") or [])
         prior_supersedes = list(existing.get("supersedes") or [])
-    frontmatter = {
+    frontmatter: dict[str, Any] = {
+        **(extra_frontmatter or {}),
         "name": slug,
         "status": "active",
         "supersedes": supersedes if supersedes is not None else prior_supersedes,
         "provenance": _dedupe_preserve_order([*prior_provenance, *provenance]),
-        "agent_last": "curator",
+        "agent_last": agent_last,
         "updated_at": _now_iso(),
     }
     return write_doc(path, frontmatter, body)

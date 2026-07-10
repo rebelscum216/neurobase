@@ -288,6 +288,57 @@ def test_upsert_curated_supersedes_new_value_overrides(root: Path) -> None:
     assert doc["supersedes"] == ["old-2"]
 
 
+def test_upsert_curated_default_agent_last_is_curator(root: Path) -> None:
+    """Unchanged behavior for every existing caller that doesn't pass
+    ``agent_last`` (spec §12.3's additive-extension requirement)."""
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "fact-a", "v1")
+    doc = store.read_doc(store.memory_dir("proj", root) / "curated" / "fact-a.md")
+    assert doc["agent_last"] == "curator"
+
+
+def test_upsert_curated_agent_last_override(root: Path) -> None:
+    """A seed-imported fact was never touched by the curator — the importer
+    passes an override so ``agent_last`` never silently reads ``curator``
+    (spec §12.3)."""
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "fact-a", "v1", agent_last="seed")
+    doc = store.read_doc(store.memory_dir("proj", root) / "curated" / "fact-a.md")
+    assert doc["agent_last"] == "seed"
+
+
+def test_upsert_curated_extra_frontmatter_persists(root: Path) -> None:
+    store.ensure_tree("proj", root)
+    store.upsert_curated(
+        root,
+        "proj",
+        "fact-a",
+        "v1",
+        extra_frontmatter={"source_digest": "abc123", "source_path": "seed:notes/a.md"},
+    )
+    doc = store.read_doc(store.memory_dir("proj", root) / "curated" / "fact-a.md")
+    assert doc["source_digest"] == "abc123"
+    assert doc["source_path"] == "seed:notes/a.md"
+
+
+def test_upsert_curated_extra_frontmatter_cannot_clobber_core_keys(root: Path) -> None:
+    """Core fields always win on collision — a caller can't use
+    ``extra_frontmatter`` to smuggle a fake ``status``/``agent_last``/etc."""
+    store.ensure_tree("proj", root)
+    store.upsert_curated(
+        root,
+        "proj",
+        "fact-a",
+        "v1",
+        agent_last="seed",
+        extra_frontmatter={"status": "tombstoned", "agent_last": "curator", "name": "not-the-slug"},
+    )
+    doc = store.read_doc(store.memory_dir("proj", root) / "curated" / "fact-a.md")
+    assert doc["status"] == "active"
+    assert doc["agent_last"] == "seed"
+    assert doc["name"] == "fact-a"
+
+
 def test_soft_delete_curated_rejects_invalid_slug(root: Path) -> None:
     store.ensure_tree("proj", root)
     with pytest.raises(store.InvalidSlugError):

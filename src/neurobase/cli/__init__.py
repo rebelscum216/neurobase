@@ -29,6 +29,7 @@ from neurobase.core import backups, projects, store
 from neurobase.core.config import load_config
 from neurobase.curator import curate as run_curate
 from neurobase.curator import is_stale, read_fact_count_trend
+from neurobase.recommender import seed as seed_import
 
 app = typer.Typer(
     name="neurobase",
@@ -173,6 +174,159 @@ def curate(
     typer.echo(json.dumps({k: v for k, v in summary.items() if k != "plan"}, ensure_ascii=False))
     if summary.get("status") == "error":
         raise typer.Exit(code=1)
+
+
+@app.command()
+def seed(
+    from_dir: str | None = typer.Option(
+        None,
+        "--from-dir",
+        help="Recursively import markdown files from this directory as curated facts.",
+    ),
+    from_claude_memory: bool = typer.Option(
+        False,
+        "--from-claude-memory",
+        help="Import Claude Code's per-project auto-memory directory as curated facts.",
+    ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Target this registered project slug instead of the one resolved from cwd "
+        "(also widens --from-claude-memory's scope to that project).",
+    ),
+    all_projects: bool = typer.Option(
+        False,
+        "--all-projects",
+        help="With --from-claude-memory, import every registered project's auto-memory "
+        "directory (a project with none is silently skipped).",
+    ),
+    root: str | None = typer.Option(None, "--root", help="Override the store root."),
+    cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+) -> None:
+    """Import existing notes / Claude auto-memory as curated facts (spec §12.3).
+
+    Requires an explicit ``--from-dir <path>`` and/or ``--from-claude-memory``
+    — never crawls a directory the user did not name. Redacts every imported
+    body before it touches ``curated/`` and is idempotent on rerun (dedupe by
+    slug + source digest).
+    """
+    if from_dir is None and not from_claude_memory:
+        typer.secho(
+            "`neurobase seed` requires --from-dir <path> and/or --from-claude-memory.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if project is not None and all_projects:
+        typer.secho(
+            "--project and --all-projects cannot be combined.", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=1)
+    if all_projects and not from_claude_memory:
+        typer.secho(
+            "--all-projects only applies to --from-claude-memory.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if from_dir is not None:
+        # Validate the --from-dir target up front, before project-scope
+        # resolution below — otherwise an unresolvable cwd masks a bad
+        # --from-dir target with a less relevant error message when both are
+        # wrong at once.
+        resolved_from_dir_check = Path(from_dir).expanduser().resolve()
+        if not resolved_from_dir_check.is_dir():
+            typer.secho(
+                f"{resolved_from_dir_check} is not a directory", fg=typer.colors.RED, err=True
+            )
+            raise typer.Exit(code=1)
+
+    config = load_config()
+    resolved_root = store.resolve_root(root)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    _check_store_schema(resolved_root)
+    registry = projects.load_registry(resolved_root)
+
+    total = seed_import.SeedResult()
+
+    # Both --from-dir and a non---all-projects --from-claude-memory act on
+    # exactly one project: --project names it explicitly, else it's resolved
+    # from launch cwd (a hard CLI error if that cwd is unresolvable — spec
+    # §12.3's Invariants section).
+    single_slug: str | None = None
+    single_project_root: Path | None = None
+    if from_dir is not None or (from_claude_memory and not all_projects):
+        if project is not None:
+            roots = registry.get(project)
+            if not roots:
+                typer.secho(
+                    f"unknown project {project!r} (not in the registry).",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            single_slug = project
+            single_project_root = Path(roots[0])
+        else:
+            single_slug = projects.resolve_project(resolved_root, resolved_cwd)
+            if single_slug is None:
+                typer.secho(
+                    "Cannot resolve a project from this cwd — run `neurobase seed` from "
+                    "inside a registered project, or pass --project <slug>.",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            roots = registry.get(single_slug) or []
+            single_project_root = Path(roots[0]) if roots else None
+
+    if from_dir is not None:
+        assert single_slug is not None  # guaranteed by the block above
+        try:
+            result = seed_import.import_from_dir(
+                resolved_root,
+                single_slug,
+                Path(from_dir),
+                extra_patterns=config.redact.extra_patterns,
+            )
+        except seed_import.BadSeedSourceError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+        total = total.merge(result)
+
+    if from_claude_memory:
+        if all_projects:
+            for slug, roots in registry.items():
+                if not roots:
+                    continue
+                result = seed_import.import_from_claude_memory(
+                    resolved_root,
+                    slug,
+                    Path(roots[0]),
+                    extra_patterns=config.redact.extra_patterns,
+                )
+                total = total.merge(result)
+        else:
+            assert single_slug is not None  # guaranteed by the block above
+            if single_project_root is not None:
+                result = seed_import.import_from_claude_memory(
+                    resolved_root,
+                    single_slug,
+                    single_project_root,
+                    extra_patterns=config.redact.extra_patterns,
+                )
+                total = total.merge(result)
+
+    typer.echo(
+        json.dumps(
+            {
+                "imported": total.imported,
+                "unchanged": total.unchanged,
+                "skipped": [{"path": p, "reason": r} for p, r in total.skipped],
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 @app.command()
@@ -598,7 +752,6 @@ def _uninstall_codex(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
 _PLANNED: list[tuple[str, int, str]] = [
     ("recall", 4, "Print the memory that would be injected for a project."),
     ("recommend", 8, "Review skill/rule proposals mined from your history."),
-    ("seed", 8, "Import existing notes / Claude auto-memory as curated facts."),
 ]
 
 

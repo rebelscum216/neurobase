@@ -1,6 +1,6 @@
 ---
 slug: phase-8-workstream-efg-recommender
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: phase-8-workstream-e-ranker-proposals
@@ -176,3 +176,52 @@ tests. The passing suite does not exercise the cases above.
 **Verdict:** changes-requested — multiple contract blockers allow writes before
 status validation, fail to preserve unrelated bytes, and bypass required
 redaction/fail-soft behavior.
+
+---
+
+## Author response — round 1  _(Author — Claude)_
+
+All seven confirmed as real; every one **fixed** in follow-up commit `ba22355`
+(the reviewed commits are untouched). Each fix ships a regression test that
+fails on the pre-fix code. Gate green: `uv run python scripts/ci.py` → 457 tests.
+
+- **F1 — resolved.** `recommend accept` (`cli/__init__.py`) now validates
+  `status` and hard-errors on `rejected`/`superseded` **before** `prepare`, the
+  no-op check, backup, or write; `accept_proposal` keeps its defensive check at
+  the transition boundary. Test: `test_accept_rejected_proposal_errors_before_any_write`
+  asserts no artifact and no `backups/` dir.
+- **F2 — resolved.** New `_is_valid_proposal` structural validator (§12.1 schema:
+  `name` a slug **and** `== file stem`, status/type/candidate_type enums,
+  `evidence` a list of mappings, scores/supersedes types) is applied by both
+  `load_proposal` and `load_all_proposals`, so a traversal-shaped `name` or a
+  non-list `evidence` is skipped before any consumer/emitter sees it. `recommend
+  show`'s evidence loop also guards `isinstance(item, dict)`. Tests:
+  `test_schema_invalid_proposals_are_skipped_on_load`,
+  `test_show_on_parseable_but_malformed_proposal_is_fail_soft`.
+- **F3 — resolved.** Emitters read via `_read_preserving` (`open(..., newline="")`)
+  and `write_atomic` writes with `newline=""`, so CRLF/mixed bytes survive.
+  Test: `test_rule_preserves_crlf_bytes_outside_block` (byte-level assert).
+- **F4 — resolved.** `emitters.prepare` now redacts with
+  `load_config().redact.extra_patterns`; `recommend show` redacts `doc.body` via
+  `proposals.redact_body` before display. Tests:
+  `test_prepare_applies_configured_extra_redaction_patterns` (a custom pattern,
+  not just the built-in AWS case).
+- **F5 — resolved.** `reject_proposal` writes the proposal's `candidate_type`
+  onto the `rejected` ledger event, so `load_ledger_summary` builds per-type
+  counts. Test: `test_reject_records_candidate_type_for_miner_feedback` asserts
+  the reject-to-summary path end to end.
+- **F6 — resolved.** `_rule` now requires a single correctly ordered start/end
+  pair (or none); reversed/duplicate/mismatched markers raise. Test:
+  `test_rule_reversed_markers_fail_closed`.
+- **F7 — resolved.** `backup_files` allocates a fresh `<ts>` / `<ts>.N` dir
+  instead of `mkdir(exist_ok=True)`, so same-second calls never share a manifest.
+  Test: `test_same_second_backups_do_not_clobber_each_other` (timestamp pinned;
+  both restore independently). Note: this touches shared infra used by `init`
+  too — behavior only changes on a same-second collision, so existing `init`
+  backup tests are unaffected.
+
+**Focus for round 2.** F2's validator now gates every load — please confirm it
+doesn't wrongly reject any legitimately-shaped proposal (e.g. a cross-project
+proposal with `project: null`, or `evidence: []`), and that F1's early guard
+still permits the idempotent re-`accept` of an already-`accepted` proposal
+(§12.7's one allowed decided-status case).

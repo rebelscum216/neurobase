@@ -170,6 +170,40 @@ def test_malformed_evidence_entries_dropped_candidate_survives(tmp_path: Path) -
     assert result[0]["evidence"] == [{"kind": "curated", "project": "p", "slug": "s"}]
 
 
+def test_non_string_required_fields_are_rejected(tmp_path: Path, caplog: Any) -> None:
+    """Codex review F1: required fields are type-checked *before* coercion, so a
+    JSON null/number can't be stringified into a valid-looking candidate the
+    ranker/proposal store (E) would then persist (e.g. a `"None"` body)."""
+    root = tmp_path / "store"
+    _write_registry(root, ["neurobase"])
+    plan = {
+        "candidates": [
+            _valid_candidate(draft=None),  # null draft must not become "None"
+            _valid_candidate(slug=123),  # numeric slug must not become "123"
+            _valid_candidate(draft=42),  # numeric draft
+            _valid_candidate(type=None),  # null type
+            _valid_candidate(candidate_type=None),  # null candidate_type
+            _valid_candidate(),  # the lone keeper
+        ]
+    }
+    with caplog.at_level(logging.WARNING):
+        result = miner.mine(root, FakeBrain(plan))
+
+    assert [c["slug"] for c in result] == ["prefer-uv-run"]
+    assert len([r for r in caplog.records if "skipped" in r.getMessage()]) == 5
+
+
+def test_non_string_optional_fields_coerced_to_empty(tmp_path: Path) -> None:
+    """A non-string optional display field (title/rationale/target) becomes ""
+    rather than the literal "None"/"123" a blind str() would produce."""
+    root = tmp_path / "store"
+    _write_registry(root, ["neurobase"])
+    result = miner.mine(root, FakeBrain({"candidates": [_valid_candidate(title=None, target=7)]}))
+
+    assert result[0]["title"] == ""
+    assert result[0]["target"] == ""
+
+
 # --- named test 3: rejected near-duplicate summary reaches prompt -------------
 
 

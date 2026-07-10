@@ -133,29 +133,38 @@ def mine(
 
 def _validate_candidate(raw: Any, index: int) -> dict[str, Any] | None:
     """Return a normalized candidate dict, or ``None`` (with a logged warning)
-    if it is structurally invalid: not an object, missing/blank ``slug`` or
-    ``draft``, a slug that fails ``SLUG_RE``, or a disallowed ``type`` /
-    ``candidate_type`` (spec §12.5)."""
+    if it is structurally invalid: not an object, a non-string or missing/blank
+    ``slug``/``draft``, a slug that fails ``SLUG_RE``, or a disallowed ``type`` /
+    ``candidate_type`` (spec §12.5).
+
+    Required fields are **type-checked before coercion** — a JSON ``null`` draft
+    or a numeric slug is structurally invalid, not something to stringify into a
+    ``"None"`` body or a ``"123"`` slug that the ranker/proposal store (E) would
+    then persist."""
     if not isinstance(raw, dict):
         logger.warning("miner candidate %d skipped: not an object", index)
         return None
 
-    slug = str(raw.get("slug", "")).strip()
-    if not slug or not store.SLUG_RE.match(slug):
+    slug = raw.get("slug")
+    if not isinstance(slug, str) or not slug.strip() or not store.SLUG_RE.match(slug.strip()):
         logger.warning("miner candidate %d skipped: missing or invalid slug %r", index, slug)
         return None
+    slug = slug.strip()
 
-    draft = str(raw.get("draft", "")).strip()
-    if not draft:
-        logger.warning("miner candidate %r skipped: missing draft", slug)
+    draft = raw.get("draft")
+    if not isinstance(draft, str) or not draft.strip():
+        logger.warning("miner candidate %r skipped: missing or non-string draft", slug)
         return None
+    draft = draft.strip()
 
-    artifact_type = str(raw.get("type", "")).strip()
+    # `type`/`candidate_type` are matched against a fixed string set, so a
+    # non-string value simply isn't a member — no coercion needed or wanted.
+    artifact_type = raw.get("type")
     if artifact_type not in ARTIFACT_TYPES:
         logger.warning("miner candidate %r skipped: invalid type %r", slug, artifact_type)
         return None
 
-    candidate_type = str(raw.get("candidate_type", "")).strip()
+    candidate_type = raw.get("candidate_type")
     if candidate_type not in CANDIDATE_TYPES:
         logger.warning(
             "miner candidate %r skipped: invalid candidate_type %r", slug, candidate_type
@@ -166,10 +175,10 @@ def _validate_candidate(raw: Any, index: int) -> dict[str, Any] | None:
         "slug": slug,
         "type": artifact_type,
         "candidate_type": candidate_type,
-        "title": str(raw.get("title", "")).strip(),
-        "rationale": str(raw.get("rationale", "")).strip(),
+        "title": _as_str(raw.get("title")),
+        "rationale": _as_str(raw.get("rationale")),
         "draft": draft,
-        "target": str(raw.get("target", "")).strip(),
+        "target": _as_str(raw.get("target")),
         "evidence": _normalize_evidence(raw.get("evidence")),
         # Self-reported counts are advisory display only — the ranker (§12.6)
         # recomputes the real numbers from `evidence`. Carried through, coerced.
@@ -196,6 +205,13 @@ def _normalize_evidence(value: Any) -> list[dict[str, str]]:
         except (ValueError, KeyError):
             continue
     return refs
+
+
+def _as_str(value: Any) -> str:
+    """Optional display fields (title/rationale/target): keep a string, coerce
+    anything else to empty rather than the literal ``"None"``/``"123"`` a blind
+    ``str()`` would produce."""
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _as_int(value: Any) -> int:

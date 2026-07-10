@@ -12,7 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from neurobase.cli import app
-from neurobase.core import store
+from neurobase.core import config, store
 from neurobase.recommender import seed as seed_import
 
 runner = CliRunner()
@@ -23,6 +23,11 @@ def _isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    # Isolate the config location on Windows too: config_path() reads %APPDATA%
+    # there (not ~/.config), so without this the CLI would load the runner's
+    # real config instead of the test's — the reason the extra-redact test only
+    # failed on windows-latest.
+    monkeypatch.setenv("APPDATA", str(home / "AppData" / "Roaming"))
     return home
 
 
@@ -143,12 +148,12 @@ def test_seed_from_dir_applies_configured_extra_redact_patterns(
     config.toml into `import_from_dir` — exercised end to end here rather
     than by passing the kwarg directly to the core function."""
     root, repo = enabled
-    home = _isolate_home(tmp_path, monkeypatch)
-    config_dir = home / ".config" / "neurobase"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.toml").write_text(
-        '[redact]\nextra_patterns = ["zeta-9000"]\n', encoding="utf-8"
-    )
+    _isolate_home(tmp_path, monkeypatch)
+    # Write to the platform-resolved config path (POSIX ~/.config on macOS/Linux,
+    # %APPDATA% on Windows) so the CLI's load_config() actually reads it.
+    cfg_path = config.config_path()
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text('[redact]\nextra_patterns = ["zeta-9000"]\n', encoding="utf-8")
 
     notes = repo / "notes"
     notes.mkdir()

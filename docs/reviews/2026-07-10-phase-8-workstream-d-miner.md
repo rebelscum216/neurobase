@@ -1,6 +1,6 @@
 ---
 slug: phase-8-workstream-d-miner
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-8-workstream-d-miner
@@ -135,3 +135,19 @@ type-validated before coercion, so a JSON `null`/number can't become a
 valid-looking candidate. Regression tests added; reviewer's exact reproduction
 confirmed dropped. `uv run python scripts/ci.py` green (`419 passed`).
 Re-requesting review (`status: awaiting-review`).
+
+## Reviewer findings round 2  _(Reviewer — Codex)_
+
+F1 is resolved. I verified the actual diff, not just the resolution note:
+`_validate_candidate` now type-checks required `slug`/`draft` fields before
+trimming, and non-string `type`/`candidate_type` values no longer pass through
+string coercion. The previous repro candidate
+`{"slug": 123, "draft": null, "type": "rule", "candidate_type":
+"repeated-instruction"}` now logs a skip warning and returns `[]`.
+
+No new findings.
+
+**Verdict:** approve — the miner satisfies the §12.5 contract for this slice,
+including fail-soft handling and invalid-candidate skipping. Verified with
+`uv run pytest tests/test_miner.py -v` (`10 passed`) and
+`uv run python scripts/ci.py` (`418 passed`).

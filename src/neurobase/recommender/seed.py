@@ -66,8 +66,12 @@ class SeedResult:
 
 def claude_memory_dir(project_root: Path) -> Path:
     """Claude Code's per-project auto-memory dir (spec §12.3, live-verified):
-    ``~/.claude/projects/<cwd-with-every-'/'-replaced-by-'-'>/memory/``."""
-    encoded = str(project_root).replace("/", "-")
+    ``~/.claude/projects/<cwd-with-every-'/'-replaced-by-'-'>/memory/``.
+
+    ``as_posix()`` (not ``str()``) so the "every '/' → '-'" rule applies on
+    Windows too, where ``str(WindowsPath(...))`` uses ``\\`` and would leave the
+    separators un-encoded."""
+    encoded = project_root.as_posix().replace("/", "-")
     return Path.home() / ".claude" / "projects" / encoded / "memory"
 
 
@@ -188,7 +192,15 @@ def _import_tree(
                 result.skipped.append((str(path), f"oversized ({size} bytes > {MAX_SOURCE_BYTES})"))
                 continue
             raw_bytes = path.read_bytes()
-            text = raw_bytes.decode("utf-8")
+            # Normalize line endings before parsing: the frontmatter split and
+            # the stored body both assume `\n`, but a note authored (or, in
+            # tests, written by Path.write_text) on Windows arrives with `\r\n`.
+            # Reading via read_bytes() means no universal-newline translation
+            # happens for us, so a `\r\n` file would otherwise fail the
+            # `startswith("---\n")` frontmatter check and store CRLF bodies. The
+            # dedupe digest below still hashes the original raw_bytes, so
+            # normalization never affects idempotency.
+            text = raw_bytes.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         except OSError as exc:
             result.skipped.append((str(path), f"unreadable: {exc}"))
             continue

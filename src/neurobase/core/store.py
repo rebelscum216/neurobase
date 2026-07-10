@@ -145,7 +145,15 @@ def read_doc(path: Path) -> Document:
     match = _DOC_RE.match(text)
     if not match:
         raise ValueError(f"{path}: missing YAML frontmatter block")
-    frontmatter = yaml.safe_load(match.group("frontmatter")) or {}
+    # Normalize a YAML parse failure (unterminated flow sequence, bad indent, …)
+    # to ValueError so every caller's `except ValueError` skip-path (list_raw,
+    # list_curated, the proposal loaders) treats an unparseable frontmatter block
+    # as a malformed-but-skippable document rather than crashing — yaml.YAMLError
+    # is not a ValueError subclass, so it would otherwise propagate uncaught.
+    try:
+        frontmatter = yaml.safe_load(match.group("frontmatter")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path}: invalid YAML frontmatter: {exc}") from exc
     if not isinstance(frontmatter, dict):
         raise ValueError(f"{path}: frontmatter did not parse to a mapping")
     return Document(frontmatter=frontmatter, body=match.group("body"), file_path=path)

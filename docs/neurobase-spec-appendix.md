@@ -697,6 +697,12 @@ hand-written example might suggest; an empty list (`supersedes: []`) is the
 one case PyYAML always renders in flow form even under
 `default_flow_style=False`:
 
+**Managed draft region (ADR-0010):** the proposal body MUST contain exactly one
+artifact draft bounded by `<!-- neurobase:draft:start -->` and
+`<!-- neurobase:draft:end -->`. Review prose remains outside it. `recommend
+edit` replaces only the bytes inside this region; emitters consume only those
+bytes. Missing, reversed, or duplicate markers are malformed and fail closed.
+
 ```markdown
 ---
 name: prefer-uv-run-over-pip
@@ -736,8 +742,10 @@ sessions (Claude, Codex).
 
 **Draft artifact body:**
 
-> Always invoke Python via `uv run <cmd>`, never bare `python`/`pip` — this
-> repo's toolchain is uv-managed end to end.
+<!-- neurobase:draft:start -->
+Always invoke Python via `uv run <cmd>`, never bare `python`/`pip` — this
+repo's toolchain is uv-managed end to end.
+<!-- neurobase:draft:end -->
 
 **Caveats:** doesn't yet distinguish CI-only invocations, which already use
 `uv run` in `.github/workflows/`.

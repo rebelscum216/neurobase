@@ -141,6 +141,32 @@ class EvidenceRef:
             return cls.proposal(str(data["slug"]))
         raise ValueError(f"unknown evidence kind: {kind!r}")
 
+    def is_safe(self) -> bool:
+        """True when this ref's *string values* are store-safe (§12.1), not just
+        its keys/shape: every project/fact/proposal slug matches ``SLUG_RE`` and a
+        ``raw`` ``file`` is a safe basename. A canonical-shaped ref carrying a
+        traversal-valued string (``slug: "../bad"``, a ``file`` with separators)
+        is **not** safe — this is the boundary that keeps such a value from ever
+        reaching a path builder, enforced both before a ref is persisted and when
+        one is read back."""
+        if self.kind == "curated":
+            return (
+                self.project is not None
+                and _valid_slug(self.project)
+                and self.slug is not None
+                and _valid_slug(self.slug)
+            )
+        if self.kind == "raw":
+            return (
+                self.project is not None
+                and _valid_slug(self.project)
+                and self.file is not None
+                and _is_safe_raw_basename(self.file)
+            )
+        if self.kind == "proposal":
+            return self.slug is not None and _valid_slug(self.slug)
+        return False
+
 
 def _require(value: str | None) -> str:
     if value is None:

@@ -30,8 +30,18 @@ def backup_files(root: Path, paths: Iterable[Path]) -> Path | None:
     existing = [p for p in paths if p.exists()]
     if not existing:
         return None
-    backup_dir = root / "backups" / _timestamp()
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    # Allocate a *fresh* dir. `_timestamp()` has only second precision, so two
+    # backups in the same second would otherwise share one dir and the second
+    # manifest.json would clobber the first — silently dropping the first call's
+    # entries and breaking rollback. A `.N` suffix keeps each call isolated while
+    # staying a single directory name `restore_backup` accepts.
+    base = root / "backups" / _timestamp()
+    backup_dir = base
+    counter = 1
+    while backup_dir.exists():
+        backup_dir = base.with_name(base.name + f".{counter}")
+        counter += 1
+    backup_dir.mkdir(parents=True)
     manifest = []
     for path in existing:
         dest = backup_dir / path.name

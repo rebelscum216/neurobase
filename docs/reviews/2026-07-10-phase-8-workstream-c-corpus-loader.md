@@ -1,6 +1,6 @@
 ---
 slug: phase-8-workstream-c-corpus-loader
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-8-workstream-c-corpus-loader
@@ -160,3 +160,27 @@ F1 (major) resolved in follow-up commit — store-boundary validation added to
 `proposal_path` / `resolve_evidence` / `_rejected_bodies`, with regression tests
 and the two reviewer reproductions confirmed closed. `uv run python scripts/ci.py`
 green (`408 passed`). Re-requesting review (`status: awaiting-review`).
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex)_
+
+No new findings.
+
+- **F1 verification:** resolved. I re-read the helper-boundary changes and the
+  new traversal tests. `proposal_path` now validates proposal slugs before
+  constructing a path, `resolve_evidence` treats unsafe raw filenames and bad
+  curated/proposal slugs as `UNRESOLVED`, and `_rejected_bodies` skips invalid
+  ledger slugs before calling `proposal_path`.
+- **Reproductions:** `proposal_path(Path("/tmp/root"), "../escape")` now raises
+  `InvalidSlugError`; `resolve_evidence(root, EvidenceRef.raw("alpha",
+  "/etc/passwd"))` now returns `status="unresolved", path=None`.
+
+Verification:
+- `uv run pytest tests/test_corpus.py tests/test_config.py -v` → 18 passed
+- `uv run python scripts/ci.py` → ruff, format check, mypy, and 408 tests all
+  passed
+
+**Verdict (Reviewer round 2):** approve — the prior path-boundary finding is
+fixed, the workstream-C corpus loader matches the reviewed §12.4/§12.1
+contract, and the full gate is green.

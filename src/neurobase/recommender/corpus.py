@@ -62,6 +62,14 @@ def proposals_dir(root: Path) -> Path:
 
 
 def proposal_path(root: Path, slug: str) -> Path:
+    """``<root>/proposals/<slug>.md``. Validates ``slug`` against the store's
+    ``SLUG_RE`` (§12.1: ``<slug>`` matches ``^[a-z0-9-]+$``) so a proposal path
+    can never escape ``proposals/`` — the same boundary discipline
+    ``store.memory_dir`` enforces for project slugs. A caller writing a proposal
+    should never pass an invalid slug; ``resolve_evidence`` catches this and
+    reports the ref unresolved rather than propagating the raise."""
+    if not _valid_slug(slug):
+        raise store.InvalidSlugError(f"invalid proposal slug: {slug!r} (must match ^[a-z0-9-]+$)")
     return proposals_dir(root) / f"{slug}.md"
 
 
@@ -140,6 +148,29 @@ def _require(value: str | None) -> str:
     return value
 
 
+def _valid_slug(slug: str) -> bool:
+    """A curated/proposal slug is store-safe iff it matches ``SLUG_RE`` — that
+    regex already forbids ``/``, ``.``, and ``..``, so a valid slug can never
+    traverse out of its directory (§12.1)."""
+    return bool(store.SLUG_RE.match(slug))
+
+
+def _is_safe_raw_basename(file: str) -> bool:
+    """A ``raw`` evidence ``file`` must name a single file *inside* the
+    project's ``raw/`` dir — a bare ``*.md`` basename, never an absolute path, a
+    path with separators, or a ``..`` traversal. This boundary is load-bearing:
+    joining an absolute component onto a ``Path`` silently discards the ``raw/``
+    prefix (``Path("…/raw") / "/etc/passwd"`` is ``/etc/passwd``), so without it
+    resolution could escape the store entirely."""
+    return (
+        bool(file)
+        and "/" not in file
+        and "\\" not in file
+        and file not in (".", "..")
+        and file.endswith(".md")
+    )
+
+
 def evidence_to_frontmatter(refs: list[EvidenceRef]) -> list[dict[str, str]]:
     """Serialize a whole evidence list into the frontmatter shape (§12.1) — the
     value a proposal writer assigns to ``frontmatter["evidence"]``."""
@@ -179,18 +210,26 @@ def resolve_evidence(root: Path, ref: EvidenceRef) -> ResolvedEvidence:
     unresolvable ref simply comes back ``status="unresolved"``."""
     try:
         if ref.kind == "raw":
-            path = store.memory_dir(_require(ref.project), root) / "raw" / _require(ref.file)
+            file = _require(ref.file)
+            if not _is_safe_raw_basename(file):
+                return ResolvedEvidence(ref, UNRESOLVED)
+            path = store.memory_dir(_require(ref.project), root) / "raw" / file
             return _resolved_if_exists(ref, path)
         if ref.kind == "curated":
+            slug = _require(ref.slug)
+            if not _valid_slug(slug):
+                return ResolvedEvidence(ref, UNRESOLVED)
             mem = store.memory_dir(_require(ref.project), root)
-            live = mem / "curated" / f"{_require(ref.slug)}.md"
+            live = mem / "curated" / f"{slug}.md"
             if live.exists():
                 return ResolvedEvidence(ref, RESOLVED, live)
-            tomb = mem / ".tombstones" / f"{ref.slug}.md"
+            tomb = mem / ".tombstones" / f"{slug}.md"
             if tomb.exists():
                 return ResolvedEvidence(ref, RESOLVED, tomb, tombstoned=True)
             return ResolvedEvidence(ref, UNRESOLVED)
         if ref.kind == "proposal":
+            # proposal_path validates the slug and raises on a bad one — caught
+            # below and reported unresolved, per D21's fail-soft contract.
             return _resolved_if_exists(ref, proposal_path(root, _require(ref.slug)))
     except (store.InvalidSlugError, ValueError, OSError):
         return ResolvedEvidence(ref, UNRESOLVED)
@@ -452,6 +491,11 @@ def _rejected_bodies(root: Path, rejected_types: dict[str, str | None]) -> list[
     no longer ``rejected`` is simply omitted — fail-soft, never fatal."""
     out: list[RejectedProposal] = []
     for slug in sorted(rejected_types):
+        # A ledger line's slug is untrusted input (the file accretes across many
+        # CLI runs) — an invalid one must not make proposal_path raise out of
+        # this fail-soft reader, so skip it rather than build an unsafe path.
+        if not _valid_slug(slug):
+            continue
         path = proposal_path(root, slug)
         if not path.exists():
             continue

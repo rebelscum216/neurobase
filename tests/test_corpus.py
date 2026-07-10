@@ -234,6 +234,62 @@ def test_resolve_evidence_hits_and_misses(tmp_path: Path) -> None:
     assert not bad.resolved
 
 
+def test_path_helpers_and_resolution_reject_traversal(tmp_path: Path) -> None:
+    """Codex review F1: proposal/evidence identifiers must not escape their
+    store directories. Invalid proposal slugs raise at the helper boundary
+    (same discipline as ``store.memory_dir``); traversal-shaped evidence refs
+    resolve to ``unresolved`` rather than returning an escaped path."""
+    root = tmp_path / "store"
+
+    # proposal_path validates the slug — a traversal slug can never build a path
+    # that escapes proposals/.
+    for bad in ["../escape", "a/b", "..", "Bad", "with space"]:
+        with pytest.raises(store.InvalidSlugError):
+            corpus.proposal_path(root, bad)
+    assert corpus.proposal_path(root, "ok-slug") == root / "proposals" / "ok-slug.md"
+
+    # An absolute raw `file` would otherwise discard the raw/ prefix and resolve
+    # to the absolute path itself (e.g. /etc/passwd); it must be unresolved.
+    escapes = [
+        corpus.EvidenceRef.raw("alpha", "/etc/passwd"),
+        corpus.EvidenceRef.raw("alpha", "../../../etc/passwd"),
+        corpus.EvidenceRef.raw("alpha", "sub/nested.md"),
+        corpus.EvidenceRef.raw("alpha", "..\\win.md"),
+        corpus.EvidenceRef.curated("alpha", "../../secret"),
+        corpus.EvidenceRef.proposal("../../secret"),
+    ]
+    for ref in escapes:
+        resolved = corpus.resolve_evidence(root, ref)
+        assert not resolved.resolved, ref
+        assert resolved.path is None, ref
+
+    # Sanity: a real absolute file that exists is still never reached through a
+    # raw evidence ref, even when it's genuinely on disk.
+    victim = tmp_path / "victim.md"
+    victim.write_text("secret", encoding="utf-8")
+    ref = corpus.EvidenceRef.raw("alpha", str(victim))
+    assert not corpus.resolve_evidence(root, ref).resolved
+
+
+def test_ledger_reader_skips_traversal_slug(tmp_path: Path) -> None:
+    """A malformed/hostile ledger slug must not make the fail-soft ledger reader
+    raise through ``proposal_path`` (Codex review F1 + §12.2 fail-soft)."""
+    root = tmp_path / "store"
+    ledger = corpus.ledger_path(root)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        '{"at":"2026-07-09T12:00:00Z","slug":"../../etc/passwd","event":"rejected",'
+        '"candidate_type":"repeated-instruction"}\n',
+        encoding="utf-8",
+    )
+
+    summary = corpus.load_ledger_summary(root)  # must not raise
+
+    assert summary.rejected_proposals == []
+    # The reject *count* still tallies by candidate_type (no path built from it).
+    assert summary.reject_counts == {"repeated-instruction": 1}
+
+
 def test_resolve_tombstoned_curated_fact_still_resolves(tmp_path: Path) -> None:
     """A tombstoned/pruned curated fact resolves to its ``.tombstones/`` record
     while that survives — evidence is an append-only historical record (D21)."""

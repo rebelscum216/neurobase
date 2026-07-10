@@ -815,9 +815,15 @@ def recommend_show(slug: str, root: str | None = typer.Option(None, "--root")) -
     if doc is None:
         typer.secho(f"proposal {slug!r} not found or malformed", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    typer.echo(doc.body.rstrip())
+    # §12.8/D15(b): redact again at display time — the stored body was redacted
+    # at write time, but a custom pattern added since, or a hand-edited/legacy
+    # proposal, must never surface a secret in `show`'s draft view.
+    typer.echo(proposals.redact_body(doc.body).rstrip())
     typer.echo("\nEvidence:")
     for item in doc.get("evidence") or []:
+        if not isinstance(item, dict):
+            typer.echo(f"- {item!r} [unresolved]")
+            continue
         try:
             ref = recommend_corpus.EvidenceRef.from_frontmatter(item)
             resolved = recommend_corpus.resolve_evidence(resolved_root, ref)
@@ -914,6 +920,14 @@ def recommend_accept(
     doc = proposals.load_proposal(resolved_root, slug)
     if doc is None:
         typer.secho(f"proposal {slug!r} not found or malformed", err=True)
+        raise typer.Exit(code=1)
+    # §12.7: accept on a rejected/superseded proposal is a hard error, never
+    # reopened — validate BEFORE rendering, diffing, backing up, or writing, so a
+    # blocked proposal can never leave an artifact on disk (the no-op path would
+    # otherwise swallow it silently too).
+    status = str(doc.get("status") or "proposed")
+    if status in {"rejected", "superseded"}:
+        typer.secho(f"cannot accept proposal {slug!r}: status is {status}", err=True)
         raise typer.Exit(code=1)
     try:
         artifact = emitters.prepare(resolved_root, doc, skill_scope=target)

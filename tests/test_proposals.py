@@ -215,6 +215,33 @@ def test_load_all_proposals_empty_when_no_dir(tmp_path: Path) -> None:
     assert proposals.load_all_proposals(tmp_path / "store") == []
 
 
+def test_schema_invalid_proposals_are_skipped_on_load(tmp_path: Path) -> None:
+    """F2: parseable-but-malformed proposals are skipped by both load paths — a
+    ``name`` that doesn't match the filename slug (a path-traversal vector for the
+    skill emitter) and an ``evidence`` that isn't a list of mappings (an
+    AttributeError vector for ``recommend show``)."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked(slug="good-one")], now=NOW)
+    directory = corpus.proposals_dir(root)
+    # Frontmatter parses fine, but name != stem — a traversal-shaped name must
+    # never be trusted as a path component downstream.
+    (directory / "evil.md").write_text(
+        "---\nname: ../../escape\nstatus: proposed\ntype: skill\nevidence: []\n---\n\nx\n",
+        encoding="utf-8",
+    )
+    # evidence is a bare string, not a list of refs.
+    (directory / "bad-evidence.md").write_text(
+        "---\nname: bad-evidence\nstatus: proposed\ntype: rule\nevidence: broken\n---\n\ny\n",
+        encoding="utf-8",
+    )
+
+    loaded = proposals.load_all_proposals(root)
+
+    assert [d.get("name") for d in loaded] == ["good-one"]
+    assert proposals.load_proposal(root, "evil") is None
+    assert proposals.load_proposal(root, "bad-evidence") is None
+
+
 # --- named test: a user edit is not silently overwritten ----------------------
 
 

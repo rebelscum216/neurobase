@@ -110,3 +110,65 @@ def test_reject_decided_proposal_is_hard_error(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "status is rejected" in result.output
+
+
+def test_accept_rejected_proposal_errors_before_any_write(tmp_path: Path) -> None:
+    """F1 (§12.7): accept on a rejected proposal is a hard error that renders,
+    backs up, and writes NOTHING — the status guard must fire before the artifact
+    could ever reach disk."""
+    root = tmp_path / "store"
+    from neurobase.core import projects
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    projects.register_project(root, repo, slug="neurobase")
+    proposals.write_ranked(root, [_ranked()])
+    proposals.reject_proposal(root, "prefer-uv-run")
+
+    result = runner.invoke(
+        app, ["recommend", "accept", "prefer-uv-run", "--root", str(root), "--yes"]
+    )
+
+    assert result.exit_code == 1
+    assert "status is rejected" in result.output
+    assert not (repo / "AGENTS.md").exists()  # no artifact written
+    assert not (root / "backups").exists()  # no backup taken
+
+
+def test_show_on_parseable_but_malformed_proposal_is_fail_soft(tmp_path: Path) -> None:
+    """F2: a proposal whose frontmatter parses but violates the §12.1 schema
+    (here ``evidence`` is a bare string) is treated as malformed and skipped —
+    ``show`` returns a clean error, never an ``AttributeError`` traceback."""
+    root = tmp_path / "store"
+    directory = root / "proposals"
+    directory.mkdir(parents=True)
+    (directory / "prefer-uv-run.md").write_text(
+        "---\n"
+        "name: prefer-uv-run\n"
+        "status: proposed\n"
+        "type: rule\n"
+        "evidence: broken\n"  # a string, not a list of refs
+        "---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["recommend", "show", "prefer-uv-run", "--root", str(root)])
+
+    assert result.exit_code == 1
+    assert "not found or malformed" in result.output
+
+
+def test_reject_records_candidate_type_for_miner_feedback(tmp_path: Path) -> None:
+    """F5 (§12.2/§12.4): a CLI rejection carries the proposal's candidate_type on
+    its ledger event, so ``corpus.load_ledger_summary`` can build the per-type
+    reject counts the miner prompt depends on."""
+    from neurobase.recommender import corpus
+
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()])
+
+    result = runner.invoke(app, ["recommend", "reject", "prefer-uv-run", "--root", str(root)])
+
+    assert result.exit_code == 0
+    summary = corpus.load_ledger_summary(root)
+    assert summary.reject_counts == {"repeated-instruction": 1}

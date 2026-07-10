@@ -55,6 +55,54 @@ DRAFT_END = "<!-- neurobase:draft:end -->"
 # Statuses that a fresh `proposed` render must never overwrite (§12.6 Invariant).
 _DECIDED_STATUSES = frozenset({"accepted", "rejected", "superseded"})
 
+# The §12.1 proposal schema, enforced structurally on every load so a
+# malformed-but-parseable file is skipped rather than crashing a consumer or —
+# worse — handing a traversal-shaped `name` to a path-building emitter.
+_VALID_STATUSES = frozenset({"proposed", "accepted", "rejected", "superseded"})
+_VALID_TYPES = frozenset({"skill", "rule"})
+_VALID_CANDIDATE_TYPES = frozenset(
+    {"repeated-correction", "repeated-workflow", "repeated-instruction", "cross-project-convention"}
+)
+
+
+def _is_valid_proposal(doc: store.Document) -> bool:
+    """Structural §12.1 validation, shared by single- and bulk-load. Rejects a
+    parseable-but-malformed document *before* any consumer (``recommend show``'s
+    evidence loop) or emitter (the skill emitter's ``<slug>/SKILL.md`` path)
+    sees it:
+
+    - ``name`` MUST be a store-safe slug (``SLUG_RE``, which already forbids
+      ``/``/``.``/``..``) **and** equal the file's own stem — so a hand-crafted
+      ``good.md`` carrying ``name: ../../evil`` can never become a path
+      component in the skill emitter;
+    - ``status``/``type`` MUST be valid enums; ``candidate_type`` too when
+      present;
+    - ``evidence`` MUST be a list of mappings (``recommend show`` iterates it and
+      calls ``.get`` on each item — a bare string would raise ``AttributeError``
+      past the list/show fail-soft invariant);
+    - ``scores``/``supersedes`` MUST be a mapping/list when present.
+    """
+    name = doc.get("name")
+    if not isinstance(name, str) or not store.SLUG_RE.match(name) or name != doc.file_path.stem:
+        return False
+    if doc.get("status") not in _VALID_STATUSES:
+        return False
+    if doc.get("type") not in _VALID_TYPES:
+        return False
+    candidate_type = doc.get("candidate_type")
+    if candidate_type is not None and candidate_type not in _VALID_CANDIDATE_TYPES:
+        return False
+    evidence = doc.get("evidence")
+    if evidence is not None and (
+        not isinstance(evidence, list) or not all(isinstance(item, dict) for item in evidence)
+    ):
+        return False
+    scores = doc.get("scores")
+    if scores is not None and not isinstance(scores, dict):
+        return False
+    supersedes = doc.get("supersedes")
+    return supersedes is None or isinstance(supersedes, list)
+
 
 @dataclass
 class WriteOutcome:
@@ -214,9 +262,10 @@ def load_proposal(root: Path, slug: str) -> store.Document | None:
     if not path.exists():
         return None
     try:
-        return store.read_doc(path)
+        doc = store.read_doc(path)
     except (ValueError, OSError):
         return None
+    return doc if _is_valid_proposal(doc) else None
 
 
 def load_all_proposals(root: Path) -> list[store.Document]:
@@ -230,9 +279,11 @@ def load_all_proposals(root: Path) -> list[store.Document]:
     docs: list[store.Document] = []
     for path in sorted(directory.glob("*.md")):
         try:
-            docs.append(store.read_doc(path))
+            doc = store.read_doc(path)
         except (ValueError, OSError):
             continue
+        if _is_valid_proposal(doc):
+            docs.append(doc)
     docs.sort(key=_sort_key)
     return docs
 
@@ -376,6 +427,12 @@ def reject_proposal(
     frontmatter["updated_at"] = stamp
     store.write_doc(doc.file_path, frontmatter, doc.body)
     record: dict[str, Any] = {"at": stamp, "slug": slug, "event": "rejected"}
+    # Carry the proposal's candidate_type so corpus.load_ledger_summary can build
+    # the per-type reject counts the miner prompt feeds on (§12.2/§12.4/§12.5);
+    # without it, every CLI rejection contributes nothing to that feedback.
+    candidate_type = doc.get("candidate_type")
+    if isinstance(candidate_type, str) and candidate_type:
+        record["candidate_type"] = candidate_type
     if reason:
         record["reason"] = reason
     path = ledger_path(root)

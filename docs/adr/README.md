@@ -40,6 +40,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0006](0006-codex-hook-command-tokenization-and-trust.md) | Codex hooks — string-with-args `command`, stdin JSON payload, trust re-fires on edit | Accepted | Phase 5-init |
 | [0007](0007-recommender-contract.md) | Phase 8 recommender — proposal/ledger shape, ranking, and consent-first review (D14–D21) | Accepted | Phase 8 recommender |
 | [0008](0008-phase-7-mcp-server.md) | Phase 7 MCP server — shape + decisions (D-a…D-e, user-directed pin, SDK pin) | Accepted | Phase 7 MCP server |
+| [0009](0009-vscode-extension-thin-client.md) | VS Code extension as a thin client over a versioned Python protocol | Proposed | VS Code extension architecture |
 | [0010](0010-proposal-draft-boundary.md) | Proposal bodies use a managed artifact-draft region | Accepted | Phase 8 Workstream F/G |
 
 All four Phase 0 spikes (S1, S2, S5, S6) are now closed. ADR-0004 was caught

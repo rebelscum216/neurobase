@@ -1,6 +1,6 @@
 ---
 slug: phase-8-workstream-efg-recommender
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: phase-8-workstream-e-ranker-proposals
@@ -104,6 +104,75 @@ Key files:
 
 ## Reviewer findings  _(Reviewer — Codex)_
 
-> Run the diff and review the actual code. One entry per finding.
+1. **blocker** — `src/neurobase/cli/__init__.py:918`: The blocked-status
+   check happens only in `accept_proposal`, after `prepare`, the unchanged-diff
+   return, confirmation, backup, and `write_atomic`. A rejected or superseded
+   proposal with a changed target therefore writes the artifact and only then
+   errors; with an unchanged target it returns “Already up to date” instead of
+   raising at all. This violates §12.7's hard-error/never-reopened contract.
+   Validate the proposal status before rendering or taking the no-op path (and
+   retain a defensive check at the state-transition boundary).
 
-**Verdict:** _(pending)_
+2. **blocker** — `src/neurobase/recommender/proposals.py:206`: Proposal loads
+   validate only that YAML parsed to a mapping, not the §12.1 schema. As a
+   result, malformed-but-parseable frontmatter is neither skipped nor reliably
+   fail-soft: for example, `evidence: broken` makes `recommend show` iterate
+   characters and raise `AttributeError`, violating the list/show invariant.
+   The same gap is path-relevant: a skill proposal whose `name` is missing,
+   mismatched, absolute, or contains `..` is passed to `_skill` as a path
+   component, so accept can target outside the required `<slug>/SKILL.md`
+   location. Add a shared structural validator used by both single and bulk
+   loads (including `name == filename slug`, enums, mappings/lists, and field
+   types), and skip or cleanly reject invalid documents before any consumer or
+   emitter sees them.
+
+3. **blocker** — `src/neurobase/recommender/emitters.py:92`: Rule files are
+   read with `Path.read_text` and written with `Path.write_text` at line 122.
+   Universal-newline translation normalizes CRLF or mixed-newline files, so an
+   accept can change bytes throughout AGENTS.md/CLAUDE.md outside the owned
+   block. That directly violates §12's MUST to preserve every other byte. Read
+   and write with newline translation disabled (or operate on bytes), and add a
+   CRLF/mixed-newline preservation test.
+
+4. **blocker** — `src/neurobase/recommender/emitters.py:28`: The accept-time
+   redaction pass calls `redact.redact(draft)` without the configured
+   `[redact].extra_patterns`; `recommend show` also prints `doc.body` directly
+   at `src/neurobase/cli/__init__.py:818` without the §12.8 runtime redaction
+   pass. Thus a custom secret pattern added after proposal creation (or text in
+   a legacy/hand-edited proposal) can appear in the shown draft, diff, and
+   installed artifact. This violates the D13/§12.8 redaction MUST. Pass the
+   configured extras through both runtime paths and test a custom pattern, not
+   only the built-in AWS-key case.
+
+5. **blocker** — `src/neurobase/recommender/proposals.py:378`: A real
+   `recommend reject` ledger record omits the proposal's `candidate_type`.
+   `corpus.load_ledger_summary` computes per-type reject counts solely from the
+   `candidate_type` on rejected events, so every rejection created by this CLI
+   contributes no type count and the miner never receives the required
+   per-candidate-type feedback. Include the known proposal type on the rejected
+   event (or make the reader join the proposal/prior proposed event), with an
+   end-to-end reject-to-miner-summary test.
+
+6. **major** — `src/neurobase/recommender/emitters.py:99`: Reversed rule
+   markers are not rejected. With one end marker before one start marker, the
+   counts match, the forward end lookup returns `-1`, and the code falls into
+   the “no block” branch and appends a second block. The target is then more
+   corrupt and the next accept fails on duplicate markers. Require a single,
+   correctly ordered start/end pair before replacement or append, and cover the
+   reversed-marker case.
+
+7. **major** — `src/neurobase/cli/__init__.py:932`: The accept flow relies on
+   `backup_files`, whose timestamp has only second precision
+   (`src/neurobase/core/backups.py:23`) and whose manifest is overwritten on
+   every call (`core/backups.py:44`). Two scripted `accept --yes` operations in
+   the same second reuse one directory; the second manifest drops the first
+   artifact even though its backup copy remains, so supported rollback can no
+   longer restore every touched file. Make backup-directory allocation unique
+   (or safely merge manifests) and test two accepts within one timestamp.
+
+Verification: `uv run python scripts/ci.py` passes all four gates with 449
+tests. The passing suite does not exercise the cases above.
+
+**Verdict:** changes-requested — multiple contract blockers allow writes before
+status validation, fail to preserve unrelated bytes, and bypass required
+redaction/fail-soft behavior.

@@ -17,6 +17,12 @@ with no external code or private repos required.
 
 **Reading order:** build-plan → spec-appendix → architecture-options.
 
+## Product execution plans
+
+| Document | What it is | Status |
+|---|---|---|
+| [neurobase-vscode-extension-execution-plan.md](neurobase-vscode-extension-execution-plan.md) | Execution plan for the optional VS Code thin client: versioned Python client protocol, v0.1 memory browser and actions, later graph prototype and recommendation studio. | Proposed |
+
 ## Process
 
 | Document | What it is |

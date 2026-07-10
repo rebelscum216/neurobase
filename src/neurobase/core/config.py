@@ -51,6 +51,20 @@ class McpConfig:
 
 
 @dataclass
+class RecommendConfig:
+    # Phase 8 recommender (spec §12.11, ADR-0007 D17/D18). Ranker gates, the
+    # corpus loader's per-project raw caps, near-duplicate threshold, and the
+    # survival window — all tuned defaults, all config-overridable.
+    min_occurrences: int = 3  # ranker recurrence gate (§12.6)
+    min_breadth_sessions: int = 2  # ranker breadth gate (§12.6)
+    recency_halflife_days: int = 30  # recency weight half-life (§12.6)
+    raw_lookback_days: int = 30  # corpus loader raw cap by age (§12.4, D17)
+    raw_cap_per_project: int = 200  # corpus loader raw cap by count (§12.4, D17)
+    near_duplicate_threshold: float = 0.6  # Jaccard threshold (§12.5/§12.6, D18)
+    survival_window_days: int = 30  # accepted-artifact survival window (§12.9)
+
+
+@dataclass
 class Config:
     store: StoreConfig = field(default_factory=StoreConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
@@ -58,6 +72,7 @@ class Config:
     inject: InjectConfig = field(default_factory=InjectConfig)
     redact: RedactConfig = field(default_factory=RedactConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    recommend: RecommendConfig = field(default_factory=RecommendConfig)
 
 
 def config_path() -> Path:
@@ -82,4 +97,5 @@ def load_config(path: Path | None = None) -> Config:
         inject=InjectConfig(**data.get("inject", {})),
         redact=RedactConfig(**data.get("redact", {})),
         mcp=McpConfig(**data.get("mcp", {})),
+        recommend=RecommendConfig(**data.get("recommend", {})),
     )

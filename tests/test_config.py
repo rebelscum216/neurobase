@@ -17,6 +17,14 @@ def test_missing_file_returns_all_defaults(tmp_path: Path) -> None:
     assert cfg.inject.max_chars == 6000
     assert cfg.inject.sources == ["startup", "clear"]
     assert cfg.redact.extra_patterns == []
+    # Phase 8 recommender defaults (spec §12.11, ADR-0007 D17/D18).
+    assert cfg.recommend.min_occurrences == 3
+    assert cfg.recommend.min_breadth_sessions == 2
+    assert cfg.recommend.recency_halflife_days == 30
+    assert cfg.recommend.raw_lookback_days == 30
+    assert cfg.recommend.raw_cap_per_project == 200
+    assert cfg.recommend.near_duplicate_threshold == 0.6
+    assert cfg.recommend.survival_window_days == 30
 
 
 def test_partial_overrides_keep_other_defaults(tmp_path: Path) -> None:
@@ -49,6 +57,12 @@ sources = ["startup"]
 
 [redact]
 extra_patterns = ["foo-\\\\d+"]
+
+[recommend]
+min_occurrences = 5
+raw_lookback_days = 7
+raw_cap_per_project = 50
+near_duplicate_threshold = 0.8
 """
     )
     cfg = load_config(path)
@@ -58,3 +72,8 @@ extra_patterns = ["foo-\\\\d+"]
     assert cfg.inject.max_chars == 1000
     assert cfg.inject.sources == ["startup"]
     assert cfg.redact.extra_patterns == ["foo-\\d+"]
+    assert cfg.recommend.min_occurrences == 5
+    assert cfg.recommend.raw_lookback_days == 7
+    assert cfg.recommend.raw_cap_per_project == 50
+    assert cfg.recommend.near_duplicate_threshold == 0.8
+    assert cfg.recommend.survival_window_days == 30  # untouched key still defaults

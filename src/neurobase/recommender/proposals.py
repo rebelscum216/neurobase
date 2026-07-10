@@ -49,6 +49,9 @@ from neurobase.recommender.ranker import RankedCandidate, _parse_iso
 
 logger = logging.getLogger(__name__)
 
+DRAFT_START = "<!-- neurobase:draft:start -->"
+DRAFT_END = "<!-- neurobase:draft:end -->"
+
 # Statuses that a fresh `proposed` render must never overwrite (§12.6 Invariant).
 _DECIDED_STATUSES = frozenset({"accepted", "rejected", "superseded"})
 
@@ -314,6 +317,74 @@ def _append_ledger(
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def ledger_history(root: Path, slug: str) -> list[dict[str, Any]]:
+    """Fail-soft ledger history for one proposal, oldest-first (§12.2)."""
+    return [event for event in _read_ledger(root) if event.get("slug") == slug]
+
+
+def extract_draft(body: str) -> str | None:
+    """Return the verbatim artifact draft between the managed markers."""
+    if body.count(DRAFT_START) != 1 or body.count(DRAFT_END) != 1:
+        return None
+    start = body.find(DRAFT_START)
+    end = body.find(DRAFT_END, start + len(DRAFT_START)) if start >= 0 else -1
+    if start < 0 or end < 0:
+        return None
+    return body[start + len(DRAFT_START) : end].strip("\n")
+
+
+def replace_draft(body: str, draft: str) -> str | None:
+    """Replace only the managed draft region, preserving review prose."""
+    if body.count(DRAFT_START) != 1 or body.count(DRAFT_END) != 1:
+        return None
+    start = body.find(DRAFT_START)
+    end = body.find(DRAFT_END, start + len(DRAFT_START)) if start >= 0 else -1
+    if start < 0 or end < 0:
+        return None
+    return f"{body[: start + len(DRAFT_START)]}\n{draft.rstrip()}\n{body[end:]}"
+
+
+def save_edited_draft(root: Path, slug: str, draft: str, *, now: datetime | None = None) -> bool:
+    """Redact and persist one user edit, appending exactly one ledger event."""
+    doc = load_proposal(root, slug)
+    if doc is None:
+        return False
+    updated = replace_draft(doc.body, redact_body(draft))
+    if updated is None:
+        return False
+    stamp = _iso(now if now is not None else datetime.now(UTC))
+    frontmatter = dict(doc.frontmatter)
+    frontmatter["updated_at"] = stamp
+    store.write_doc(doc.file_path, frontmatter, updated)
+    _append_ledger(root, slug, "edited", stamp, None)
+    return True
+
+
+def reject_proposal(
+    root: Path, slug: str, *, reason: str | None = None, now: datetime | None = None
+) -> str:
+    """Reject a still-proposed proposal and append exactly one ledger event."""
+    doc = load_proposal(root, slug)
+    if doc is None:
+        raise ValueError(f"proposal {slug!r} not found or malformed")
+    status = str(doc.get("status") or "proposed")
+    if status != "proposed":
+        raise ValueError(f"cannot reject proposal {slug!r}: status is {status}")
+    stamp = _iso(now if now is not None else datetime.now(UTC))
+    frontmatter = dict(doc.frontmatter)
+    frontmatter["status"] = "rejected"
+    frontmatter["updated_at"] = stamp
+    store.write_doc(doc.file_path, frontmatter, doc.body)
+    record: dict[str, Any] = {"at": stamp, "slug": slug, "event": "rejected"}
+    if reason:
+        record["reason"] = reason
+    path = ledger_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return status
+
+
 # --- body rendering + redaction ---------------------------------------------
 
 
@@ -327,8 +398,7 @@ def render_body(candidate: RankedCandidate) -> str:
     if candidate.rationale.strip():
         lines += [f"**Rationale:** {candidate.rationale.strip()}", ""]
     lines += [f"**Evidence summary:** {_evidence_summary(candidate)}", ""]
-    lines += ["**Draft artifact body:**", ""]
-    lines += _blockquote(candidate.draft.strip())
+    lines += ["**Draft artifact body:**", "", DRAFT_START, candidate.draft.strip(), DRAFT_END]
     lines += ["", "**Caveats:** review the evidence before accepting; scores are advisory."]
     return "\n".join(lines) + "\n"
 
@@ -340,12 +410,6 @@ def _evidence_summary(candidate: RankedCandidate) -> str:
         f"session(s), {candidate.agents} agent(s), {candidate.projects} project(s) "
         f"({scope}); total score {candidate.scores.total}."
     )
-
-
-def _blockquote(text: str) -> list[str]:
-    if not text:
-        return ["> _(no draft body)_"]
-    return [f"> {line}" if line else ">" for line in text.splitlines()]
 
 
 def redact_body(body: str) -> str:

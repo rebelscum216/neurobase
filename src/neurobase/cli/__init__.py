@@ -15,6 +15,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+import click
 import typer
 
 from neurobase import __version__
@@ -29,6 +30,8 @@ from neurobase.core import backups, projects, store
 from neurobase.core.config import load_config
 from neurobase.curator import curate as run_curate
 from neurobase.curator import is_stale, read_fact_count_trend
+from neurobase.recommender import corpus as recommend_corpus
+from neurobase.recommender import miner, proposals, ranker
 from neurobase.recommender import seed as seed_import
 
 app = typer.Typer(
@@ -751,7 +754,6 @@ def _uninstall_codex(resolved_cwd: Path, *, user: bool) -> list[_PendingWrite]:
 
 _PLANNED: list[tuple[str, int, str]] = [
     ("recall", 4, "Print the memory that would be injected for a project."),
-    ("recommend", 8, "Review skill/rule proposals mined from your history."),
 ]
 
 
@@ -770,6 +772,133 @@ def _make_stub(name: str, phase: int, summary: str) -> Callable[[], None]:
 
 for _name, _phase, _summary in _PLANNED:
     app.command(name=_name)(_make_stub(_name, _phase, _summary))
+
+
+# --- recommend: Phase 8 proposal review -------------------------------------
+
+recommend_app = typer.Typer(
+    name="recommend",
+    help="Mine and review skill/rule proposals from your history.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(recommend_app, name="recommend")
+
+
+@recommend_app.command("list")
+def recommend_list(
+    project: str | None = typer.Option(None, "--project"),
+    status_filter: str | None = typer.Option(None, "--status"),
+    root: str | None = typer.Option(None, "--root"),
+) -> None:
+    """List proposals in deterministic review order."""
+    resolved_root = store.resolve_root(root)
+    _check_store_schema(resolved_root)
+    for doc in proposals.load_all_proposals(resolved_root):
+        if project is not None and doc.get("project") != project:
+            continue
+        if status_filter is not None and doc.get("status") != status_filter:
+            continue
+        scores = doc.get("scores") if isinstance(doc.get("scores"), dict) else {}
+        typer.echo(
+            f"{doc.get('name')}\t{doc.get('status')}\t{doc.get('type')}\t"
+            f"{doc.get('target')}\t{scores.get('total', 0)}"
+        )
+
+
+@recommend_app.command("show")
+def recommend_show(slug: str, root: str | None = typer.Option(None, "--root")) -> None:
+    """Show a proposal, evidence resolution, and ledger history."""
+    resolved_root = store.resolve_root(root)
+    _check_store_schema(resolved_root)
+    doc = proposals.load_proposal(resolved_root, slug)
+    if doc is None:
+        typer.secho(f"proposal {slug!r} not found or malformed", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo(doc.body.rstrip())
+    typer.echo("\nEvidence:")
+    for item in doc.get("evidence") or []:
+        try:
+            ref = recommend_corpus.EvidenceRef.from_frontmatter(item)
+            resolved = recommend_corpus.resolve_evidence(resolved_root, ref)
+            typer.echo(f"- {ref.to_frontmatter()} [{resolved.status}]")
+        except (KeyError, ValueError):
+            typer.echo(f"- {item!r} [unresolved]")
+    typer.echo("\nHistory:")
+    for event in proposals.ledger_history(resolved_root, slug):
+        typer.echo(json.dumps(event, ensure_ascii=False))
+
+
+@recommend_app.command("run")
+def recommend_run(
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    root: str | None = typer.Option(None, "--root"),
+) -> None:
+    """Mine, rank, and optionally persist proposals."""
+    config = load_config()
+    resolved_root = store.resolve_root(root)
+    _check_store_schema(resolved_root)
+    brain, resolution = resolve_brain(config)
+    if brain is None:
+        typer.secho(
+            f"No brain backend available ({resolution.reason}); run `neurobase doctor`.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    candidates = miner.mine(resolved_root, brain, config=config.recommend)
+    loaded = recommend_corpus.load_corpus(resolved_root, config=config.recommend)
+    ranked = ranker.rank(resolved_root, candidates, loaded, config=config.recommend)
+    if dry_run:
+        for candidate in ranked:
+            typer.echo(f"{candidate.slug}\t{candidate.type}\t{candidate.scores.total}")
+        return
+    outcome = proposals.write_ranked(resolved_root, ranked, config=config.recommend)
+    typer.echo(json.dumps(outcome.__dict__, ensure_ascii=False))
+
+
+@recommend_app.command("edit")
+def recommend_edit(slug: str, root: str | None = typer.Option(None, "--root")) -> None:
+    """Edit only a proposal's managed artifact draft."""
+    resolved_root = store.resolve_root(root)
+    _check_store_schema(resolved_root)
+    doc = proposals.load_proposal(resolved_root, slug)
+    if doc is None:
+        typer.secho(f"proposal {slug!r} not found or malformed", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    status = str(doc.get("status") or "proposed")
+    if status in {"rejected", "superseded"}:
+        typer.secho(f"cannot edit proposal {slug!r}: status is {status}", err=True)
+        raise typer.Exit(code=1)
+    draft = proposals.extract_draft(doc.body)
+    if draft is None:
+        typer.secho(f"proposal {slug!r} has no managed draft region", err=True)
+        raise typer.Exit(code=1)
+    edited = click.edit(draft, extension=".md")
+    if edited is None:
+        typer.echo(draft)
+        return
+    if not proposals.save_edited_draft(resolved_root, slug, edited):
+        typer.secho("could not save edited draft", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Edited proposal {slug}.")
+
+
+@recommend_app.command("reject")
+def recommend_reject(
+    slug: str,
+    reason: str | None = typer.Option(None, "--reason"),
+    root: str | None = typer.Option(None, "--root"),
+) -> None:
+    """Reject a proposed candidate without touching agent configuration."""
+    resolved_root = store.resolve_root(root)
+    _check_store_schema(resolved_root)
+    try:
+        proposals.reject_proposal(resolved_root, slug, reason=reason)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Rejected proposal {slug}.")
 
 
 # --- mcp: the MCP server (Phase 7) --------------------------------------------

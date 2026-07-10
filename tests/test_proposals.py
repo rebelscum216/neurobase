@@ -373,3 +373,11 @@ def test_new_proposal_is_created_and_logged(tmp_path: Path) -> None:
             "candidate_type": "repeated-instruction",
         }
     ]
+
+
+def test_draft_markers_extract_verbatim_and_fail_closed_on_duplicates() -> None:
+    candidate = _ranked(draft="# Exact draft\n\n- keep markdown")
+    body = proposals.render_body(candidate)
+    assert proposals.extract_draft(body) == "# Exact draft\n\n- keep markdown"
+    assert proposals.extract_draft(body + proposals.DRAFT_START) is None
+    assert proposals.replace_draft(body + proposals.DRAFT_END, "replacement") is None

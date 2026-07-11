@@ -9,6 +9,7 @@ phases land, replace a stub with its real command.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import shutil
 import sys
@@ -31,7 +32,7 @@ from neurobase.core.config import load_config
 from neurobase.curator import curate as run_curate
 from neurobase.curator import is_stale, read_fact_count_trend
 from neurobase.recommender import corpus as recommend_corpus
-from neurobase.recommender import emitters, miner, proposals, ranker
+from neurobase.recommender import emitters, metrics, miner, proposals, ranker
 from neurobase.recommender import seed as seed_import
 
 app = typer.Typer(
@@ -86,9 +87,19 @@ def enable(
 def status(
     root: str | None = typer.Option(None, "--root", help="Override the store root."),
     cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+    recommender: bool = typer.Option(
+        False, "--recommender", help="Print recommender metrics instead of project status."
+    ),
 ) -> None:
     """Show projects, raw/curated counts, nodes, and fact-count trend."""
     resolved_root = store.resolve_root(root)
+    # §12.9: recommender metrics are STORE-WIDE (ledger + proposals aren't
+    # project-scoped — same as `recommend list/show/run`, which only take
+    # `--root`, never project resolution), so branch BEFORE any project
+    # resolution and never require an enabled project to see them.
+    if recommender:
+        _print_recommender_metrics(resolved_root)
+        return
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
     project_slug = projects.resolve_project(resolved_root, resolved_cwd)
     if project_slug is None:
@@ -122,6 +133,45 @@ def status(
     trend = read_fact_count_trend(resolved_root, project_slug)
     if trend:
         typer.echo(f"Fact-count trend (last {len(trend)} passes): {' → '.join(map(str, trend))}")
+
+
+def _fmt_metric(value: float | None) -> str:
+    """§12.9: ``None`` prints literally as "insufficient data", never a
+    crash/blank/zero — the terse, plain house style ``status``/``recommend``
+    already use (no color/emoji)."""
+    return "insufficient data" if value is None else f"{value:.4f}"
+
+
+def _print_recommender_metrics(resolved_root: Path) -> None:
+    """``status --recommender`` (§12.9/D4): store-wide, read-only. Prints one
+    line per metric; ``survival`` gets a summary line plus a per-slug detail
+    line."""
+    result = metrics.compute_metrics(resolved_root)
+    typer.echo(
+        f"Decided: {result.decided} (accepted {result.accepted}, rejected {result.rejected})"
+    )
+    typer.echo(f"Precision: {_fmt_metric(result.precision)}")
+    typer.echo(f"Edited rate: {_fmt_metric(result.edited_rate)}")
+    typer.echo(f"Reviewed events: {result.reviewed_events}")
+
+    # §12.9: zero ledger-confirmed accepted proposals is "no data to measure
+    # survival from", not a measured zero — printing "0 survived, 0 not
+    # survived, 0 insufficient data" would read as a real survey result rather
+    # than "not applicable" (Codex round-2 finding).
+    if not result.survival:
+        typer.echo("Survival: insufficient data")
+    else:
+        survived = sum(1 for v in result.survival.values() if v == "survived")
+        not_survived = sum(1 for v in result.survival.values() if v == "not_survived")
+        insufficient = sum(1 for v in result.survival.values() if v == "insufficient_data")
+        typer.echo(
+            f"Survival: {survived} survived, {not_survived} not survived, "
+            f"{insufficient} insufficient data"
+        )
+        for slug in sorted(result.survival):
+            typer.echo(f"  {slug}: {result.survival[slug].replace('_', ' ')}")
+
+    typer.echo(f"Recurrence reduction: {_fmt_metric(result.recurrence_reduction)}")
 
 
 @app.command()
@@ -947,8 +997,17 @@ def recommend_accept(
     if backup_dir is not None:
         typer.echo(f"Backed up existing artifact to {backup_dir}")
     emitters.write_atomic(artifact)
+    # §12.9 survival check (ADR-0007 D2): record the artifact's content hash at
+    # accept time so a later `status --recommender` can tell "modified since
+    # acceptance" apart from "never touched" without diffing against anything
+    # else on disk.
+    installed_hash = hashlib.sha256(artifact.after.encode("utf-8")).hexdigest()
     proposals.accept_proposal(
-        resolved_root, slug, target=artifact.target, installed_path=artifact.path
+        resolved_root,
+        slug,
+        target=artifact.target,
+        installed_path=artifact.path,
+        installed_hash=installed_hash,
     )
     typer.echo(f"Accepted proposal {slug}: {artifact.path}")
 

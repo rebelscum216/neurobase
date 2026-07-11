@@ -764,11 +764,12 @@ append-only pass log (`curator/engine.py:_log_pass`).
 | `candidate_type` | str, optional | Carried for the miner's ledger-summary input (§12.5) |
 | `target` | str, optional | Resolved target, present from `accepted` onward |
 | `reason` | str, optional | `reject --reason TEXT` |
+| `installed_hash` | str, optional | `accepted` only (ADR-0011): sha256 of the artifact's exact bytes at accept time, for §12.9's survival check. Absent on an `accepted` line written before this field existed — survival falls back to existence-only for those, never treated as a parse error |
 
 ```jsonl
 {"at":"2026-07-09T12:00:00Z","slug":"prefer-uv-run-over-pip","event":"proposed","candidate_type":"repeated-instruction"}
 {"at":"2026-07-09T12:05:00Z","slug":"prefer-uv-run-over-pip","event":"edited"}
-{"at":"2026-07-09T12:06:00Z","slug":"prefer-uv-run-over-pip","event":"accepted","target":"AGENTS.md"}
+{"at":"2026-07-09T12:06:00Z","slug":"prefer-uv-run-over-pip","event":"accepted","target":"AGENTS.md","installed_hash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 ```
 
 `recommend edit` MUST append exactly one `edited` line per edit and MUST
@@ -1288,6 +1289,10 @@ stated here explicitly and without hedging:
   reports "insufficient data," **never** `false` — only past the window does a
   missing-or-modified artifact flip `survival: false` (workstream H: "missing
   artifact marks survival false only after the configured window").
+  "Modified" is detected via `installed_hash` (§12.2, ADR-0011) — the ledger's
+  `accepted` event carries a sha256 of the artifact's exact bytes at accept
+  time; an `accepted` event predating this field (legacy) falls back to
+  existence-only, since it cannot detect modification, only presence.
 - **Recurrence reduction** (Advisory/best-effort — not named by a workstream
   test, and never a gating MUST; the build plan itself calls this metric
   "opportunistic" v1): after acceptance, the near-duplicate function (§12.4,

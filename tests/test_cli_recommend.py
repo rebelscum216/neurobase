@@ -135,6 +135,34 @@ def test_accept_rejected_proposal_errors_before_any_write(tmp_path: Path) -> Non
     assert not (root / "backups").exists()  # no backup taken
 
 
+def test_accept_records_installed_hash_of_actual_written_bytes(tmp_path: Path) -> None:
+    """§12.9/ADR-0007 D2 (workstream H): `recommend accept`'s ledger `accepted`
+    event carries `installed_hash` computed from the artifact's real,
+    just-written bytes on disk — not a stub or a hash of the draft alone."""
+    import hashlib
+
+    from neurobase.core import projects
+
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    projects.register_project(root, repo, slug="neurobase")
+    proposals.write_ranked(root, [_ranked()])
+
+    result = runner.invoke(
+        app, ["recommend", "accept", "prefer-uv-run", "--root", str(root), "--yes"]
+    )
+
+    assert result.exit_code == 0
+    installed_path = repo / "AGENTS.md"
+    assert installed_path.exists()
+    expected_hash = hashlib.sha256(installed_path.read_bytes()).hexdigest()
+    history = proposals.ledger_history(root, "prefer-uv-run")
+    accepted_events = [event for event in history if event["event"] == "accepted"]
+    assert len(accepted_events) == 1
+    assert accepted_events[-1]["installed_hash"] == expected_hash
+
+
 def test_show_on_parseable_but_malformed_proposal_is_fail_soft(tmp_path: Path) -> None:
     """F2: a proposal whose frontmatter parses but violates the §12.1 schema
     (here ``evidence`` is a bare string) is treated as malformed and skipped —
@@ -224,3 +252,65 @@ def test_reject_records_candidate_type_for_miner_feedback(tmp_path: Path) -> Non
     assert result.exit_code == 0
     summary = corpus.load_ledger_summary(root)
     assert summary.reject_counts == {"repeated-instruction": 1}
+
+
+# --- workstream H: `status --recommender` (§12.9/D4) -------------------------
+
+
+def test_status_recommender_on_empty_store_prints_insufficient_data(tmp_path: Path) -> None:
+    """`status --recommender` on an empty store never crashes and never
+    requires an enabled project — every metric prints "insufficient data"."""
+    root = tmp_path / "store"
+
+    result = runner.invoke(app, ["status", "--recommender", "--root", str(root)])
+
+    assert result.exit_code == 0
+    assert "insufficient data" in result.output
+    assert "Decided: 0" in result.output
+    assert "Precision: insufficient data" in result.output
+    assert "Edited rate: insufficient data" in result.output
+    assert "Reviewed events: 0" in result.output
+    # §12.9: zero accepted proposals is "no data", not a measured 0/0/0
+    # (Codex round-2 finding) — the aggregate line reads "insufficient data".
+    assert "Survival: insufficient data" in result.output
+    assert "Recurrence reduction: insufficient data" in result.output
+
+
+def test_status_recommender_without_project_flag_bypasses_project_resolution(
+    tmp_path: Path,
+) -> None:
+    """Recommender metrics are store-wide (§12.9/D4) — `status --recommender`
+    must succeed even when the launch cwd resolves to no enabled project,
+    unlike plain `status`."""
+    root = tmp_path / "store"
+
+    plain = runner.invoke(app, ["status", "--root", str(root), "--cwd", str(tmp_path)])
+    recommender = runner.invoke(
+        app, ["status", "--recommender", "--root", str(root), "--cwd", str(tmp_path)]
+    )
+
+    assert plain.exit_code == 1
+    assert "Not an enabled project" in plain.output
+    assert recommender.exit_code == 0
+
+
+def test_status_recommender_on_populated_ledger_prints_real_numbers(tmp_path: Path) -> None:
+    """A populated ledger produces real, non-"insufficient data" precision/
+    edited-rate/reviewed-events numbers."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked(slug="prefer-uv-run"), _ranked(slug="other-rule")])
+    proposals.reject_proposal(root, "other-rule")
+    installed_path = tmp_path / "AGENTS.md"
+    installed_path.write_text("installed", encoding="utf-8")
+    proposals.accept_proposal(
+        root, "prefer-uv-run", target="AGENTS.md", installed_path=installed_path
+    )
+
+    result = runner.invoke(app, ["status", "--recommender", "--root", str(root)])
+
+    assert result.exit_code == 0
+    assert "Decided: 2 (accepted 1, rejected 1)" in result.output
+    assert "Precision: 0.5000" in result.output
+    assert "Edited rate: 0.0000" in result.output
+    assert "Reviewed events: 2" in result.output
+    assert "prefer-uv-run: insufficient data" in result.output

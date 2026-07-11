@@ -390,7 +390,7 @@ def _edited_since_last_write(root: Path, slug: str) -> bool:
     ledger line is skipped, a missing ledger means "not edited"."""
     latest_edited: datetime | None = None
     latest_proposed: datetime | None = None
-    for event in _read_ledger(root):
+    for event in read_ledger(root):
         if event.get("slug") != slug:
             continue
         when = _parse_iso(event.get("at"))
@@ -406,9 +406,11 @@ def _edited_since_last_write(root: Path, slug: str) -> bool:
     return latest_proposed is None or latest_edited > latest_proposed
 
 
-def _read_ledger(root: Path) -> list[dict[str, Any]]:
+def read_ledger(root: Path) -> list[dict[str, Any]]:
     """Parse the ledger into event dicts, skipping malformed lines (§12.2). A
-    missing ledger yields ``[]``."""
+    missing ledger yields ``[]``. Public (D1, workstream H): ``metrics.py``
+    reuses this rather than reimplementing ledger-line parsing — the same
+    fail-soft precedent ``curator/engine.py:read_fact_count_trend`` sets."""
     path = ledger_path(root)
     if not path.exists():
         return []
@@ -445,7 +447,7 @@ def _append_ledger(
 
 def ledger_history(root: Path, slug: str) -> list[dict[str, Any]]:
     """Fail-soft ledger history for one proposal, oldest-first (§12.2)."""
-    return [event for event in _read_ledger(root) if event.get("slug") == slug]
+    return [event for event in read_ledger(root) if event.get("slug") == slug]
 
 
 def extract_draft(body: str) -> str | None:
@@ -523,9 +525,16 @@ def accept_proposal(
     *,
     target: str,
     installed_path: Path,
+    installed_hash: str | None = None,
     now: datetime | None = None,
 ) -> None:
-    """Record a successful artifact installation after the write completes."""
+    """Record a successful artifact installation after the write completes.
+    ``installed_hash`` (§12.9/ADR-0007 D2, workstream H): the artifact's content
+    hash at accept time, so a later ``status --recommender`` survival check can
+    tell "modified since acceptance" apart from "never touched" without
+    diffing against anything else on disk. ``None`` for callers that don't
+    compute one — the survival check falls back to existence-only for those
+    (legacy) events."""
     doc = load_proposal(root, slug)
     if doc is None:
         raise ValueError(f"proposal {slug!r} not found or malformed")
@@ -538,7 +547,9 @@ def accept_proposal(
         status="accepted", target=target, installed_path=str(installed_path), updated_at=stamp
     )
     store.write_doc(doc.file_path, frontmatter, doc.body)
-    record = {"at": stamp, "slug": slug, "event": "accepted", "target": target}
+    record: dict[str, Any] = {"at": stamp, "slug": slug, "event": "accepted", "target": target}
+    if installed_hash is not None:
+        record["installed_hash"] = installed_hash
     path = ledger_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:

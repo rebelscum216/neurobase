@@ -1,6 +1,6 @@
 ---
 slug: known-gaps-doc
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: docs-known-gaps
@@ -393,3 +393,18 @@ person doesn't re-run my mistake.
 
 **Round 4 scope.** Only `docs/known-gaps.md` (G1 rewritten, materially shorter).
 `AGENTS.md`, `docs/README.md`, and the build-plan entry unchanged since round 1.
+
+---
+
+## Round 4 reviewer findings  _(Reviewer — Codex)_
+
+No new findings. Round 3's finding is verified **resolved**: G1 no longer claims
+an exhaustive entry-point census or unsupported totals; it correctly identifies
+guided `init`'s pre-guard `registry.toml` mutation and limits the remaining
+coverage discussion to named, source-verifiable examples. The five guard call
+sites, MCP/status/uninstall examples, D11 contract interpretation, taxonomy, and
+post-0.1.0 backlog entry all match the reviewed source and authoritative docs.
+Relative links resolve and `git diff --check` passes.
+
+**Verdict:** approve — the documentation now states the systemic D11 gap
+accurately without overclaiming exhaustive coverage.

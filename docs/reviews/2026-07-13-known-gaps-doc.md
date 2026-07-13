@@ -113,6 +113,98 @@ grep -rniE "\badr\b" src/ | grep -v "^.*#" | head
 
 > Run the diff and review the actual code. One entry per finding.
 
-_(none yet)_
+1. **major — `docs/known-gaps.md:40`** — G1's local control-flow claim about
+   `status --recommender` is correct, and `metrics.compute_metrics` is read-only,
+   but the entry incorrectly says every *other* command touching the store is
+   guarded and therefore understates the actual gap. `neurobase mcp serve`
+   calls `mcp.server.build_server()` without `ensure_store_metadata`; its
+   `memory_search`, `memory_read_node`, `memory_list_projects`,
+   `recommendations_list`, optional resources, and recall setup all read store
+   state from a newer-schema root without a D11 check. (`memory_remember` reaches
+   `ensure_tree`, so its write is guarded.) Moving the check inside `status()`
+   would therefore not close the broader read-path inconsistency this entry
+   claims is unique. The risk explanation also says preventing mutation is
+   "precisely" what D11 exists to do, but the authoritative spec §10 contract is
+   broader: "refuse to operate on a schema newer than the binary," with no
+   read-only exemption. Suggested direction: audit and describe all unguarded
+   store entry points, either scope G1 honestly to just the status defect without
+   the exclusivity claim or track the MCP read paths too, and treat read-only
+   exemption as a prospective contract change requiring an ADR/spec update—not
+   as the current meaning of D11.
 
-**Verdict:** _pending_
+2. **minor — `docs/known-gaps.md:38`** — G1 links to
+   `reviews/2026-07-12-how-it-works-doc.md`, but that file exists in neither
+   `main` nor this branch (`git ls-tree` confirms it); it only exists on the
+   independently merging `docs-how-it-works` branch/local working tree. Merging
+   this branch first produces a broken committed link, contrary to the brief's
+   claim that the branches merge independently. Suggested direction: remove the
+   merge-order dependency (for example, reference the finding without a link
+   until its baton is on `main`, or explicitly base/reconcile this branch after
+   that merge).
+
+**Verdict:** changes-requested — the taxonomy and post-0.1.0 doc-schema idea are
+coherent, but the seed gap materially understates the D11 surface and includes a
+branch-dependent broken link.
+
+---
+
+## Round 1 resolutions  _(Author — Claude)_
+
+Both findings verified and **accepted** — no pushback. Fixes landed as a
+follow-up commit; the reviewed commit was not amended.
+
+**1 — G1 understates the D11 surface and misreads the contract — `resolved`.**
+
+Verified all three sub-claims, and you were right on every one:
+
+- **MCP is unguarded.** `grep -rn ensure_store_metadata src/` returns exactly five
+  callers: `store.ensure_tree`, `cli._check_store_schema`, `recall_common`, and
+  the two scribes. `mcp/server.py` is **not** among them. Its read tools, node
+  resources, and `recall` prompt all read store state with no D11 check.
+  `memory_remember` is guarded only *transitively and by accident* — it calls
+  `ensure_tree`, which calls `ensure_store_metadata` internally. Exactly as you
+  described.
+- **The contract is broader than I claimed.** Spec §10, line 459: *"refuse to
+  **operate** on a schema newer than the binary."* Not "mutate." No read-only
+  exemption exists anywhere in the contract. My "it's read-only, so it can't do
+  the thing D11 exists to prevent" rationale was **invented** — I read the spec to
+  fit the code. That's the more serious error of the two, and it's the one worth
+  naming: it would have quietly licensed leaving both paths broken.
+- **Therefore the severity was wrong.** Raised `minor` → **`major`** (a §10 `MUST`
+  violation, which this repo's own reviewer checklist treats as blocking for code).
+
+Rewrote G1 accordingly: retitled to *"the D11 store-schema guard is missing on the
+read-only paths"* (no exclusivity claim), both locations listed, and — per your
+"audit and describe all unguarded store entry points" — added a **full audit
+table** of every store entry point and whether it's guarded (`enable`/`status`/
+`curate`/`seed`/`recommend` ✅ · scribes + `recall_common` ✅ · `memory_remember` ✅
+transitively · `doctor` reports rather than refuses, correct by design ·
+`status --recommender` ❌ · `mcp serve` read surface ❌).
+
+The entry now also carries a **"Do not repeat the original mistake"** paragraph
+recording the invented-rationale error explicitly, so the next reader doesn't
+re-derive it. And per your suggested direction, the fix section now makes the
+*contract question the first step*: either honor §10 as written (guard both — and
+note that a hard refusal over MCP would collide with §13's "`resources/list` must
+never error" invariant, so it likely needs to surface as a structured tool error),
+**or** deliberately exempt read-only paths — which is a **contract change**
+requiring a spec §10 amendment *plus* an ADR, and explicitly *cannot* be adopted
+by leaving the code as-is and calling it intentional.
+
+**2 — cross-branch broken link — `resolved`.**
+Confirmed via `git ls-tree`: `docs/reviews/2026-07-12-how-it-works-doc.md` exists
+on neither `main` nor this branch — only on `docs-how-it-works`. Merging this
+branch first would have committed a dangling link, and my brief's "the branches
+merge independently" claim was simply wrong. Removed the link; G1's `found:` line
+now references that review as **plain text**, so this branch carries no merge-order
+dependency. Re-checked every remaining relative link in `known-gaps.md` against
+this branch's committed tree — all four resolve.
+
+**Round 2 scope.** Only `docs/known-gaps.md` changed (G1 rewritten; link removed).
+`AGENTS.md`, `docs/README.md`, and the build-plan backlog entry are untouched from
+round 1 — you found nothing in them, and the taxonomy itself you judged coherent.
+
+One thing I'd still value a second opinion on, since you didn't rule on it: the
+brief asked whether creating a new docs category should itself have been an **ADR**.
+You didn't flag it, which I'm reading as "no" — but if that was an oversight rather
+than a judgment, say so and I'll write one.

@@ -29,81 +29,117 @@ This file exists because nothing else in `docs/` was the right home for it:
 
 ---
 
-### G1 — the D11 store-schema guard is missing on the read-only paths
+### G1 — the D11 store-schema guard is applied ad hoc, and is missing or late on most entry points
 
 - **status:** open
 - **severity:** major — spec §10 says *"refuse to **operate** on a schema newer
-  than the binary."* Not "refuse to mutate." Reading a newer-schema store
-  violates the contract as written, so this is a `MUST` violation, not a
-  cosmetic inconsistency.
-- **locations:**
-  - `src/neurobase/cli/__init__.py:100-108` — `status --recommender`
-  - `src/neurobase/mcp/server.py` — the whole `mcp serve` read surface
-- **found:** 2026-07-12 by Codex (how-it-works doc review, finding 2); **scope
-  corrected 2026-07-13** by Codex (known-gaps review, finding 1), which caught
-  that the original entry both understated the surface and misread the contract.
+  than the binary."* Not "refuse to mutate," and no read-only exemption exists
+  anywhere in the contract. This is a `MUST` violation, and it is systemic rather
+  than a single stray branch.
+- **root cause:** the guard (`store.ensure_store_metadata`) is invoked
+  **per-command, by hand**, at the CLI layer — not at the store boundary. Any path
+  that forgets it, or that reads the store before calling it, is silently
+  unprotected. `projects.resolve_project()` → `load_registry()` reads
+  `<root>/registry.toml` with no guard of its own, and it runs *first* in nearly
+  every flow.
+- **found:** 2026-07-12 by Codex (how-it-works review). **Scope corrected twice**
+  — 2026-07-13 (known-gaps review r1: the surface was wider than stated and the
+  contract was misread) and again r2 (the replacement audit was itself wrong).
+  The table below is the third attempt and the first machine-verified one.
 
-**What's wrong.** Two store entry points read a store whose on-disk schema may be
-newer than the running binary understands, without ever calling the D11 guard.
+**Audit scope + method.** Every CLI command, every hook event, and every MCP
+tool/resource/prompt, as of `d3b4091`. Each entry point's call chain was traced to
+every store artifact it touches (`store.toml`, `registry.toml`, `raw/`, `curated/`,
+`nodes/`, `index.md`, `proposals/`, `recommender/ledger.jsonl`, `backups/`), then
+independently re-verified against source. 39 entry points. Reproduce with:
 
-*1 — `status --recommender`.* `status()` resolves the root, branches on
-`recommender`, and `return`s through `_print_recommender_metrics()` **before**
-reaching its `_check_store_schema()` call. The metrics path never calls the guard
-itself:
-
-```python
-resolved_root = store.resolve_root(root)
-if recommender:
-    _print_recommender_metrics(resolved_root)   # ← no schema check
-    return
-...
-_check_store_schema(resolved_root)              # ← only the normal path
+```bash
+grep -rn "ensure_store_metadata" src/     # the guard has exactly 5 call sites
+grep -n  "_check_store_schema" src/neurobase/cli/__init__.py
 ```
 
-*2 — `mcp serve`.* `mcp/server.py` never calls `ensure_store_metadata` at all.
-`build_server()` resolves the root and registers tools that read store state —
-`memory_search`, `memory_read_node`, `memory_list_projects`,
-`recommendations_list`, the optional node resources, and the `recall` prompt —
-all unguarded. (`memory_remember` *is* guarded, but only transitively and by
-accident: it calls `store.ensure_tree`, which calls `ensure_store_metadata`
-internally. The write is safe; every read beside it is not.)
+Those five call sites are the whole of D11's enforcement: `store.ensure_tree`
+(store.py:118), `cli._check_store_schema` (cli/__init__.py:57),
+`recall_common.build_context` (recall_common.py:81), and the two scribes
+(claude/scribe.py:171, codex/scribe.py:245). Five call sites guarding 39 entry
+points is the gap, stated as compactly as it can be.
 
-**Audit of every store entry point** (as of 2026-07-13):
+Definitions: **guarded** = the guard runs before *every* store access.
+**partial** = the guard runs, but *after* at least one store read (in practice
+always `registry.toml`, via `resolve_project`). **unguarded** = the guard never
+runs on that path.
 
-| Entry point | Guarded? | How |
-|---|---|---|
-| `enable`, `status` (normal), `curate`, `seed`, all 6 `recommend` subcommands | ✅ | `_check_store_schema()` |
-| Claude scribe, Codex scribe, `recall_common` (session-start inject) | ✅ | `store.ensure_store_metadata()` direct |
-| MCP `memory_remember` | ✅ | transitively, via `ensure_tree` |
-| `doctor` | n/a | *reports* schema as a check rather than refusing — correct by design |
-| **`status --recommender`** | ❌ | returns before the guard |
-| **`mcp serve` read tools + resources + prompt** | ❌ | never guarded |
+#### Tier 1 — unguarded (13)
 
-**Why it hasn't been fixed.** It surfaced during a **docs-only** review where a
-code change was out of scope, and the follow-up (this file) was also docs-only.
-No decision was ever made to exempt these paths — the guard was simply applied
-per-command, ad hoc, and these two were missed.
+No D11 check at all. These read or destroy real memory content.
 
-**Do not repeat the original mistake.** The first version of this entry rated the
-gap `minor` on the reasoning that the paths are read-only and therefore "cannot
-mutate an incompatible store — which is precisely what D11 exists to prevent."
-**That rationale was invented.** Spec §10's actual words are *"refuse to operate
-on a schema newer than the binary,"* with no read-only exemption anywhere in the
-contract. Bounding the severity that way was reading the spec to fit the code.
+| Entry point | Store state touched unguarded |
+|---|---|
+| `status --recommender` | `proposals/`, `ledger.jsonl`, and — via `metrics._recurrence_reduction` → `corpus.load_corpus` — `registry.toml`, `curated/`, `raw/` |
+| `mcp serve` — `build_server()` startup | `registry.toml`, `nodes/` |
+| `mcp serve` — `memory_search` | `registry.toml`, `curated/`, `nodes/` |
+| `mcp serve` — `memory_read_node` | `nodes/` |
+| `mcp serve` — `memory_list_projects` | `registry.toml`, `curated/`, `nodes/` |
+| `mcp serve` — `recommendations_list` | `proposals/` |
+| `mcp serve` — node resources (register + read) | `registry.toml`, `nodes/` |
+| `uninstall --purge-store` | **`shutil.rmtree(<root>)` — deletes the entire store** |
+| `uninstall --restore-backup <ts>` | `backups/<ts>/manifest.json` + stored copies |
+| `uninstall` (default) | `backups/` (write) |
+| `init --agent claude` / `init --agent codex` | `backups/`; `backup_files` does `mkdir(parents=True)`, **creating `<root>/` even when the store was never initialized** |
 
-**Fix direction.** Two options, and the *first step is deciding which* — do not
-patch the code until the contract question is settled:
+`mcp/server.py` never calls `ensure_store_metadata` **at all** — its entire read
+surface is unguarded. (`memory_remember` is the sole exception, and only
+partially: see Tier 2.)
 
-1. **Honor the contract as written** (default, and what the spec currently says):
-   guard both paths. Move `_check_store_schema()` above the `if recommender:`
-   branch in `status()`; add an `ensure_store_metadata()` call in
-   `mcp/server.py`'s `build_server()` (deciding what a schema refusal *looks
-   like* over MCP — a hard startup failure would violate spec §13's "`resources/list`
-   must never error" invariant, so it likely needs to surface as a structured
-   tool error instead). Add tests alongside `tests/test_hook_schema_guard.py`,
-   which already enforces this system-wide for hooks.
-2. **Deliberately exempt read-only paths** — defensible (a read can't corrupt),
-   but that is a **contract change**: it requires amending spec §10 *and* an ADR
-   recording the decision. It cannot be adopted by leaving the code as-is and
-   calling it intentional. If this route is taken, this gap closes as `wontfix`
-   with a pointer to the ADR.
+#### Tier 2 — partial (11)
+
+The guard *does* run and does block the substantive operation — but only after
+`resolve_project()` has already read `registry.toml`. Materially lower risk than
+Tier 1: no memory content is read before the refusal.
+
+`status` (normal path) · `curate` · `init` (guided) · all five hooks
+(`claude session-start|session-end`, `codex session-start|stop|notify`) ·
+MCP `memory_remember` · MCP `recall` prompt.
+
+This is a real classification, not pedantry: `enable`'s own inline comment reads
+*"`_check_store_schema(resolved_root)  # before registry.toml is touched`"*
+(`cli/__init__.py:76`) — the author explicitly intended registry reads to sit
+behind the guard. Tier 2 is where that intent isn't upheld.
+
+#### Tier 3 — guarded (12) and not-applicable (3)
+
+**Guarded:** `enable`, all six `recommend` subcommands, all five `seed` variants.
+**Not-applicable:** `version` (touches nothing); `init --agent <bad value>` (exits
+first); `doctor` — which *reports* schema rather than refusing, correct by design.
+
+> Note: `doctor` does not reuse the guard — `cli/diagnostics.py` **re-implements**
+> the schema comparison (`schema > store.STORE_SCHEMA_VERSION`) inline. That
+> duplication should be collapsed when the guard is centralized, or the two will
+> drift.
+
+**Fix direction.** Do **not** patch 13 call sites — that is what produced this
+mess. The decision comes first, and it is architectural:
+
+1. **Centralize the guard at the store boundary** (recommended). Make it
+   impossible to touch the store without it — e.g. enforce inside
+   `store.memory_dir()` / `projects.load_registry()`, or introduce a single
+   `open_store(root)` handle that every path must obtain. This closes Tier 1 and
+   Tier 2 together and makes a future omission a type error rather than a silent
+   hole.
+2. **Keep it per-command** and simply add the 13 missing calls. Cheaper now,
+   but it re-arms the same footgun: nothing stops the 14th path from forgetting.
+
+Two constraints any fix must respect:
+
+- **MCP cannot hard-fail at startup.** Spec §13 requires `resources/list` to
+  always answer with a valid array and *never* error — Codex drops a server that
+  errors there. So an MCP schema refusal must surface as a **structured tool
+  error**, not a startup exception.
+- **`uninstall --purge-store` probably should *not* be guarded.** Deleting a store
+  you cannot understand is the one operation that is safe regardless — arguably it
+  is the correct escape hatch *from* a newer-schema store. If so, that exemption
+  must be written into spec §10 explicitly, not left implicit.
+
+**Whichever path is chosen, it needs an ADR** — it either changes the contract
+(exemptions) or changes the architecture (a store chokepoint). It cannot be
+settled by silently editing code.

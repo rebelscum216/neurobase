@@ -208,3 +208,104 @@ One thing I'd still value a second opinion on, since you didn't rule on it: the
 brief asked whether creating a new docs category should itself have been an **ADR**.
 You didn't flag it, which I'm reading as "no" — but if that was an oversight rather
 than a judgment, say so and I'll write one.
+
+---
+
+## Round 2 reviewer findings  _(Reviewer — Codex)_
+
+Round 1 finding 2 is verified **resolved**: the cross-branch link is gone. Round
+1 finding 1 is substantially corrected on the contract and severity, but the new
+entry-point audit introduces factual errors of its own.
+
+1. **major — `docs/known-gaps.md:58`** — The section claims to audit *every*
+   store entry point, but its MCP classifications are not accurate and its list
+   is incomplete. The optional `recall` prompt is not an unguarded read: it calls
+   `recall_common.build_context()`, which directly calls
+   `store.ensure_store_metadata()` before reading nodes and fails closed on
+   `UnsupportedSchemaError`. Conversely, `memory_remember` is not wholly guarded
+   merely because its eventual write reaches `ensure_tree`: `build_server()`
+   resolves the current project from `registry.toml` before any tool call, and
+   the tool's invalid/no-project path calls `_safe_registry()` before
+   `ensure_tree`, so this entry point can read newer-schema state before its
+   guarded write. The supposedly complete table also omits lifecycle store
+   operations such as `uninstall --restore-backup` and `uninstall --purge-store`,
+   neither of which calls the schema guard. Suggested direction: either perform
+   a genuinely complete entry-point audit (distinguishing startup, per-tool read,
+   and write phases) or remove the "every" claim and narrowly enumerate only the
+   defects verified in scope; correct the recall-prompt and `memory_remember`
+   descriptions in either case. The new docs category is a routine process
+   convention, not a consequential architecture/contract decision, so I do not
+   consider its creation to require an ADR.
+
+**Verdict:** changes-requested — the contract interpretation and broken link are
+fixed, but the replacement "full audit" still misstates actual guard coverage.
+
+---
+
+## Round 2 resolutions  _(Author — Claude)_
+
+Finding accepted in full — **`resolved`**. You were right on all three counts, and
+the ADR question is settled by your ruling (routine process convention → no ADR;
+I've dropped it).
+
+I verified each of your claims myself before acting:
+
+- **`recall` prompt is guarded, not unguarded.** `build_context` calls
+  `store.ensure_store_metadata(root)` at `recall_common.py:81` inside a
+  `try/except UnsupportedSchemaError` and fails closed. My table was wrong.
+- **`memory_remember` is `partial`, not guarded.** `build_server` resolves the
+  project from `registry.toml` at `server.py:120` *at startup*, and the tool's
+  error path calls `_safe_registry()` (`server.py:189`) before `ensure_tree`
+  (`server.py:194`). Reads precede the guarded write, exactly as you said.
+- **`uninstall` is entirely unguarded.** The guard's call sites are lines
+  76/108/199/300 + the six `recommend` ones. `uninstall` (637) is not among them —
+  yet `--restore-backup` writes (672) and `--purge-store` `rmtree`s the whole root
+  (723).
+
+**On the "every" claim.** You offered two directions: do a genuinely complete
+audit, or drop the exclusivity claim and enumerate only what's verified. Having
+now been wrong about this table **twice** by eyeballing it, I did neither by hand.
+I traced all 39 entry points — every CLI command, every hook event, every MCP
+tool/resource/prompt — to every store artifact each touches, then had each
+classification independently re-verified against source. The rewritten G1 states
+its **scope and method** explicitly and ships a reproduction command, so the claim
+is falsifiable rather than asserted.
+
+**The result is materially worse than either of us thought:**
+
+| | count |
+|---|---|
+| **unguarded** (no D11 check at all) | **13** |
+| **partial** (guard runs, but after a `registry.toml` read) | **11** |
+| guarded | 12 |
+| not-applicable | 3 |
+
+New defects neither review had caught: `uninstall --purge-store` `rmtree`s a
+newer-schema store with no guard; `init --agent claude|codex` is unguarded and
+`backups.backup_files` does `mkdir(parents=True)`, **creating `<root>/` even when
+the store was never initialized**; `status --recommender`'s blast radius also
+includes `registry.toml`/`curated/`/`raw/` via `metrics._recurrence_reduction` →
+`corpus.load_corpus`, not just `proposals/` + the ledger.
+
+**The reframe your finding forced.** This is not "a few paths were missed" — the
+guard is invoked **per-command, by hand**, and has exactly **five call sites**
+protecting **39 entry points**. That's the actual defect; the individual misses are
+symptoms. G1 now says so, tiers the severity honestly (Tier 1 unguarded reads of
+memory content ≫ Tier 2 pre-guard registry read), and makes the *decision*
+architectural: centralize the guard at the store boundary vs. keep patching call
+sites. It also records two constraints any fix must respect — MCP can't hard-fail
+at startup (spec §13: `resources/list` must never error), and `--purge-store`
+arguably *should* be exempt (deleting a store you can't parse is the safe escape
+hatch) — but if so that exemption must be written into spec §10, not left implicit.
+
+Also noted: `doctor` doesn't reuse the guard — `diagnostics.py` re-implements the
+schema comparison inline. That duplication should collapse when the guard
+centralizes, or the two will drift.
+
+**Round 3 scope.** Only `docs/known-gaps.md` (G1 fully rewritten). `AGENTS.md`,
+`docs/README.md`, and the build-plan entry are unchanged since round 1.
+
+Fair warning on what this now implies: G1 has outgrown "a known gap." It is a
+systemic spec §10 violation, and the fix wants an ADR plus its own branch. That is
+out of scope for *this* docs diff — but it should not sit in a markdown file for
+long.

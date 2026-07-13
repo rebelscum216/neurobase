@@ -1,0 +1,52 @@
+name: Bug report
+description: Something in Neurobase doesn't behave the way the spec/docs say it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, check [docs/known-gaps.md](../../docs/known-gaps.md) —
+        this may already be a tracked, understood defect.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands, in order. Include relevant `neurobase status`/`neurobase doctor` output if the bug involves the store, hooks, or agent config.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Neurobase version
+      description: Output of `neurobase --version` (or the commit SHA if running from source).
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent(s) involved
+      multiple: true
+      options:
+        - Claude Code
+        - Codex CLI
+        - MCP client (other)
+        - Not agent-specific
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: e.g. macOS 15, Ubuntu 24.04, Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Redact anything sensitive first — do not paste real memory-store contents or transcripts. A minimal repro is much more useful than a full log dump.

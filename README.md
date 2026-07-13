@@ -14,17 +14,17 @@ patterns and proposes promoting them into standard **SKILL.md** and
 It all runs on your machine, on the agent subscriptions you already pay for, with
 **zero cloud dependency and zero telemetry — permanently.**
 
-> **Status: pre-alpha — installable from source, not yet published to PyPI.**
-> The full loop is implemented for Claude Code and Codex CLI: deterministic
-> capture, an LLM curator that folds and deletes, cross-agent recall,
-> consent-first hook installers, an MCP server, and the v1 recommender
-> (mine → rank → propose → accept/reject/edit → metrics).
->
-> Still ahead of `0.1.0`: PyPI publication and a trusted-publishing release
-> workflow, `SECURITY.md` (redaction policy + trust boundary), an adapter guide,
-> `CONTRIBUTING` + issue templates, a `CHANGELOG`, and a clean-machine install
-> verification. Treat the current install path as "works on the maintainer's
-> machine," not "battle-tested."
+> **Status: release-ready, pending PyPI publication.** The full loop is
+> implemented for Claude Code and Codex CLI: deterministic capture, an LLM
+> curator that folds and deletes, cross-agent recall, consent-first hook
+> installers, an MCP server, and the v1 recommender (mine → rank → propose →
+> accept/reject/edit → metrics) — see [CHANGELOG.md](CHANGELOG.md) for the full
+> `0.1.0` scope. Docs ([SECURITY.md](SECURITY.md),
+> [docs/adapter-guide.md](docs/adapter-guide.md),
+> [CONTRIBUTING.md](CONTRIBUTING.md)) and the trusted-publishing release
+> workflow are in place; the `v0.1.0` tag and PyPI publish are the last step.
+> Until that lands, install from source below. Treat the current install path
+> as "works on the maintainer's machine," not yet "battle-tested by strangers."
 
 ## How it works
 
@@ -52,7 +52,36 @@ hooks capture (auto)  →  curator folds raw into a small durable fact set
 
 Want the full mechanics? **[docs/how-it-works.md](docs/how-it-works.md)** is a
 module-by-module tour of the entire codebase — the architecture, the three
-data-flow loops, and every source file.
+data-flow loops, and every source file. For the layer rules new code should
+follow, see **[docs/architecture.md](docs/architecture.md)**.
+
+## How it compares
+
+Local-first, cross-agent MCP memory isn't a green field — it's honest to say
+so. [basic-memory](https://github.com/basicmachines-co/basic-memory) is the
+closest thing to Neurobase's memory-and-wiki layer already shipped, with a
+proven paid tier; [Memorix](https://github.com/AVIDS2/memorix) already spans
+more agents and writes CLAUDE.md/AGENTS.md guidance at install time; [mem0
+OpenMemory](https://github.com/mem0ai/mem0) is the funded incumbent. None of
+them do what Neurobase's recommender does.
+
+| | **Neurobase** | basic-memory | Memorix | mem0 OpenMemory |
+|---|---|---|---|---|
+| License | Apache-2.0 | AGPL-3.0 | Apache-2.0 | Apache-2.0 |
+| Storage | Markdown, wikilinked | Markdown, wikilinked (Obsidian) | SQLite + Orama search | Postgres + Qdrant (Docker) |
+| Cross-agent | Claude Code + Codex CLI (hooks + MCP) | Any MCP client | Many agents (MCP + plugins) | Any MCP client |
+| Fact set | Curator **folds & deletes** — small, current, non-redundant | Append-only observations | Append-only + generated briefs | Append-only (vector recall) |
+| Skill/rule recommender | **Mines the corpus, proposes SKILL.md/AGENTS.md, tracks accept/edit/reject + survival** | — | Writes static CLAUDE.md/AGENTS.md guidance at install, no learned loop | — |
+| Cost | Free | Free + $15/mo hosted sync | Free | Free self-hosted (mem0 also sells a cloud product) |
+
+What basic-memory and Memorix do well, they do well — a mature markdown+
+Obsidian graph and broad agent coverage aren't nothing, and if you just want
+raw cross-agent recall, either is a reasonable choice. Neurobase's bet is
+narrower and specific: a curator whose job is to keep the fact set *small*
+instead of growing it forever, and a recommender that turns recurring
+patterns into portable skill/rule files with a real, measured feedback loop
+(did you keep it, edit it, or reject it) — not a one-time guidance file
+written at install time.
 
 ## Quickstart
 
@@ -137,15 +166,25 @@ will also work; `uv` recommended, not required.)
 
 - **[docs/how-it-works.md](docs/how-it-works.md)** — how the code is built: a
   guided, module-by-module tour of every subsystem.
+- **[docs/architecture.md](docs/architecture.md)** — the layer contract: what
+  each package owns and what it's allowed to depend on.
+- **[docs/adapter-guide.md](docs/adapter-guide.md)** — what it takes to add a
+  third agent (Gemini CLI, Cursor, ...) beyond Claude Code and Codex CLI.
+- **[SECURITY.md](SECURITY.md)** — the trust boundary, the redaction policy,
+  and how to report a vulnerability.
 - **[AGENTS.md](AGENTS.md)** — start here if you're building on the repo (human or
   agent): build principles, dev workflow, and the review relay.
 - **[docs/](docs/README.md)** — the full index: the phased build plan, the
   authoritative behavioral spec, the architecture rationale, ADRs, and notes.
+- **[CHANGELOG.md](CHANGELOG.md)** — what shipped in each release.
 
 ## Contributing
 
-Start with **[AGENTS.md](AGENTS.md)** (the contributor guide). Before every push,
-run the full local gate — not just the tests:
+See **[CONTRIBUTING.md](CONTRIBUTING.md)**, which points to
+**[AGENTS.md](AGENTS.md)** (the real operating guide) and the
+[code-review relay](docs/code-review-relay.md) this project uses for
+non-trivial changes. Before every push, run the full local gate — not just
+the tests:
 
 ```bash
 make ci                       # ruff check + ruff format --check + mypy + pytest

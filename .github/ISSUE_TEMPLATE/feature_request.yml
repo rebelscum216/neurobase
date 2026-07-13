@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose new functionality or an enhancement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, check the build-plan's
+        [backlog](../../docs/neurobase-build-plan.md#backlog-post-010-in-rough-order) —
+        your idea may already be recorded there, possibly with open design
+        questions worth reading first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: The gap or friction you're hitting, not just the feature itself.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: If you have one. Note any tension with the project's stated principles (local-first, zero telemetry, consent-first config changes, deletion-oriented curation) if relevant.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

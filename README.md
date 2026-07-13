@@ -2,21 +2,24 @@
 
 **A local-first memory layer that follows you across your coding agents.**
 
-Your coding agents forget everything between sessions. Neurobase doesn't just
-remember — it captures your Claude Code and Codex CLI sessions automatically,
-curates them into a small, current fact set, builds a browsable markdown wiki, and
-injects that memory back into future sessions. On top of that loop sits the piece
-nobody ships: a **recommender** that mines your cross-agent history for recurring
+Your coding agents forget everything between sessions, and what one learns is
+invisible to the next. Neurobase fixes both. It captures your Claude Code and
+Codex CLI sessions automatically, curates them into a small, current fact set,
+builds a browsable markdown wiki, and injects that memory back into future
+sessions — for **either** agent. On top of that loop sits the piece nobody else
+ships: a **recommender** that mines your cross-agent history for recurring
 patterns and proposes promoting them into standard **SKILL.md** and
 **AGENTS.md/CLAUDE.md** files — human-in-the-loop, never auto-installed.
 
 It all runs on your machine, on the agent subscriptions you already pay for, with
 **zero cloud dependency and zero telemetry — permanently.**
 
-> **Status: pre-alpha (Phase 6 — lifecycle hardening).** Installable from source
-> today; not yet published to PyPI. The core capture → curate → recall loop is
-> implemented for Claude Code and Codex CLI, with consent-first hook installers,
-> `doctor`, and surgical `uninstall`. MCP and the recommender are still planned.
+> **Status: pre-alpha.** The full loop works today for Claude Code and Codex CLI:
+> deterministic capture, an LLM curator that folds and deletes, cross-agent
+> recall, consent-first hook installers, an MCP server, and the v1 recommender
+> (mine → rank → propose → accept/reject/edit → metrics). Installable from source;
+> **not yet published to PyPI** — that, plus the release docs, is the only
+> remaining milestone before `0.1.0`.
 
 ## How it works
 
@@ -27,29 +30,31 @@ hooks capture (auto)  →  curator folds raw into a small durable fact set
          proposals  →  you approve  →  emitted as SKILL.md / AGENTS.md
 ```
 
-- **Deterministic capture.** Hooks record sessions with no LLM in the loop; secrets
-  are redacted before anything is written.
+- **Deterministic capture.** Hooks record sessions with no LLM in the loop, and
+  always exit cleanly so they can never wedge a session. Secrets are redacted
+  before anything is written.
 - **A curator that deletes.** An LLM folds raw captures into a *small,
   non-redundant, current* fact set — optimizing for supersession, not accumulation.
 - **Markdown truth.** Wikilinked, Obsidian-readable, git-friendly. No vector or
   graph database in the core.
 - **Cross-agent.** A Codex session's learnings show up in your next Claude Code
-  session, and vice versa.
+  session, and vice versa — both agents' captures fold into one fact set.
+- **On-demand recall.** An MCP server exposes search/read/remember tools to any
+  MCP client, alongside the automatic injection.
 - **The recommender.** The novel contribution: cross-session, cross-agent pattern
-  mining that proposes portable, standard-format skills and rules.
+  mining that proposes portable, standard-format skills and rules, and learns
+  from what you accept.
 
-## Documentation
-
-- **[AGENTS.md](AGENTS.md)** — start here if you're building on the repo (human or agent).
-- **[docs/](docs/README.md)** — the full index: the phased build plan, the
-  authoritative behavioral spec, the architecture rationale, ADRs, and working notes.
+Want the full mechanics? **[docs/how-it-works.md](docs/how-it-works.md)** is a
+module-by-module tour of the entire codebase — the architecture, the three
+data-flow loops, and every source file.
 
 ## Quickstart
 
 Neurobase is not published to PyPI yet. From a local checkout:
 
 ```bash
-uv tool install .     # command: `neurobase`
+uv tool install .     # installs the `neurobase` command
 ```
 
 Then run the guided setup in the repo you want Neurobase to remember:
@@ -59,20 +64,50 @@ neurobase init
 neurobase doctor
 ```
 
-`init` chooses a visible store root, enables the current repo, detects Claude
-Code/Codex CLI on your `PATH`, shows the exact config diffs, asks before writing,
-backs up existing agent config files, and prints the next-session notice. Codex
-will also ask you to approve the edited hook on next launch; until that trust
-prompt is accepted, Codex will not run the hook. `doctor` reports the installed
-shim, store, project, brain backend, agent binaries, hook wiring, and Codex trust
-state with named remedies.
+`init` chooses a visible store root (default `~/neurobase`), enables the current
+repo, detects Claude Code / Codex CLI on your `PATH`, shows the exact config
+diffs, asks before writing, backs up any existing agent config, registers the MCP
+server, and prints the next-session notice. Codex will also ask you to approve the
+edited hook on its next launch; until that trust prompt is accepted, Codex won't
+run the hook. `doctor` reports the installed shim, store, project, brain backend,
+agent binaries, hook wiring, MCP registration, and Codex trust state — each with a
+named remedy.
 
-If you prefer the explicit path, use the per-agent installers:
+Prefer the explicit path? Use the per-agent installers:
 
 ```bash
-neurobase enable
+neurobase enable                  # register the current repo as a project
 neurobase init --agent claude
 neurobase init --agent codex
+```
+
+## Everyday use
+
+Once installed, capture and recall happen automatically. These commands are the
+manual surface:
+
+```bash
+neurobase status                  # projects, raw (consumed/unconsumed), facts, nodes
+neurobase curate                  # fold unconsumed captures now (also runs opportunistically)
+neurobase seed --from-dir ./notes # import existing markdown notes as curated facts
+```
+
+Review what the recommender proposes from your history:
+
+```bash
+neurobase recommend run           # mine + rank the corpus into proposals
+neurobase recommend list          # proposals with status/type/target/score
+neurobase recommend show <slug>   # the full proposal + evidence + history
+neurobase recommend edit <slug>   # revise the draft (records an edit, installs nothing)
+neurobase recommend accept <slug> # render a SKILL.md / rule block — with a diff + backup
+neurobase recommend reject <slug> --reason "..."
+neurobase status --recommender    # precision, edited-rate, 30-day survival, reduction
+```
+
+Expose memory to any MCP client on demand:
+
+```bash
+neurobase mcp serve               # stdio MCP server: search / read / list / remember
 ```
 
 To remove Neurobase-owned hooks without touching your memory store:
@@ -92,6 +127,15 @@ uv tool install neurobase-cli     # command: `neurobase`
 
 (`neurobase-cli` because `neurobase` is taken on PyPI — decision D2. `pip install`
 will also work; `uv` recommended, not required.)
+
+## Documentation
+
+- **[docs/how-it-works.md](docs/how-it-works.md)** — how the code is built: a
+  guided, module-by-module tour of every subsystem.
+- **[AGENTS.md](AGENTS.md)** — start here if you're building on the repo (human or
+  agent): build principles, dev workflow, and the review relay.
+- **[docs/](docs/README.md)** — the full index: the phased build plan, the
+  authoritative behavioral spec, the architecture rationale, ADRs, and notes.
 
 ## Contributing
 

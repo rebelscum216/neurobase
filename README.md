@@ -61,27 +61,29 @@ Local-first, cross-agent MCP memory isn't a green field — it's honest to say
 so. [basic-memory](https://github.com/basicmachines-co/basic-memory) is the
 closest thing to Neurobase's memory-and-wiki layer already shipped, with a
 proven paid tier; [Memorix](https://github.com/AVIDS2/memorix) already spans
-more agents and writes CLAUDE.md/AGENTS.md guidance at install time; [mem0
-OpenMemory](https://github.com/mem0ai/mem0) is the funded incumbent. None of
-them do what Neurobase's recommender does.
+more agents and has its own skill-promotion command; [mem0
+OpenMemory](https://github.com/mem0ai/mem0) is the funded incumbent. Facts
+below checked directly against each project's README as of 2026-07; pricing
+in particular moves — verify current numbers before quoting them elsewhere.
 
 | | **Neurobase** | basic-memory | Memorix | mem0 OpenMemory |
 |---|---|---|---|---|
 | License | Apache-2.0 | AGPL-3.0 | Apache-2.0 | Apache-2.0 |
 | Storage | Markdown, wikilinked | Markdown, wikilinked (Obsidian) | SQLite + Orama search | Postgres + Qdrant (Docker) |
 | Cross-agent | Claude Code + Codex CLI (hooks + MCP) | Any MCP client | Many agents (MCP + plugins) | Any MCP client |
-| Fact set | Curator **folds & deletes** — small, current, non-redundant | Append-only observations | Append-only + generated briefs | Append-only (vector recall) |
-| Skill/rule recommender | **Mines the corpus, proposes SKILL.md/AGENTS.md, tracks accept/edit/reject + survival** | — | Writes static CLAUDE.md/AGENTS.md guidance at install, no learned loop | — |
-| Cost | Free | Free + $15/mo hosted sync | Free | Free self-hosted (mem0 also sells a cloud product) |
+| Fact set | Curator **folds & deletes** — small, current, non-redundant | Editable notes (`write_note`/`edit_note`/`delete_note`), no automatic curation | Notes + generated briefs; no documented automatic pruning | Vector-recalled memories, no documented automatic pruning |
+| Skill/rule promotion | **Mines the corpus for recurring patterns, proposes SKILL.md/AGENTS.md, and tracks accept/edit/reject + 30-day survival per proposal** | — | Has a `memorix promote` command into skill files; README doesn't document automatic pattern-mining or post-promotion tracking | — |
+| Cost | Free | Free, self-hosted + a paid hosted-sync tier (check current pricing — it's changed more than once) | Free | Free self-hosted (mem0 also sells a cloud product) |
 
 What basic-memory and Memorix do well, they do well — a mature markdown+
 Obsidian graph and broad agent coverage aren't nothing, and if you just want
-raw cross-agent recall, either is a reasonable choice. Neurobase's bet is
-narrower and specific: a curator whose job is to keep the fact set *small*
-instead of growing it forever, and a recommender that turns recurring
-patterns into portable skill/rule files with a real, measured feedback loop
-(did you keep it, edit it, or reject it) — not a one-time guidance file
-written at install time.
+cross-agent recall, either is a reasonable choice. Memorix in particular
+already has a skill-promotion command, so the honest distinction isn't
+"nobody else promotes skills" — it's that Neurobase's promotion is driven by
+mining the corpus for recurring cross-session patterns rather than a manual
+command, and measures what happened after acceptance (kept, edited, or
+reverted) to feed back into ranking. That measured loop, on top of a curator
+that actively deletes instead of just accumulating, is the actual bet.
 
 ## Quickstart
 

@@ -4,21 +4,29 @@
 
 Neurobase is **local-first with zero cloud dependency and zero telemetry,
 permanently.** Everything it writes lives under your store root (default
-`~/neurobase`) or your agent's own config files, on disk, in plain markdown or
-TOML. There is no Neurobase-run server, no analytics call, and no phone-home
-of any kind — this isn't a policy promise layered on top of the code, it's
-the absence of any network client in the codebase outside the pieces below.
+`~/neurobase`) or your agent's own config files, on disk, in local,
+inspectable files: markdown for facts/nodes, TOML for config/registry, and
+JSON/JSONL for backup manifests, the recommender ledger, and agent hook
+configs. There is no Neurobase-run server, no analytics call, and no
+phone-home of any kind — this isn't a policy promise layered on top of the
+code, it's the absence of any network client in the codebase outside the
+pieces below.
 
 The only network calls Neurobase's own code can make are the ones you already
 made possible yourself:
 
 - The **brain backend** (`claude-cli`, `codex-cli`, or `anthropic-api`) runs
   as *your* logged-in CLI or *your* API key — auto-detected in that order,
-  overridable in config. Neurobase never reads, stores, or transmits your
-  credentials; it shells out to a CLI you're already authenticated with, or
-  hands your own key to the official SDK. See spec §10's key-sourcing order
-  (`NEUROBASE_API_KEY` → provider env var → OS keychain → none, fail-open to
-  the next backend).
+  overridable in config. For the API backend, Neurobase's own code *does*
+  read your key in memory to authenticate the request (spec §10's
+  key-sourcing order: `NEUROBASE_API_KEY` → provider env var → OS keychain →
+  none, fail-open to the next backend) — `resolve_api_key()` in
+  `brain/anthropic_api.py` is the one place this happens. It is never
+  written to the store, logged, or sent anywhere except directly to the
+  official Anthropic SDK call it authenticates. The CLI backends
+  (`claude-cli`/`codex-cli`) don't even go this far — Neurobase shells out to
+  a CLI you're already authenticated with and never touches its credentials
+  at all.
 - The **MCP server** (`neurobase mcp serve`) speaks **stdio only** — it is
   not a network listener. It's exposed to whatever MCP client (Claude Code,
   Codex CLI, or another tool) launches it as a subprocess, on your machine.

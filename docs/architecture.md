@@ -65,7 +65,7 @@ the full walkthrough of each):
 | Loop | Path through the layers |
 |---|---|
 | **Capture → curate → recall** | `adapters/*` (scribe) → `core/store` (raw write) → `curator/` (fold, calling `brain/`) → `core/store` (curated/nodes write) → `adapters/*` (recall, via `adapters/recall_common`) |
-| **On-demand recall** | `mcp/server` → `core/search`, `core/store` — a read-only edge that never touches `curator/` or `recommender/` |
+| **On-demand recall** | `mcp/server` → `core/search`, `core/store` — reads never touch `curator/` or `recommender/`; the one exception is `memory_remember`, an explicit user-directed write straight to `core/store`'s curated/ (spec §13), still bypassing `curator/` and `recommender/` entirely |
 | **Recommend** | `recommender/` (mine via `brain/`, rank, propose) → `core/store` (proposal write) → `cli/` (accept/reject/edit, via the same consent/diff/backup path `adapters/*` installers use) |
 
 Note that `mcp/`'s `recommendations_list` tool is a **read** over

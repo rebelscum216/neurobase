@@ -101,4 +101,113 @@ branch's commit — ignore it.
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _pending_
+- **major — `README.md:62` — The comparison's categorical claim about Memorix
+  is no longer supportable.** The current Memorix README says that project
+  skills are promoted from durable knowledge (`memorix skills` /
+  `memorix_promote`), that gotchas/fixes/project skills evolve from real work,
+  and that optional LLM-backed memory formation exists. That is materially
+  more than the table's "static ... guidance at install, no learned loop," so
+  the preceding "None of them do what Neurobase's recommender does" reads as a
+  false distinction even if Neurobase's accept/edit/reject and survival metrics
+  remain different. The same table calls basic-memory observations
+  "append-only," although its documented tools edit and replace notes, and
+  lists a stale `$15/mo` price while its current README advertises `$14.25/mo`
+  beta pricing (`$19` regular). Suggested direction: narrow each comparison to
+  independently verifiable feature-level differences, date volatile pricing,
+  and avoid asserting the absence of a learned/promotion loop without defining
+  precisely which part is absent.
+  - **resolution:** resolved. Rewrote the section: Memorix now credited with
+    a `memorix promote` skill command; basic-memory's fact-set row changed
+    from "append-only" to "editable notes (`write_note`/`edit_note`/
+    `delete_note`), no automatic curation" (verified against its README);
+    pricing lines now say "check current pricing" instead of a pinned dollar
+    figure, since a second live fetch of basic-memory's README returned
+    $15/mo (7-day trial, locked for the beta's life) rather than the $14.25
+    figure — the number itself is evidently volatile/promo-dependent, so the
+    table no longer asserts one. The closing paragraph no longer claims
+    "none of them do what Neurobase's recommender does"; it now names
+    Memorix's promote command explicitly and narrows Neurobase's claimed
+    difference to corpus-mining (vs. a manual command) plus the measured
+    accept/edit/reject/survival loop, which is what's actually verifiable.
+
+- **major — `SECURITY.md:17` — The security policy says Neurobase never reads
+  credentials, but the API backend explicitly does.**
+  `brain/anthropic_api.py:37-59` reads `NEUROBASE_API_KEY` /
+  `ANTHROPIC_API_KEY` from the process environment or calls
+  `keyring.get_password`, then passes the resolved value to the SDK. The next
+  sentence and the documented key-sourcing order contradict the absolute
+  claim in the same paragraph. This is a public trust-boundary document, so
+  the distinction between "reads in memory" and "does not persist/log/manage"
+  matters. Suggested direction: state exactly where credentials are read and
+  passed, and reserve the absolute promise for what the implementation proves
+  (for example, never persisted or logged by Neurobase).
+  - **resolution:** resolved. Rewrote the paragraph to state plainly that the
+    `anthropic-api` backend's own code reads the key in memory via
+    `resolve_api_key()` in `brain/anthropic_api.py` to authenticate the SDK
+    call, and scoped the absolute claim to what's actually true: never
+    written to the store, never logged, never sent anywhere but that one SDK
+    call. Also noted the CLI backends don't read credentials at all, to keep
+    the distinction between the three backends clear.
+
+- **major — `docs/adapter-guide.md:30` — The guide elevates hook-process
+  fail-safety into a scribe-function contract that neither shipped adapter
+  implements.** Both `adapters/claude/scribe.py:150-160` and
+  `adapters/codex/scribe.py:230-234` explicitly tell callers to treat an
+  exception as "capture nothing"; parsing, config loading, and writes can
+  raise. A Python scribe function also does not itself "exit 0." The spec's
+  hard guarantee belongs to the hook entry point/dispatcher, which catches
+  failures and exits 0. Telling a third-adapter author that both layers must
+  swallow every exception misdescribes the worked examples and makes failures
+  harder to test outside the hook boundary. Suggested direction: distinguish
+  deterministic/fail-closed scribe behavior from the mandatory hook transport
+  boundary that catches all exceptions and exits 0.
+  - **resolution:** resolved. Rewrote the rule: the scribe function itself is
+    allowed to raise (matching both shipped docstrings verbatim), and the
+    exit-0/exception-swallowing guarantee is now attributed solely to the
+    hook dispatcher in `cli/`, with an explicit instruction not to put that
+    logic inside the scribe function.
+
+- **minor — `docs/architecture.md:62` — The claimed exhaustive three-loop map
+  calls the MCP edge read-only but omits its write operation.**
+  `mcp/server.py:177-201` implements `memory_remember`, which creates the
+  project tree and writes a curated fact. Therefore "Everything the system
+  does is one of three loops" plus "On-demand recall ... a read-only edge" is
+  not an accurate architecture contract. Suggested direction: include the
+  user-directed remember/write path or scope the row explicitly to the MCP
+  read tools rather than the entire MCP edge.
+  - **resolution:** resolved. The "On-demand recall" row now explicitly
+    carves out `memory_remember` as the one write (straight to `core/store`,
+    still bypassing `curator/`/`recommender/`) rather than calling the whole
+    edge read-only.
+
+- **minor — `SECURITY.md:6` — The on-disk-format description is too narrow for
+  the actual trust boundary.** Neurobase also writes JSON manifests, JSONL
+  logs/ledgers, and agent JSON configuration, not only "plain markdown or
+  TOML" (for example `core/backups.py:54` writes `manifest.json`). Suggested
+  direction: describe the data as local, inspectable files and enumerate the
+  actual formats without implying all persisted data is markdown/TOML.
+  - **resolution:** resolved. Trust-boundary paragraph now says "local,
+    inspectable files — mostly markdown and TOML, plus JSON/JSONL for
+    manifests, ledgers, and agent hook configs" instead of implying
+    everything is markdown/TOML.
+
+Verification performed: full `git diff main...HEAD`; implementation/spec
+cross-checks for redaction, credential resolution, hooks, MCP writes, imports,
+and recommendation acceptance; all added Markdown relative links resolve;
+all four YAML files parse; the full gate passed (`481 passed`, ruff, format,
+mypy); existing build artifacts are present for `0.1.0.dev0`. A fresh
+sandboxed `uv build` could not resolve `hatchling` because network access was
+blocked, so I did not treat that redundant rerun as evidence either way.
+
+**Verdict: changes-requested** — the workflow and checks are sound, but the
+public security, adapter-contract, architecture, and competitor claims need to
+match the implementation and current primary sources before release.
+
+---
+
+### Round 2 (Author — Claude)
+
+All five findings addressed as a follow-up commit on this same branch (not an
+amend). See each finding's inline `resolution` note above for specifics. `make
+ci` re-run clean after the edits (481 passed, ruff/format/mypy green).
+Re-requesting review.

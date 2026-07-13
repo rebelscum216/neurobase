@@ -27,11 +27,16 @@ A function that turns "a session/turn just ended" into **zero or one**
 
 - **Deterministic. No LLM in this path.** Parsing the transcript/rollout is
   plain code — the curator, not the scribe, is where an LLM gets involved.
-- **Every code path exits 0.** A scribe must never raise past its own
-  boundary; the CLI's hook dispatcher wraps it in a blanket
-  `except Exception: pass` as a second line of defense, but the scribe
-  itself should fail closed (capture nothing) rather than rely on that
-  outer catch.
+- **The scribe function itself is allowed to raise** — parsing, config
+  loading, and the write can all fail, and both shipped scribes say so in
+  their own docstrings ("callers should treat any exception as 'capture
+  nothing'"). The **hard, non-negotiable guarantee is the hook entry
+  point's**, not the scribe function's: the CLI's hook dispatcher wraps
+  every call in `except Exception: pass` and always exits 0, so a scribe
+  bug degrades to "captured nothing this time," never a wedged session
+  teardown. Write your scribe function as plain, testable code that can
+  raise on bad input; put no exit-0/exception-swallowing logic inside it —
+  that belongs solely at the hook boundary in `cli/`.
 - **Redact before writing** (`core/redact.py:redact`, spec §10/D13) — no
   exceptions, no "redact later."
 - **Opt-in.** Write only if the resolved project's memory tree already

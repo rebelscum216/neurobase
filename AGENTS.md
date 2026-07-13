@@ -225,6 +225,10 @@ calling the work done. To validate the installed shim (not just the dev env):
   for every spike (S1–S6) and every change to the decision table (D1–D13).
 - **Scratch thinking, investigation logs, a running scratchpad** →
   [docs/notes/](docs/notes/README.md). Not a contract; date your notes.
+- **A defect or inconsistency in code that already shipped** →
+  [docs/known-gaps.md](docs/known-gaps.md). One `G<n>` entry: what's wrong, why it
+  isn't fixed yet, the fix direction. *Not* for unbuilt features (those go in the
+  build-plan backlog) and *not* for decisions (those are ADRs).
 - **A change to a behavioral contract** → edit the spec appendix (it's the living
   spec) *and* note the change in an ADR. Never let code and spec diverge silently.
 - **Real transcript/rollout fixtures** → `tests/fixtures/` (once tests exist),

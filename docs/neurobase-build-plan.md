@@ -287,6 +287,26 @@ Cursor — AGENTS.md route makes read-side cheap) · `recall <topic>` explicit p
 · Obsidian starter vault config · basic-memory importer · PEP 541 claim on
 `neurobase` · multi-machine story (git-sync the store; docs only, no service).
 
+**Project doc schema — a consistent `docs/` shape Neurobase can actually read.**
+Today ADRs, working notes, review batons, and known-gaps are conventions of *this*
+repo only — the app has **zero** concept of them (its vocabulary is `skill`/`rule`
+proposals over `raw`/`curated`/`nodes`). But structured project docs are exactly
+the durable, high-signal corpus the recommender should be mining: a decision
+("we chose X over Y because Z") is a far better source of a `cross-project-convention`
+candidate than a raw session transcript, and `docs/reviews/README.md` already
+anticipates this ("the accumulated review history is exactly the kind of corpus
+Neurobase's recommender learns from once it's dogfooding here"). The idea: define a
+lightweight, **optional** doc schema (decision · note · review · gap — frontmatter'd
+markdown), have `neurobase init` offer to scaffold it, teach the corpus loader to
+ingest it as first-class evidence (a new `EvidenceRef` kind), and let the miner
+weight it above raw captures. Every project Neurobase touches then has the same
+readable shape, and the recommender gets sharply better inputs.
+*Sequenced post-0.1.0 deliberately* — it is a new subsystem with its own contract,
+and shipping it before the release is precisely the "solo-maintainer scope creep"
+the risk register (§7) exists to catch. Needs an ADR before any code: is the schema
+opinionated-and-scaffolded, or merely *recognized* if present? (The latter is more
+in keeping with the "never auto-install" charter.)
+
 ## 7. Risk register
 
 | Risk | Severity | Mitigation |

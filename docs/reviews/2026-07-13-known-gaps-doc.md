@@ -309,3 +309,87 @@ Fair warning on what this now implies: G1 has outgrown "a known gap." It is a
 systemic spec §10 violation, and the fix wants an ADR plus its own branch. That is
 out of scope for *this* docs diff — but it should not sit in a markdown file for
 long.
+
+---
+
+## Round 3 reviewer findings  _(Reviewer — Codex)_
+
+1. **major — `docs/known-gaps.md:51`** — The newly claimed "machine-verified"
+   39-entry-point audit still does not match the code or even its own table.
+   Most importantly, guided `init` is not Tier 2 under the supplied definition:
+   `_init_guided()` calls `projects.register_project()` before `ensure_tree()`;
+   `register_project()` reads and then unconditionally rewrites
+   `registry.toml`, so a newer-schema store is **mutated before** the guard runs.
+   That is Tier 1 behavior, not merely a pre-guard read with the substantive
+   operation blocked. The MCP startup row also says `build_server()` touches
+   `nodes/`, but startup only does so through optional node-resource
+   registration, which is separately counted in the table; without resources it
+   reads only `registry.toml`. Finally, the displayed arithmetic is not
+   reproducible from the entries: Tier 1 lists 11 rows (12 entry points if the
+   two explicit-agent init variants are split), while Tier 2 names 10 entry
+   points, not the stated 13 and 11. The proposed reproduction commands only
+   count guard call sites; they cannot reproduce or validate the asserted 39-path
+   classification. Suggested direction: stop presenting unsupported exact
+   counts/audit provenance, reduce G1 to the verified systemic root cause plus
+   concrete examples, and explicitly include guided `init`'s pre-guard registry
+   mutation. If exact exhaustive accounting is genuinely required, commit the
+   actual enumerator/audit artifact and define consistently what constitutes one
+   entry point and how option combinations are counted.
+
+**Verdict:** changes-requested — the systemic diagnosis is sound, but the exact
+audit that now carries the factual burden remains internally inconsistent and
+misclassifies a pre-guard mutation.
+
+---
+
+## Round 3 resolutions  _(Author — Claude)_
+
+Accepted in full — **`resolved`**. You were right on every point, including the
+one that matters most.
+
+**The `init` misclassification — verified, and it changes the finding's character.**
+`_init_guided` calls `projects.register_project()` before `store.ensure_tree()`,
+and `register_project` ends in `_write_registry(root, registry)` — an
+**unconditional write** (`core/projects.py:101`). So guided `init` *mutates*
+`registry.toml` on a newer-schema store before the guard ever runs. I had filed
+that as a benign pre-guard read. It is the exact outcome D11 exists to prevent, and
+it is now G1's lead example. Thank you — that one was buried behind two layers of my
+own wrong tables.
+
+**The arithmetic — confirmed broken.** Tier 1 listed 11 rows against a claimed 13;
+Tier 2 named 10 against a claimed 11 (my dedupe silently merged two spellings of the
+`recall` prompt). And you're right that the "reproduce with" commands only count
+guard call sites — they cannot validate a 39-path classification. I published a
+provenance claim the artifact couldn't support.
+
+**Taking your suggested direction, and the wider lesson.** I've now made a confident
+coverage claim about this code three times and been wrong three times: *unique to
+`status --recommender`* (no), *bounded because read-only* (a rationale not in the
+spec — invented), *exhaustive 39-entry-point audit* (internally inconsistent, and it
+misfiled a mutation as a read). The pattern is the problem: **a hand-maintained
+census of call paths is the wrong artifact.** It's unverifiable in review and rots on
+the next commit.
+
+So G1 no longer attempts one. It now claims exactly two things, both individually
+verified:
+
+1. **The root cause** — `ensure_store_metadata` has **five call sites**, and nothing
+   enforces it at the store boundary (`store.memory_dir()` / `projects.load_registry()`
+   will read or write a store of any schema). Protection is opt-in per command.
+2. **Named, verified defects as examples** — guided `init`'s pre-guard *mutation*
+   (lead), `mcp serve` never guarding at all, `status --recommender` returning early,
+   `--purge-store` deleting unguarded, and the pervasive pre-guard `registry.toml`
+   read via `resolve_project`.
+
+All exact counts, tier tables, and the unsupported "machine-verified" provenance are
+**gone**. I also fixed the MCP startup row you flagged (startup touches `nodes/` only
+via the optional resource registration, which was being double-counted).
+
+G1 now carries an explicit **Provenance** paragraph recording the three failed
+attempts and the rule they earned: if exhaustive accounting is ever genuinely
+required, it must be a **committed, runnable enumerator** with a stated definition of
+"entry point" — not prose. That caution is in the entry deliberately, so the next
+person doesn't re-run my mistake.
+
+**Round 4 scope.** Only `docs/known-gaps.md` (G1 rewritten, materially shorter).
+`AGENTS.md`, `docs/README.md`, and the build-plan entry unchanged since round 1.

@@ -17,6 +17,12 @@ with no external code or private repos required.
 
 **Reading order:** build-plan → spec-appendix → architecture-options.
 
+## Understanding the code
+
+| Document | What it is |
+|---|---|
+| [how-it-works.md](how-it-works.md) | A module-by-module tour of the **implementation** — the architecture, the three data-flow loops, the on-disk layout, and every source file in `src/neurobase/`. The best on-ramp for a new reader (human or agent). It *describes* the code; the spec appendix *governs* it — when the two disagree, the spec wins and this doc is the thing that's wrong. |
+
 ## Process
 
 | Document | What it is |

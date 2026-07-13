@@ -1819,4 +1819,3 @@ The map below is by subsystem; each file's line names the contract it pins.
 _This document describes the code as it stands on `main`. When you change a
 subsystem, update the matching section here — and if you change a behavioral
 contract, update the spec appendix first (the spec is law; this doc follows it)._
-

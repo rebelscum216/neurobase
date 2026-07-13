@@ -14,12 +14,17 @@ patterns and proposes promoting them into standard **SKILL.md** and
 It all runs on your machine, on the agent subscriptions you already pay for, with
 **zero cloud dependency and zero telemetry — permanently.**
 
-> **Status: pre-alpha.** The full loop works today for Claude Code and Codex CLI:
-> deterministic capture, an LLM curator that folds and deletes, cross-agent
-> recall, consent-first hook installers, an MCP server, and the v1 recommender
-> (mine → rank → propose → accept/reject/edit → metrics). Installable from source;
-> **not yet published to PyPI** — that, plus the release docs, is the only
-> remaining milestone before `0.1.0`.
+> **Status: pre-alpha — installable from source, not yet published to PyPI.**
+> The full loop is implemented for Claude Code and Codex CLI: deterministic
+> capture, an LLM curator that folds and deletes, cross-agent recall,
+> consent-first hook installers, an MCP server, and the v1 recommender
+> (mine → rank → propose → accept/reject/edit → metrics).
+>
+> Still ahead of `0.1.0`: PyPI publication and a trusted-publishing release
+> workflow, `SECURITY.md` (redaction policy + trust boundary), an adapter guide,
+> `CONTRIBUTING` + issue templates, a `CHANGELOG`, and a clean-machine install
+> verification. Treat the current install path as "works on the maintainer's
+> machine," not "battle-tested."
 
 ## How it works
 

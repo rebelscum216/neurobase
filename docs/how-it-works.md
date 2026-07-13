@@ -57,10 +57,12 @@ edit, or reject.
 
 Two cross-cutting principles explain most of the code you'll read:
 
-- **Fail-safe by default.** Every hook is deterministic, takes stdin JSON, runs
-  no LLM, and **always exits 0** — it must never wedge an agent's session
-  start/teardown. On any error it captures nothing / injects nothing rather than
-  crash (spec §3–§5).
+- **Fail-safe by default.** Every hook is deterministic, runs no LLM, and
+  **always exits 0** — it must never wedge an agent's session start/teardown. On
+  any error it captures nothing / injects nothing rather than crash (spec §3–§5).
+  Payloads arrive as **stdin JSON**, with one exception: Codex's `notify`
+  fallback carries its payload as **argv JSON** with empty stdin (spec §11.4) —
+  see the CLI and Codex-adapter sections.
 - **Consent-first for anything outside our own files.** Installing a hook,
   writing agent config, or emitting a skill/rule shows the exact diff, asks for
   consent, backs up the original under `<root>/backups/<ts>/`, and is idempotent
@@ -1176,7 +1178,9 @@ This pattern directly implements spec §7's installer rules: *"show exact diff +
 
 #### Store-schema gate
 
-- **`_check_store_schema(root: Path) -> None`** — calls `store.ensure_store_metadata(root)`; on `store.UnsupportedSchemaError`, prints the error in red to stderr and raises `typer.Exit(code=1)`. Every command that reads or writes the store (`enable`, `status` when not `--recommender`, `curate`, `seed`, `recommend list/show/run/edit/reject/accept`) calls this **before** touching the registry or memory tree, per spec §10/decision D11 — a store whose on-disk schema is newer than the running binary understands must never be partially mutated. `status --recommender` deliberately runs this check too (recommender metrics still read the store), but `status --recommender` itself is branched *before* project resolution since recommender state (proposals/ledger) is store-wide, not project-scoped.
+- **`_check_store_schema(root: Path) -> None`** — calls `store.ensure_store_metadata(root)`; on `store.UnsupportedSchemaError`, prints the error in red to stderr and raises `typer.Exit(code=1)`. Commands that read or write the store (`enable`, `status` on its normal path, `curate`, `seed`, `recommend list/show/run/edit/reject/accept`) call this **before** touching the registry or memory tree, per spec §10/decision D11 — a store whose on-disk schema is newer than the running binary understands must never be partially mutated.
+
+  **One documented gap:** `status --recommender` does **not** get this guard. `status()` resolves the root, then branches on `recommender` and `return`s through `_print_recommender_metrics(resolved_root)` *before* reaching its `_check_store_schema` call, and the metrics path doesn't call the guard itself either — so recommender metrics are read from a newer-schema store without the D11 check. In practice that path is strictly read-only (`metrics.compute_metrics` never writes), so it cannot *mutate* an incompatible store, which is what D11 exists to prevent; but it is an inconsistency with every other store-reading command rather than a deliberate exemption, and worth closing. The `recommender` branch sits before project resolution for a separate, deliberate reason (spec §12.9: proposals/ledger are store-wide, not project-scoped, so `status --recommender` must not require an enabled project).
 
 #### Top-level commands
 

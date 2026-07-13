@@ -98,6 +98,87 @@ grep -oE "\]\(([^)]+)\)" docs/how-it-works.md
 
 > Run the diff and review the actual code. One entry per finding.
 
-_(none yet)_
+1. **major — `README.md:21`** — The status box says that publication and
+   "the release docs" are the *only* remaining milestone before `0.1.0`, but
+   the authoritative build plan has not closed Phase 8 until the real seeded
+   corpus produces at least three sensible proposals, an accepted skill loads,
+   rejection suppresses a similar candidate, and the headline demo succeeds.
+   Phase 9 also names more than generic release docs and publication: a clean-
+   machine README journey, SECURITY.md, an adapter guide, CONTRIBUTING, issue
+   templates, CHANGELOG, a trusted-publishing workflow, and the tag. This makes
+   the public project status materially more complete than the plan supports.
+   Suggested direction: describe the implemented Phase 8 command surface
+   separately from its outstanding live acceptance/demo gate, and summarize the
+   actual Phase 9 release work without claiming only two items remain.
 
-**Verdict:** _pending_
+2. **major — `docs/how-it-works.md:1179`** — The store-schema section explicitly
+   says `status --recommender` runs `_check_store_schema`, but `status()` returns
+   through `_print_recommender_metrics(resolved_root)` before that check and the
+   metrics path does not call it. This is not just a signature nit: it documents
+   a newer-schema safety guarantee that the command does not currently provide.
+   Suggested direction: document the actual exception accurately; if the
+   command is intended to have the guard, that is an out-of-scope code change
+   requiring its own contract/test work rather than a claim for this doc.
+
+3. **minor — `docs/how-it-works.md:59`** — The Part I cross-cutting principle says
+   every hook takes stdin JSON. Codex `notify` receives its payload as argv JSON
+   with empty stdin (spec §11.4), as this document itself correctly explains at
+   lines 327 and 1138. A reader relying on the orientation section would get the
+   adapter boundary wrong. Suggested direction: qualify the statement as stdin
+   JSON except for Codex `notify`'s argv fallback, or phrase it transport-
+   neutrally.
+
+**Verdict:** changes-requested — the tour is broad and largely traceable, but it
+currently overstates release completeness and asserts a schema guard that the
+reviewed code does not execute.
+
+---
+
+## Round 1 resolutions  _(Author — Claude)_
+
+All three findings verified against source and **accepted** — no pushback. Fixes
+landed as a follow-up commit on the same branch (the reviewed commit was not
+amended).
+
+**1 — README overstates release completeness — `resolved`.**
+Verified: `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `.github/ISSUE_TEMPLATE`,
+and a release workflow are all absent, so "publish + the release docs" did
+materially understate build-plan Phase 9. Rewrote the status box: it now states
+what is *implemented*, then lists the actual remaining 0.1.0 work (PyPI publish +
+trusted-publishing workflow, SECURITY.md, adapter guide, CONTRIBUTING + issue
+templates, CHANGELOG, clean-machine install verification) and explicitly frames
+the install path as "works on the maintainer's machine," not battle-tested. The
+README no longer makes any "only N milestones remain" claim.
+
+_One note for the record, not a pushback:_ on the Phase 8 half of this finding —
+the working tree carries an (uncommitted, hence not in your diff) status note
+recording Phase 8's "Done when" gates as verified live on 2026-07-12. I've
+deliberately **not** leaned on that in the README; the rewritten status box makes
+no completeness claim about Phase 8 beyond "implemented," which is verifiable
+from the code alone. So the fix stands regardless of how that note lands.
+
+**2 — `status --recommender` schema guard does not run — `resolved`.**
+Confirmed exactly as reported, and the original text was self-contradictory
+(it said "`status` when not `--recommender`" and then claimed `--recommender`
+"runs this check too"). `status()` (`cli/__init__.py:100-102`) branches to
+`_print_recommender_metrics` and `return`s *before* the `_check_store_schema`
+call at line 108, and `_print_recommender_metrics` never calls the guard. The doc
+now documents the real behavior as a named **gap**: the path is strictly
+read-only so it cannot mutate an incompatible store (which is what D11 exists to
+prevent), but it is an inconsistency rather than a deliberate exemption, and is
+flagged as worth closing. Per your suggested direction I made **no code change** —
+adding the guard is out of scope for a docs-only branch and would want its own
+contract/test work.
+
+**3 — "every hook takes stdin JSON" is wrong for Codex `notify` — `resolved`.**
+Confirmed. Rewrote the Part I fail-safe principle to be transport-accurate:
+payloads arrive as stdin JSON *except* Codex's `notify` fallback, which carries
+argv JSON with empty stdin (spec §11.4), with a pointer to the CLI and
+Codex-adapter sections that already described this correctly.
+
+**Round 2 scope.** Only the three fixes above (README status box;
+`how-it-works.md` store-schema-gate bullet; `how-it-works.md` Part I fail-safe
+bullet). Same diff command. If the schema-gap wording in fix 2 reads as
+under- or over-stating the risk, say so — that's the one where I had to make a
+judgment call about how loudly to flag a real inconsistency in a doc that isn't
+allowed to fix it.

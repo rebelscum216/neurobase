@@ -23,6 +23,7 @@ with no external code or private repos required.
 |---|---|
 | [code-review-relay.md](code-review-relay.md) | The defined **Claude ⇄ Codex code-review handoff** process — roles, protocol, reviewer checklist. Single source of truth; the Claude `xcode-review` skill and the AGENTS.md Reviewer section point to it. |
 | [reviews/](reviews/README.md) | The trail of review handoffs — one baton file per review, from [`TEMPLATE.md`](reviews/TEMPLATE.md). |
+| [known-gaps.md](known-gaps.md) | Known **defects/inconsistencies in shipped code** — what's wrong, why it isn't fixed yet, and the fix direction. Not a TODO list (unbuilt features go in the build-plan backlog) and not a decision (that's an ADR). |
 
 ## Decision & spike quick-reference
 

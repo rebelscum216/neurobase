@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributing guide
+    url: https://github.com/rebelscum216/neurobase/blob/main/CONTRIBUTING.md
+    about: Read this before filing — it links to known-gaps and the backlog, which may already cover your report.
+  - name: Report a security vulnerability
+    url: https://github.com/rebelscum216/neurobase/security/advisories/new
+    about: Please do not file security issues as public bug reports — use private advisory reporting instead.

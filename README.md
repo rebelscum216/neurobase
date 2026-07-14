@@ -14,17 +14,17 @@ patterns and proposes promoting them into standard **SKILL.md** and
 It all runs on your machine, on the agent subscriptions you already pay for, with
 **zero cloud dependency and zero telemetry — permanently.**
 
-> **Status: pre-alpha — installable from source, not yet published to PyPI.**
-> The full loop is implemented for Claude Code and Codex CLI: deterministic
-> capture, an LLM curator that folds and deletes, cross-agent recall,
-> consent-first hook installers, an MCP server, and the v1 recommender
-> (mine → rank → propose → accept/reject/edit → metrics).
->
-> Still ahead of `0.1.0`: PyPI publication and a trusted-publishing release
-> workflow, `SECURITY.md` (redaction policy + trust boundary), an adapter guide,
-> `CONTRIBUTING` + issue templates, a `CHANGELOG`, and a clean-machine install
-> verification. Treat the current install path as "works on the maintainer's
-> machine," not "battle-tested."
+> **Status: release-ready, pending PyPI publication.** The full loop is
+> implemented for Claude Code and Codex CLI: deterministic capture, an LLM
+> curator that folds and deletes, cross-agent recall, consent-first hook
+> installers, an MCP server, and the v1 recommender (mine → rank → propose →
+> accept/reject/edit → metrics) — see [CHANGELOG.md](CHANGELOG.md) for the full
+> `0.1.0` scope. Docs ([SECURITY.md](SECURITY.md),
+> [docs/adapter-guide.md](docs/adapter-guide.md),
+> [CONTRIBUTING.md](CONTRIBUTING.md)) and the trusted-publishing release
+> workflow are in place; the `v0.1.0` tag and PyPI publish are the last step.
+> Until that lands, install from source below. Treat the current install path
+> as "works on the maintainer's machine," not yet "battle-tested by strangers."
 
 ## How it works
 
@@ -52,7 +52,38 @@ hooks capture (auto)  →  curator folds raw into a small durable fact set
 
 Want the full mechanics? **[docs/how-it-works.md](docs/how-it-works.md)** is a
 module-by-module tour of the entire codebase — the architecture, the three
-data-flow loops, and every source file.
+data-flow loops, and every source file. For the layer rules new code should
+follow, see **[docs/architecture.md](docs/architecture.md)**.
+
+## How it compares
+
+Local-first, cross-agent MCP memory isn't a green field — it's honest to say
+so. [basic-memory](https://github.com/basicmachines-co/basic-memory) is the
+closest thing to Neurobase's memory-and-wiki layer already shipped, with a
+proven paid tier; [Memorix](https://github.com/AVIDS2/memorix) already spans
+more agents and has its own skill-promotion command; [mem0
+OpenMemory](https://github.com/mem0ai/mem0) is the funded incumbent. Facts
+below checked directly against each project's README as of 2026-07; pricing
+in particular moves — verify current numbers before quoting them elsewhere.
+
+| | **Neurobase** | basic-memory | Memorix | mem0 OpenMemory |
+|---|---|---|---|---|
+| License | Apache-2.0 | AGPL-3.0 | Apache-2.0 | Apache-2.0 |
+| Storage | Markdown, wikilinked | Markdown, wikilinked (Obsidian) | SQLite + Orama search | Postgres + Qdrant (Docker) |
+| Cross-agent | Claude Code + Codex CLI (hooks + MCP) | Any MCP client | Many agents (MCP + plugins) | Any MCP client |
+| Fact set | Curator **folds & deletes** — small, current, non-redundant | Editable notes (`write_note`/`edit_note`/`delete_note`), no automatic curation | Notes + generated briefs; no documented automatic pruning | Vector-recalled memories, no documented automatic pruning |
+| Skill/rule promotion | **Mines the corpus for recurring patterns, proposes SKILL.md/AGENTS.md, and tracks accept/edit/reject + 30-day survival per proposal** | — | Has `memorix skills` (CLI) / `memorix_promote` (MCP tool) to promote knowledge into skill files; README doesn't document automatic pattern-mining or post-promotion tracking | — |
+| Cost | Free | Free, self-hosted + a paid hosted-sync tier (check current pricing — it's changed more than once) | Free | Free self-hosted (mem0 also sells a cloud product) |
+
+What basic-memory and Memorix do well, they do well — a mature markdown+
+Obsidian graph and broad agent coverage aren't nothing, and if you just want
+cross-agent recall, either is a reasonable choice. Memorix in particular
+already has a skill-promotion command, so the honest distinction isn't
+"nobody else promotes skills" — it's that Neurobase's promotion is driven by
+mining the corpus for recurring cross-session patterns rather than a manual
+command, and measures what happened after acceptance (kept, edited, or
+reverted) to feed back into ranking. That measured loop, on top of a curator
+that actively deletes instead of just accumulating, is the actual bet.
 
 ## Quickstart
 
@@ -137,15 +168,25 @@ will also work; `uv` recommended, not required.)
 
 - **[docs/how-it-works.md](docs/how-it-works.md)** — how the code is built: a
   guided, module-by-module tour of every subsystem.
+- **[docs/architecture.md](docs/architecture.md)** — the layer contract: what
+  each package owns and what it's allowed to depend on.
+- **[docs/adapter-guide.md](docs/adapter-guide.md)** — what it takes to add a
+  third agent (Gemini CLI, Cursor, ...) beyond Claude Code and Codex CLI.
+- **[SECURITY.md](SECURITY.md)** — the trust boundary, the redaction policy,
+  and how to report a vulnerability.
 - **[AGENTS.md](AGENTS.md)** — start here if you're building on the repo (human or
   agent): build principles, dev workflow, and the review relay.
 - **[docs/](docs/README.md)** — the full index: the phased build plan, the
   authoritative behavioral spec, the architecture rationale, ADRs, and notes.
+- **[CHANGELOG.md](CHANGELOG.md)** — what shipped in each release.
 
 ## Contributing
 
-Start with **[AGENTS.md](AGENTS.md)** (the contributor guide). Before every push,
-run the full local gate — not just the tests:
+See **[CONTRIBUTING.md](CONTRIBUTING.md)**, which points to
+**[AGENTS.md](AGENTS.md)** (the real operating guide) and the
+[code-review relay](docs/code-review-relay.md) this project uses for
+non-trivial changes. Before every push, run the full local gate — not just
+the tests:
 
 ```bash
 make ci                       # ruff check + ruff format --check + mypy + pytest

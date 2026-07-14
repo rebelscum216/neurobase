@@ -22,6 +22,8 @@ with no external code or private repos required.
 | Document | What it is |
 |---|---|
 | [how-it-works.md](how-it-works.md) | A module-by-module tour of the **implementation** — the architecture, the three data-flow loops, the on-disk layout, and every source file in `src/neurobase/`. The best on-ramp for a new reader (human or agent). It *describes* the code; the spec appendix *governs* it — when the two disagree, the spec wins and this doc is the thing that's wrong. |
+| [architecture.md](architecture.md) | The **layer contract**, stated as rules rather than a tour: which package owns what, the "lower layers never import upward" rule, and where the three data-flow loops cross the layers. |
+| [adapter-guide.md](adapter-guide.md) | What it takes to add a **third agent** adapter (Gemini CLI, Cursor, ...) beyond the shipped Claude Code and Codex CLI ones — the scribe/recall/installer contract each must satisfy. |
 
 ## Process
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+
 import pytest
 
 from neurobase.core.redact import redact, redact_command
@@ -91,6 +93,10 @@ SHELL_LEAKS = [
     "export api_token='SECRET two'",
     'export api_token="SECRET;two"',  # a `;` inside quotes must not end the segment
     'export "api_token"=SECRET',  # the NAME may be quoted too — still an assignment
+    "export api_$'to\\u006ben'=SECRET",  # ANSI-C Unicode escape in the name
+    "export api_$'to\\153en'=SECRET",  # ANSI-C octal escape in the name
+    "export $'api_token\\0'=SECRET",  # Bash discards NUL from the effective word
+    "export api_$'token\\x00'=SECRET",
     # Malformed quoting must fail CLOSED: a command that failed to parse is still
     # a captured command, and can still carry a live credential.
     'api_token="SECRET two',
@@ -252,6 +258,10 @@ EXACT: list[tuple[str, str]] = [
     ('export api_"token"=SECRET', f'export api_"token"={R}'),
     ("export api_$'token'=SECRET", f"export api_$'token'={R}"),
     ("export api_$'to\\x6ben'=SECRET", f"export api_$'to\\x6ben'={R}"),  # decoded
+    ("export api_$'to\\u006ben'=SECRET", f"export api_$'to\\u006ben'={R}"),
+    ("export api_$'to\\153en'=SECRET", f"export api_$'to\\153en'={R}"),
+    ("export $'api_token\\0'=SECRET", f"export $'api_token\\0'={R}"),
+    ("export api_$'token\\x00'=SECRET", f"export api_$'token\\x00'={R}"),
     ('export api_"to$(printf ken)"=SECRET', f'export api_"to$(printf ken)"={R}'),  # unknowable
     # a marker in the INPUT is data, and must not shield the text beside it
     ("api_token=[REDACTED:env-secret]SECRET ./run", f"api_token={R} ./run"),
@@ -524,6 +534,34 @@ def test_env_rule_preserves_leading_indent() -> None:
 def test_extra_patterns_redact_as_custom() -> None:
     out = redact("internal-id-77123", extra_patterns=[r"internal-id-\d+"])
     assert out == "[REDACTED:custom]"
+
+
+@pytest.mark.parametrize("scrub", [redact, redact_command])
+@pytest.mark.parametrize(
+    ("text", "patterns", "expected"),
+    [
+        ("x", [r"."], "[REDACTED:custom]"),
+        ("[REDACTED:env-secret]", [r"."], "[REDACTED:env-secret]"),
+        (
+            "[REDACTED:env-secret]x",
+            [r".+"],
+            "[REDACTED:env-secret][REDACTED:custom]",
+        ),
+        (
+            "a[REDACTED:env-secret]x",
+            [r".$"],
+            "a[REDACTED:env-secret][REDACTED:custom]",
+        ),
+        ("x", [r"(?=x)"], "x"),  # zero-width matches contain nothing to redact
+        ("ba", [r"^a", r"b"], "[REDACTED:custom]a"),
+    ],
+)
+def test_extra_patterns_are_marker_safe_and_idempotent(
+    scrub: Callable[[str, Iterable[str]], str], text: str, patterns: list[str], expected: str
+) -> None:
+    once = scrub(text, patterns)
+    assert once == expected
+    assert scrub(once, patterns) == once
 
 
 def test_multiple_patterns_in_one_body() -> None:

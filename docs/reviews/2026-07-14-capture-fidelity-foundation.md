@@ -1381,3 +1381,70 @@ built entirely on the second kind, and §10 says so, so the next person feels th
 wall before they walk into it.
 
 **Verdict:** _pending re-review._
+
+---
+
+## Round 10 — Reviewer findings  _(Reviewer — Codex)_
+
+### F34 — blocker — `src/neurobase/core/redact.py:181-188,428-448`
+
+The ANSI-C decoder misses a real Bash spelling of a secret-named export. Bash
+discards NUL from an ANSI-C quoted word, so
+`export $'api_token\0'=SECRET` (and the `\x00` form) sets `api_token` to
+`SECRET`. `_decode_ansi_c()` instead returns a Python string containing NUL;
+the subsequent full-name regex rejects `api_token\x00`, and both `redact()` and
+`redact_command()` preserve `SECRET`. This violates the §10 MUST that ANSI-C
+escaped secret names are caught, and D13 before the raw write.
+
+Suggested direction: make the supported ANSI-C name decoding match the shell's
+NUL behavior or fail closed when a fragment contains a NUL-producing escape.
+Add `\0` and `\x00` forms to the exact-output oracle, alongside the existing
+hex, Unicode, and octal cases.
+
+### F35 — blocker — `src/neurobase/core/redact.py:109-115,119-139`
+
+The new idempotence invariant does not hold when the documented, unrestricted
+`extra_patterns` configuration is used. For example,
+`redact("x", [r"."])` returns one `[REDACTED:custom]` marker, while applying
+the same call again replaces every marker character and returns seventeen
+markers; `redact_command()` has the same failure. The metamorphic suite invokes
+only the default pattern set, so it cannot see this production path. A user
+pattern need not be malicious to overlap marker text, and capture deliberately
+redacts twice, making the amplification reachable.
+
+Suggested direction: give custom patterns the same marker/idempotence guarantee
+as built-ins (or validate and document a genuinely safe configuration boundary),
+then exercise representative broad and marker-overlapping patterns through both
+entry points in the metamorphic suite.
+
+**Verdict:** changes-requested — removing executor inference is the right
+lexical-versus-semantic boundary and §10/ADR-0013 state that residual candidly,
+but F34 still leaks an ANSI-C secret name and F35 breaks §10's idempotence MUST.
+The next class the current default-only oracle cannot see is configuration- and
+dialect-dependent behavior: generated combinations of custom regexes, shell
+escape forms, and real-shell expansion semantics need a bounded fuzz/differential
+corpus in addition to exact policy examples.
+
+---
+
+## Round 11 — Author resolutions  _(Codex, at user request)_
+
+Both blockers are fixed. Full gate green: **743 passed**. The local corpus audit
+covered 2,524 unique commands with 0 markerless changes and 0 non-idempotent
+outputs.
+
+**F34 — resolved.** `_decode_ansi_c()` now follows Bash's effective-word
+behavior by discarding decoded NUL before checking the assembled assignment
+name. Both public entry points redact `$'api_token\0'=SECRET` and the `\x00`
+fragment form. The exact-output oracle now covers NUL, hex, Unicode, and octal
+ANSI-C spellings.
+
+**F35 — resolved.** Configured regexes now operate only on non-marker spans;
+existing and newly produced markers are opaque. Nonempty matches are applied to
+a fixed point so a composed pattern set is idempotent after one call. Zero-width
+matches are ignored because they identify no captured text to replace. Regressions
+exercise broad, marker-overlapping, zero-width, and composed patterns through
+both `redact()` and `redact_command()`. Spec §10, ADR-0013, and the implementation
+guide state the boundary.
+
+**Verdict:** _pending independent re-review._

@@ -156,7 +156,9 @@ and they are the most transferable part of this ADR:
   character, so a value scanner blind to it read `[REDACTED:env-secret]export …`
   as one token and ate the following word. A live data-loss path, found by an
   *idempotence* check — the one property a corpus round-trip can verify without
-  an oracle.
+  an oracle. Configured regexes obey the same rule: markers are opaque, nonempty
+  matches are applied to a fixed point, and zero-width matches are ignored
+  because they identify no captured text.
 - **A corpus round-trip has no oracle, so it cannot verify a MUST.** It knows what
   changed, never what the output should have been: a leak *beside* a redaction and
   a deletion *beside* a redaction both look like "redacted", and nothing in a real

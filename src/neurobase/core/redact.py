@@ -45,6 +45,8 @@ _SECRET_NAME = r"[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-
 # to do" and the trailing `SECRET` was left in the clear. A pre-existing marker in
 # captured text must never become an escape hatch for the text beside it.
 _MARKER = r"\[REDACTED:[a-z-]+\]"
+_MARKER_RE = re.compile(_MARKER)
+_CUSTOM_MARKER = "[REDACTED:custom]"
 # A value is a RUN of adjacent fragments, quoted or bare — the shell concatenates
 # them into one word. Matching a single balanced fragment and stopping left the
 # rest of the word behind: `api_token="a b"export …` redacted only `"a b"`, and
@@ -106,14 +108,62 @@ def _redact_assignments_in_text(text: str) -> str:
     return _INLINE_ENV_SECRET.sub(r"\1=[REDACTED:env-secret]", text)
 
 
+def _apply_extra_patterns(text: str, extra_patterns: Iterable[str]) -> str:
+    """Apply configured regexes to unredacted spans and return a fixed point.
+
+    Markers are opaque: a custom pattern may be deliberately broad, but it must
+    never rewrite a marker produced by this or an earlier pass. Patterns are
+    iterated to a fixed point because one pattern can expose a match to another
+    after a marker is inserted. Every replacement consumes at least one
+    non-marker character, so the loop terminates. Zero-width matches are ignored:
+    they identify no captured text to redact and cannot be made idempotent by
+    replacement.
+
+    Searches use the complete string with bounded ``pos``/``endpos`` spans, not
+    sliced substrings, so ``^`` retains its real meaning. A bounded search can
+    make ``$`` treat a marker boundary as end-of-string; requiring the same match
+    to start in the complete string rejects that artificial anchor.
+    """
+    patterns = tuple(re.compile(raw_pattern) for raw_pattern in extra_patterns)
+    changed = True
+    while changed:
+        changed = False
+        for pattern in patterns:
+            spans: list[tuple[int, int]] = []
+            cursor = 0
+            for marker in _MARKER_RE.finditer(text):
+                spans.extend(_custom_match_spans(text, pattern, cursor, marker.start()))
+                cursor = marker.end()
+            spans.extend(_custom_match_spans(text, pattern, cursor, len(text)))
+            if spans:
+                changed = True
+                for start, end in reversed(spans):
+                    text = text[:start] + _CUSTOM_MARKER + text[end:]
+    return text
+
+
+def _custom_match_spans(
+    text: str, pattern: re.Pattern[str], start: int, end: int
+) -> list[tuple[int, int]]:
+    """Return nonempty matches wholly inside one unredacted span."""
+    spans: list[tuple[int, int]] = []
+    for match in pattern.finditer(text, start, end):
+        if match.start() == match.end():
+            continue
+        if end < len(text) and pattern.match(text, match.start()) is None:
+            # ``endpos`` can manufacture a `$`/`\Z` boundary immediately before
+            # a marker. It is not a match in the complete captured string.
+            continue
+        spans.append(match.span())
+    return spans
+
+
 def redact(text: str, extra_patterns: Iterable[str] = ()) -> str:
     """Apply the D13 redaction table (+ any config-supplied extras) to ``text``."""
     for pattern, replacement in _BUILTIN_PATTERNS:
         text = pattern.sub(replacement, text)
     text = _redact_assignments_in_text(text)
-    for raw_pattern in extra_patterns:
-        text = re.sub(raw_pattern, "[REDACTED:custom]", text)
-    return text
+    return _apply_extra_patterns(text, extra_patterns)
 
 
 def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
@@ -135,9 +185,7 @@ def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
     for pattern, replacement in _BUILTIN_PATTERNS:
         text = pattern.sub(replacement, text)
     text = _scrub_shell(text)
-    for raw_pattern in extra_patterns:
-        text = re.sub(raw_pattern, "[REDACTED:custom]", text)
-    return text
+    return _apply_extra_patterns(text, extra_patterns)
 
 
 # --- shell scrubbing --------------------------------------------------------
@@ -172,7 +220,6 @@ def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
 # from a wholly quoted ARGUMENT — `'api_token=v'` — is the load-bearing part).
 _SECRET_NAME_FULL = re.compile(rf"^{_SECRET_NAME}$", re.IGNORECASE)
 _NAME_CHARS = re.compile(r"""[A-Za-z0-9_]+""")
-_MARKER_RE = re.compile(_MARKER)
 # Syntax the shell EXPANDS inside a double-quoted fragment. If a name contains
 # any of it, the real name is unknowable without running the shell.
 _EXPANDS = re.compile(r"""\$\(|\$\{|\$[A-Za-z_]|`""")
@@ -183,9 +230,12 @@ def _decode_ansi_c(fragment: str) -> str:
     shell does. Comparing the *raw* text against the secret-name pattern missed
     `export api_$'to\x6ben'=<secret>`, which bash exports as `api_token`."""
     try:
-        return fragment.encode("utf-8", "surrogateescape").decode("unicode_escape")
+        decoded = fragment.encode("utf-8", "surrogateescape").decode("unicode_escape")
     except (UnicodeDecodeError, UnicodeEncodeError):
         return fragment
+    # Bash strings cannot contain NUL. ANSI-C `\0` / `\x00` bytes are discarded,
+    # so `$'api_token\0'` reaches `export` as the real name `api_token`.
+    return decoded.replace("\x00", "")
 
 
 # A credential option: an ALLOW-LIST, never a `*key*` pattern — `--sort-key=name`,

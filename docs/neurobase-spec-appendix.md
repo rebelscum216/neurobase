@@ -579,17 +579,36 @@ where `<SECRET_NAME>` is `[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTI
 
 **`redact_command(text)`** — a stricter pass for a value **known to be a shell
 command** (§4's tool-activity digest captured `input.command` verbatim). It
-applies the table above, then redacts *every* secret-named assignment in the
-string, case-insensitively, with no keyword required. Knowing the channel is
-what licenses that aggression: a command is not prose and not code, so
-`api_token=… ./run.sh` and `pytest --api-key=…` can both go without taxing
-everything else. Scribes MUST use it for the command digest.
+applies the table above, then scrubs assignments **structurally, by walking the
+command's tokens** — no keyword required, since the channel already proves it is
+shell. So `api_token=… ./run.sh` and `pytest --api-key=…` both go.
+
+A command is **not** free of prose or code, and assuming otherwise is a bug:
+`python -c "…"`, `sqlite3 db "…"`, and `echo "…"` carry source, SQL, and prose as
+**quoted arguments**. Those are data the command consumes and MUST survive
+verbatim — scanning them for `key=` substrings destroys the captured activity
+without redacting any secret. Hence the structural rule below. Scribes MUST use
+`redact_command` for the command digest, and MUST NOT use it for anything else.
 
 Scope notes:
 
 - The env rules intentionally match only secret-ish variable names — a pasted
   `PATH=/usr/bin` survives. The `[REDACTED:<type>]` vocabulary above is closed;
   `extra_patterns` additions use `[REDACTED:custom]`.
+- **An assignment's VALUE is a whole shell word, never `\S+`.** It may be
+  single-, double-, or ANSI-C-quoted, and a quoted value contains spaces —
+  which is exactly what passwords and tokens look like. Matching `\S+` turns
+  `api_token="hunter two"` into `api_token=[REDACTED:env-secret] two"`, leaking
+  half the secret in the clear. The **name** may be quoted too (`"api_token"=v`
+  is valid shell for the same assignment) and must still match.
+- **In shell, an assignment is a TOKEN IN ASSIGNMENT POSITION — not a substring.**
+  It sits before the command name (`api_token=… ./run.sh`), or anywhere in the
+  word list of an assignment builtin (`env -u OLD PATH=/bin api_token=… pytest`).
+  Once the command name is seen, every later word is that command's *argument*,
+  and an argument is often quoted code or prose (`python -c "items.sort(key=…)"`).
+  Redacting inside one corrupts captured content and redacts no secret. A
+  secret-*named* option (`--api-key=…`) is redacted in any position, since the
+  option name itself announces the value.
 - Assignments need three rules, because **the signal that "this is a secret being
   set" is contextual**. Neither casing nor a keyword alone is a sufficient lever:
   - **Shell segment.** A keyword (`export`/`env`/`declare`/`typeset`/`local`) in

@@ -84,6 +84,13 @@ SHELL_LEAKS = [
     "make && export api_token=SECRET",  # after a shell separator
     "api_token=SECRET",  # line-anchored .env rule
     "API_TOKEN=SECRET cmd",  # bare inline, uppercase
+    # Quoting. A value is a whole shell word, not `\S+` — otherwise a quoted
+    # value with a space leaks everything after the space, and passwords and
+    # tokens are exactly the values people quote.
+    'env api_token="SECRET two" pytest',
+    "export api_token='SECRET two'",
+    'export api_token="SECRET;two"',  # a `;` inside quotes must not end the segment
+    'export "api_token"=SECRET',  # the NAME may be quoted too — still an assignment
 ]
 
 # Position — not the keyword alone — is what establishes shell syntax. A keyword
@@ -98,17 +105,35 @@ NOT_SECRETS = [
     "PATH=/usr/bin",
 ]
 
+# A shell command is NOT free of prose and code — it carries both as quoted
+# ARGUMENTS. An assignment is a token in assignment position, never a substring
+# inside an argument the command merely consumes.
+COMMANDS_WITH_EMBEDDED_CONTENT = [
+    'python -c "items.sort(key=lambda x: x.id)"',
+    'python -c "df.groupby(key=col, secret=False)"',
+    'sqlite3 db "DECLARE api_key=value"',
+    'echo "we export api_token=example in docs"',
+]
+
 
 @pytest.mark.parametrize("command", SHELL_LEAKS)
 def test_shell_assignments_are_redacted_in_either_case(command: str) -> None:
-    out = redact(command)
-    assert "SECRET" not in out
-    assert "[REDACTED:env-secret]" in out
+    for out in (redact(command), redact_command(command)):
+        assert "SECRET" not in out, out
+        assert "[REDACTED:env-secret]" in out
 
 
 @pytest.mark.parametrize("text", NOT_SECRETS)
 def test_prose_and_code_are_not_redacted_as_shell(text: str) -> None:
     assert redact(text) == text
+
+
+@pytest.mark.parametrize("command", COMMANDS_WITH_EMBEDDED_CONTENT)
+def test_command_scrub_preserves_embedded_code_sql_and_prose(command: str) -> None:
+    """The command channel may be aggressive about *assignments*, but a quoted
+    argument is data the command consumes — corrupting it destroys the very
+    activity digest this capture exists to record."""
+    assert redact_command(command) == command
 
 
 def test_env_assignments_redact_every_occurrence_not_just_the_first() -> None:

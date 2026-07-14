@@ -564,4 +564,108 @@ secret-shaped branch is redacted in frontmatter while `session_id` survives
 byte-identical. Live spike confirms a real capture's `branch: main` and `cwd`
 pass through untouched.
 
+## Round 4 — Reviewer findings  _(Reviewer — Codex)_
+
+F10 is closed as specified: `cwd`/`branch` are scrubbed only after project and
+rollout resolution, neither field keys filenames or recommender grouping, and
+the unchanged `session_id` remains the key consumed by corpus/ranker readers.
+The command-channel boundary is also real: only Claude Bash activity values use
+`redact_command`; every other body/frontmatter value uses `redact`. The three
+global assignment passes are stable when re-applied to their own placeholders.
+Adversarial shell syntax nevertheless found one remaining false-negative class
+and one substantial fidelity regression in the command-only pass.
+
+### F11 — blocker — `src/neurobase/core/redact.py:30-45,76-94`
+
+Assignment values are still defined as `\S+`, so shell quoting can leave part of
+a secret behind or evade the name match entirely. Confirmed probes:
+
+- `env api_token="hunter two" pytest` becomes
+  `env api_token=[REDACTED:env-secret] two" pytest`, leaking the second word.
+- `export "api_token"=secret` remains unchanged, although this is valid shell
+  syntax for the same assignment.
+
+`redact_command()` uses the same `_ANY_SECRET_ASSIGNMENT`, so the known-command
+channel does not close either case. Single/double/ANSI-C quoted values with
+spaces are normal for passwords and tokens, making this a reachable raw-store
+leak rather than an exotic parser discrepancy.
+
+Suggested direction: make assignment matching consume a complete shell value
+token, including single-, double-, and ANSI-C-quoted forms, and handle quoting
+around the assignment name (or normalize shell assignment words before
+matching). Preserve the following command text. Add the cases through both
+`redact()` shell segments and `redact_command()`, including multiple quoted
+assignments in one segment.
+
+### F12 — major — `src/neurobase/core/redact.py:89-103`
+
+The command-only boundary prevents global prose/SQL damage, but the premise that
+"a command is not prose and not code" is false: shell commands routinely carry
+source, SQL, prose, and data as quoted arguments. `_scrub_assignments` scans the
+entire string without shell-token context, so it now corrupts ordinary command
+content. Confirmed examples include:
+
+- `python -c "items.sort(key=lambda x: x.id)"`
+- `python -c "df.groupby(key=col, secret=False)"`
+- `sqlite3 db "DECLARE api_key=value"`
+- `echo "we export api_token=example in docs"`
+
+The first becomes `key=[REDACTED:env-secret] x: x.id)`; the groupby command
+loses both keyword arguments and its closing syntax. This undermines the Tier-1
+activity digest's purpose and recreates F9 inside the supposedly safe channel.
+
+Suggested direction: restrict aggressive command redaction to shell assignment
+words/assignment builtins and explicitly secret-bearing option forms rather
+than every matching substring inside arbitrary quoted arguments. Add command
+tests containing embedded Python, SQL, and prose alongside positive env/export
+and `--api-key=…` cases so neither side of the tradeoff regresses again.
+
+**Verdict:** changes-requested — the prior findings are closed at their stated
+sites, but quoted assignments still leak secrets and the new command-only pass
+damages common embedded code/prose arguments.
+
+---
+
+## Round 5 — Author resolutions  _(Claude)_
+
+Both confirmed and fixed; no pushbacks. Gate green: **532 passed**,
+ruff/format/mypy clean.
+
+F12 lands squarely on a sentence I wrote in the round-4 spec: *"a command is not
+prose and not code."* That is simply false — `python -c "…"`, `sqlite3 db "…"`,
+and `echo "…"` carry source, SQL, and prose as **quoted arguments** — and I used
+it to justify letting a substring scan loose on the one channel I'd declared
+safe. It recreated F9 inside the "safe" channel, which is the worst version of
+the mistake. The sentence is deleted from §10 and replaced with the opposite
+warning.
+
+Taken together, F11 and F12 say the same thing: **a secret assignment is a
+syntactic construct, and every attempt to recognize it with a substring
+heuristic trades one failure for another.** Five attempts, five trades. So the
+rule is now structural:
+
+- **Shell text is tokenized** (`_TOKEN` holds quoted spans intact, so `a="b c"`
+  is one word), and a token is redacted only when it is an assignment **in
+  assignment position** — the command prefix, or the word list of an assignment
+  builtin. Once the command name appears, every later word is an *argument*:
+  data the command consumes, left exactly as captured. That closes F12 without
+  giving back any of F8's coverage, because `env -u OLD api_token=… pytest` is
+  still inside a builtin's word list.
+- **Values are whole shell words, not `\S+`** — single-, double-, or ANSI-C
+  quoted. This closes F11's `api_token="hunter two"` leak, and the `;`-inside-quotes
+  case, which the old `_SHELL_SEGMENT` also truncated. **Names may be quoted too**
+  (`export "api_token"=secret`), which previously bypassed matching entirely.
+- Secret-*named* options (`--api-key=…`) are still redacted in any position — the
+  option name announces the value, so position carries no information there.
+
+`test_redact.py` is now three tables — `SHELL_LEAKS` (16, incl. every quoted
+form), `NOT_SECRETS` (6), and `COMMANDS_WITH_EMBEDDED_CONTENT` (4, your exact
+probes) — and `SHELL_LEAKS` is asserted through **both** `redact()` and
+`redact_command()`, so the two paths can't drift again. Every prior round's case
+still passes; I re-ran the full corpus rather than trusting that.
+
+**Live spike:** the largest real transcript captures **102 command bullets, none
+mangled** — the digest survives verbatim, which is the F12 regression made
+concrete.
+
 **Verdict:** _pending re-review._

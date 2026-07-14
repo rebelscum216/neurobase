@@ -73,13 +73,28 @@ the two failures are the instructive part:
   docs") and SQL, *and* still leaked the ordinary multi-assignment forms
   (`env PATH=/bin api_token=… pytest`, `env -u OLD api_token=… pytest`).
 
-§10's rules are therefore keyed on **context and position**: a keyword in
-*command position* (line start or after a shell separator) opens a segment, and
-every assignment within that segment is scrubbed case-insensitively. Separately,
-`redact_command` handles the channel we *know* is a shell command — §4's
-activity digest — with no keyword required at all, which is what lets the global
-table stay conservative. The line-anchored rule also now preserves the indent it
+- **A command is not "not prose and not code."** The third attempt gave the
+  known-command channel its own aggressive pass — and that pass, still a
+  substring scan, corrupted `python -c "items.sort(key=lambda x: x.id)"`,
+  `sqlite3 db "DECLARE api_key=value"`, and `echo "…"`. Shell commands routinely
+  carry source, SQL, and prose as **quoted arguments**. It also still matched
+  values as `\S+`, so `api_token="hunter two"` leaked ` two"` in the clear.
+
+The final rule is **structural**: shell text is *tokenized* (quoted spans held
+intact), and a token is redacted only when it is an assignment **in assignment
+position** — the command prefix, or the word list of an assignment builtin —
+plus secret-*named* options (`--api-key=…`) anywhere. Everything after the
+command name is an argument, i.e. data the command consumes, and is left exactly
+as captured. Values are matched as whole shell words, quoted or not, and a quoted
+*name* (`"api_token"=v`) still counts. `redact_command` reuses that same walker
+for §4's activity digest with no keyword required, which is what lets the global
+table stay conservative. The line-anchored rule also preserves the indent it
 consumes, so redaction cannot reflow a body's structure.
+
+The through-line across all five attempts: **a secret assignment is a syntactic
+construct, and every attempt to recognize it with a substring heuristic traded
+one failure for another.** Only parsing the structure — position, tokens, whole
+values — satisfied both directions at once.
 
 D13 is also confirmed as a **whole-raw** guarantee, not body-only: scribes scrub
 the informational frontmatter they write (`cwd`, `branch`), but never

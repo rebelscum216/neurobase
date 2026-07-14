@@ -165,7 +165,9 @@ may still be appended — that is not a content edit.)
 
 **Partial-failure contract:** only the *plan* step aborts the current and later
 batches (step 3). A first-batch failure leaves every raw unconsumed and changes
-nothing on disk — the v0.1 abort exactly. After one or more successful batches,
+nothing on disk — **state-equivalent** to the v0.1 abort (the returned summary
+itself is not identical: it carries the new `batches` key, like every other
+path). After one or more successful batches,
 their state remains applied and their raws consumed while the failed/later
 batches remain retryable (D22). If node synthesis or index rebuild fails *after*
 raws were consumed (steps 6→8), keep the applied state, log, and return
@@ -310,18 +312,26 @@ IDE context block, or a subagent report can contain its own headings, and the
 curator reads this document's structure. So every captured value MUST be
 rendered through both of these before it lands in the body:
 
-1. **Escape a leading `#` run on every line** (`## foo` → `\## foo`). Indenting
-   is *not* sufficient: CommonMark still parses a heading indented up to three
-   spaces.
+1. **Escape both CommonMark heading syntaxes.** ATX — a leading `#` run on any
+   line (`## foo` → `\## foo`). *And* Setext — a line of only `=` or `-`, which
+   underlines the line above it and promotes **that** line to a heading
+   retroactively (`\===`, `\---`). Escaping only ATX leaves the hole open, and
+   Setext is the easier one to miss because nothing about the promoted line
+   looks like a heading. Escaping the underline also defuses the same line read
+   as a thematic break. Indenting is *not* sufficient for either: CommonMark
+   still parses a heading indented up to three spaces.
 2. **Indent continuation lines by two spaces** for bullet-valued sections
    (`"- " + escaped.replace("\n", "\n  ")`), so a multi-line value stays inside
    its own list item.
 
-This applies to the section *bodies* too — §5's `## Files in focus (IDE)` and
-the `## Final assistant summary` — not only to bullets. The IDE block is the
-sharpest case: it precedes `## Prompts`, so a heading forged there shadows every
-section after it. The bounds make multi-line content the common case, not an
-edge one (prompts 1,200 chars; subagent reports 1,500).
+This applies to **every** value that comes from outside the scribe — not only
+the bullets. That includes the section *bodies* (§5's `## Files in focus (IDE)`
+and the `## Final assistant summary`) and the hook-supplied `reason`, which is
+captured input like any other and MUST NOT be interpolated raw into the
+`## Session` block. The IDE block is the sharpest case: it precedes `## Prompts`,
+so a heading forged there shadows every section after it. The bounds make
+multi-line content the common case, not an edge one (prompts 1,200 chars;
+subagent reports 1,500).
 
 ## 5. Codex scribe contract
 
@@ -561,8 +571,9 @@ first modification of any agent config file in a given init run.
 | `\bxox[baprs]-[A-Za-z0-9-]{10,}\b` | `[REDACTED:slack-token]` |
 | `\bghp_[A-Za-z0-9]{36}\b` and `\bgithub_pat_[A-Za-z0-9_]{20,}\b` | `[REDACTED:github-token]` |
 | `Bearer\s+[A-Za-z0-9._~+/=-]{20,}` | `Bearer [REDACTED:bearer]` |
+| (case-insensitive) `\b(export\|declare\|typeset\|local\|setenv\|env)((?:[ \t]+-\S+)*[ \t]+)(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the **keyword** and the name, value → `[REDACTED:env-secret]` |
 | (multiline, case-insensitive) `^([ \t]*)(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the **indent** and the name, value → `[REDACTED:env-secret]` |
-| `(?<![A-Za-z0-9_])(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the name, value → `[REDACTED:env-secret]` |
+| (case-**sensitive**) `(?<![A-Za-z0-9_])(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the name, value → `[REDACTED:env-secret]` |
 
 where `<SECRET_NAME>` is `[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*`.
 
@@ -571,16 +582,23 @@ Scope notes:
 - The env rules intentionally match only secret-ish variable names — a pasted
   `PATH=/usr/bin` survives. The `[REDACTED:<type>]` vocabulary above is closed;
   `extra_patterns` additions use `[REDACTED:custom]`.
-- The **first** rule is line-anchored and case-insensitive: `.env`-style lines.
-  It MUST capture and re-emit the leading indent — a scribe body's structural
-  indentation (§4) has to survive redaction, and `[ \t]` (not `\s`) keeps the
-  rule from ever swallowing a newline.
-- The **second** rule matches the same assignment *anywhere in a line* —
-  `export API_TOKEN=…`, `API_TOKEN=… cmd`. §4's command digest made this shape
-  reachable (a shell command is exactly where it lives) and the line-anchored
-  rule alone misses it. It is **case-sensitive** so ordinary code
-  (`sort(key=…)`) is not swallowed; the case-insensitive rule above still
-  covers lowercase `.env` lines.
+- Three rules cover assignments, because **the signal that "this is a secret
+  being set" differs by context**, and casing alone is too blunt a lever:
+  - **Shell-context** (`export API_TOKEN=…`, `env api_key=… cmd`,
+    `declare -x my_secret=…`). The *keyword* is what marks an assignment, so
+    this rule is **case-insensitive** — shell variable names are case-sensitive
+    but nothing requires them to be uppercase, and `export api_token=…` is a
+    perfectly ordinary way to leak a secret. §4's command digest is what makes
+    this shape reachable at all: a shell command is exactly where it lives.
+  - **Line-anchored** (`.env`-style lines), case-insensitive. It MUST capture
+    and re-emit the leading indent — a scribe body's structural indentation (§4)
+    has to survive redaction — and use `[ \t]` (not `\s`) so it can never
+    swallow a newline.
+  - **Bare inline** (`API_TOKEN=… cmd`, `foo && API_TOKEN=…`), where no keyword
+    disambiguates and the *name's shape* is the only signal. This one is
+    **case-sensitive**: lowercase would make ordinary keyword arguments
+    (`sort(key=…)`, `groupby(key=col, secret=False)`) collateral. Lowercase bare
+    assignments are still covered when they open a line or carry a keyword.
 - **Redact the captured value, not the rendered document.** A scribe MUST apply
   the table to each captured value *before* rendering it into the body: a
   structural prefix like `"- "` shifts text off column 0 and shields it from

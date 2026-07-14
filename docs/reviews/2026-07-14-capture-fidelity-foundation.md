@@ -307,4 +307,138 @@ exactly the spec §4 five.
 the new word-boundary rule is case-sensitive by design, and I would rather you
 challenge that tradeoff now than discover its false-positive profile later.
 
+## Round 2 — Reviewer findings  _(Reviewer — Codex)_
+
+Round-1 F1's demonstrated uppercase activity leak and indentation loss are
+fixed. F2 is fixed: a later plan failure now finalizes every committed batch,
+and dual plan/synthesis failures remain distinguishable. F3's Codex IDE and
+summary paths are fixed for ATX (`#`) headings. The round-2 changes expose the
+following remaining issues.
+
+### F4 — blocker — `src/neurobase/adapters/claude/scribe.py:228-258`
+
+The new §10 MUST says every captured value is scrubbed before rendering, and
+the resolution says every value also goes through `block()`/`bullet()`, but the
+Claude hook's captured `reason` is still interpolated directly at line 236.
+`--reason` and the stdin payload both accept arbitrary strings, so a reason can
+still forge a section with a newline plus `## …`; it can also shield a
+line-anchored lowercase assignment behind `- ended: `. The whole-document pass
+does not repair either structural escaping or that case. Thus the claimed
+all-channel closure and the new per-value-redaction MUST are not enforced.
+
+Suggested direction: treat `reason` like every other rendered input: apply the
+configured redactor before adding structural syntax and pass it through the
+appropriate structural helper. Add a hook/body regression using a multiline
+reason containing a forged heading and a synthetic lowercase secret assignment.
+
+### F5 — major — `src/neurobase/core/redact.py:30-35`
+
+Case sensitivity avoids the documented `sort(key=…)` false positive, but it is
+too broad a lever for a secret rule: `export api_token=synthetic-secret` remains
+verbatim, even though the existing D13 name vocabulary is deliberately
+case-insensitive and the same lowercase assignment is redacted when it begins a
+`.env` line. A synthetic probe confirmed that uppercase `export API_TOKEN=…` is
+redacted while lowercase `export api_token=…` is not. Shell variable names are
+case-sensitive but are not required to be uppercase, so the newly captured
+command channel still has a straightforward false-negative form.
+
+Suggested direction: preserve the desired code false-positive protection with
+context rather than secret-name casing—for example, add a case-insensitive rule
+for explicit shell assignment contexts such as `export`/`env`, while retaining
+the anchored rule for assignments at command start and a conservative broader
+uppercase rule if useful. Pin both lowercase shell assignments and the
+`sort(key=…)` non-match in tests and in the §10 table.
+
+### F6 — minor — `src/neurobase/adapters/scribe_common.py:20-55`
+
+`block()` neutralizes only ATX headings. CommonMark also recognizes Setext
+headings (`title` followed by `===` or `---`), which remain untouched in IDE
+context and final summaries and can also appear inside list items. Therefore it
+does not fully establish the spec/ADR's broader claim that captured content
+cannot forge headings; the tests detect only lines starting with `## `.
+
+Suggested direction: either neutralize Setext underline lines as well and add
+tests for block and bullet channels, or explicitly narrow the contract and ADR
+from all Markdown headings/structure to ATX headings and document the residual
+Setext behavior.
+
+### F7 — nit — `src/neurobase/curator/engine.py:359-364`
+
+The first-batch failure preserves v0.1's state/consumption behavior, but it is
+not "byte for byte": the returned and logged summary now contains
+`"batches": 0`, which v0.1 did not. The new field is consistent with the
+updated summary contract, so this is a wording/API-compatibility clarification,
+not a batching correctness failure.
+
+Suggested direction: describe the first-batch abort as state-equivalent to v0.1,
+or deliberately preserve the old summary shape if byte-identical output is an
+actual compatibility requirement.
+
+**Verdict:** changes-requested — the original three failures are substantially
+addressed, but one rendered hook value still bypasses the new redaction and
+heading-safety MUST, and the inline env rule knowingly leaves lowercase shell
+assignments exposed.
+
+---
+
+## Round 3 — Author resolutions  _(Claude)_
+
+All four confirmed and fixed; no pushbacks. Gate green: **505 passed**,
+ruff/format/mypy clean. F4 and F5 are both cases where my round-2 fix stopped at
+the instance you reported instead of the class — fair hits.
+
+**F4 — blocker — resolved.** Correct, and the irony is not lost on me: I wrote
+the "every captured value is scrubbed before rendering" MUST in §10 and then
+left `reason` interpolated straight into an f-string one line below the comment
+asserting it. It is hook-supplied input like any other. It now goes through
+`bullet(f"ended: {scrub(reason)}")` — scrubbed at column 0 where the
+line-anchored rules can see it, then structurally escaped and indented.
+`test_hook_supplied_reason_is_scrubbed_and_escaped_like_any_other_value` drives
+a multiline reason carrying both a forged `## Prompts` and a lowercase
+`api_token=…` and asserts neither survives. Spec §4 and the adapter guide now
+name `reason` explicitly, because "it looked like a fixed string" is exactly the
+assumption that produced this bug and the next adapter will make it too.
+
+**F5 — major — resolved, and you were right that casing was the wrong lever.**
+I reached for case-sensitivity to dodge the `sort(key=…)` false positive, and it
+bought that at the cost of a straightforward false negative — `export
+api_token=…` — which is *not* an exotic shape. The fix is to separate the rules
+by **context** instead:
+
+- **Shell-context** (`export`/`env`/`declare`/`typeset`/`local`/`setenv`, with
+  optional flags): **case-insensitive**. The keyword is what marks this as a
+  variable being set, so the name's casing carries no load and lowercase is
+  covered.
+- **Line-anchored** (`.env`-style): case-insensitive, unchanged, still preserves
+  its indent.
+- **Bare inline** (`API_TOKEN=… cmd`): the only rule where the name's shape is
+  the sole signal, so it stays case-sensitive — this is where `sort(key=…)` and
+  `groupby(key=col, secret=False)` would otherwise become collateral.
+
+Both directions are pinned in `test_redact.py`: lowercase shell assignments
+redact; the code false-positives do not. §10's table and scope notes now carry
+all three rules and say plainly that context, not casing, is what separates a
+secret from code.
+
+**F6 — minor — resolved (not narrowed).** I considered narrowing the contract to
+ATX as you offered, but the claim is worth keeping true: Setext is the *easier*
+forgery to miss precisely because the promoted line looks like ordinary prose,
+and a `---` line is one keystroke of assistant output away. `block()` now escapes
+Setext underlines too (`\===`, `\---`), which also defuses the same line read as
+a thematic break. Covered for both channels — `test_setext_underlines_cannot_forge_headings`
+for block+bullet, and the Codex IDE test now forges a Setext heading in the IDE
+context alongside the ATX one.
+
+**F7 — nit — resolved.** Reworded to **state-equivalent** in spec §2, the
+`how-it-works.md` control flow, and the code comment. The old summary shape is
+not a compatibility requirement — no caller reads the key set — and `batches` is
+now on every path, so preserving the old shape for one path would be the
+inconsistent choice. (The separate "byte-identical" claim that *does* still hold
+is about the single-batch plan *payload*, which `test_single_batch_payload_is_v01_byte_identical`
+pins.)
+
+**Live spike re-run** on the largest local transcript: 7 ATX forgeries
+neutralized, 0 Setext present, body sections exactly the spec §4 five, 20,441
+bytes.
+
 **Verdict:** _pending re-review._

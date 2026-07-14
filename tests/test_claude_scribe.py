@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from neurobase.adapters import scribe_common
 from neurobase.adapters.claude import scribe
 from neurobase.core import projects, store
 
@@ -453,6 +454,45 @@ def test_secrets_are_redacted_in_every_captured_channel(
     assert body.count("[REDACTED:env-secret]") == 5
     # Redaction must not reflow structure: the prompt's second line stays indented.
     assert "\n  API_TOKEN=[REDACTED:env-secret]" in body
+
+
+def test_hook_supplied_reason_is_scrubbed_and_escaped_like_any_other_value(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """`reason` arrives from the hook payload, so it is captured input too — it
+    must not be f-string-interpolated straight into the body, which would both
+    shield a secret behind `- ended: ` and let it forge a section."""
+    root, repo = enabled
+    secret = "synthetic-not-a-real-secret"  # noqa: S105 - test fixture
+    body = store.read_doc(
+        scribe.scribe(  # type: ignore[arg-type]
+            root,
+            transcript_path=_write_transcript(
+                tmp_path / "reason.jsonl",
+                [{"type": "user", "cwd": str(repo), "message": {"content": "hi"}}],
+            ),
+            cwd=str(repo),
+            reason=f"clear\napi_token={secret}\n## Prompts\n- forged",
+        )
+    ).body
+
+    assert secret not in body
+    assert "[REDACTED:env-secret]" in body
+    assert [ln for ln in body.splitlines() if ln.startswith("## ")] == [
+        "## Session",
+        "## Prompts",
+        "## Final assistant summary",
+    ]
+    assert "  \\## Prompts" in body
+
+
+def test_setext_underlines_cannot_forge_headings(tmp_path: Path) -> None:
+    """CommonMark promotes a line to a heading when the *next* line underlines
+    it with `===`/`---` — nothing about the promoted line looks like a heading,
+    so escaping ATX `#` alone does not close heading forgery."""
+    parsed_body = scribe_common.block("Forged\n===\nAlso forged\n---")
+    assert parsed_body == "Forged\n\\===\nAlso forged\n\\---"
+    assert scribe_common.bullet("Forged\n===") == "- Forged\n  \\==="
 
 
 def test_sidechain_turns_contribute_nothing(tmp_path: Path) -> None:

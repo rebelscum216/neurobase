@@ -27,11 +27,21 @@ _ENV_SECRET = re.compile(
     rf"^([ \t]*)({_SECRET_NAME})[ \t]*=[ \t]*\S+",
     re.MULTILINE | re.IGNORECASE,
 )
-# Shell-style: the same assignment anywhere in a line, e.g. `export API_TOKEN=…`
-# or `API_TOKEN=… cmd`. Reachable since the Claude scribe began capturing a
-# command digest (ADR-0013) — commands are exactly where this shape lives. Kept
-# case-sensitive and word-boundary-anchored so ordinary code (`sort_key=…`) is
-# not swallowed; the line-anchored rule above still covers lowercase `.env` lines.
+# Shell assignment *in an explicit assignment context* — `export API_TOKEN=…`,
+# `env api_token=… cmd`, `declare -x foo_secret=…`. The keyword is what tells us
+# this is a variable being set rather than a keyword argument in code, so this
+# rule can stay **case-insensitive** (shell names are case-sensitive but not
+# required to be uppercase) without swallowing `sort(key=…)`.
+_SHELL_ENV_SECRET = re.compile(
+    rf"\b(export|declare|typeset|local|setenv|env)((?:[ \t]+-\S+)*[ \t]+)({_SECRET_NAME})"
+    rf"[ \t]*=[ \t]*\S+",
+    re.IGNORECASE,
+)
+# Bare inline assignment with no keyword to disambiguate — `API_TOKEN=… cmd`,
+# `foo && API_TOKEN=…`. Here the *name's* shape is the only signal, so this one
+# stays case-sensitive: lowercase would make `sort(key=…)` and `items[key=x]`
+# collateral. Lowercase bare assignments are still covered when they open a line
+# (the `.env` rule above) or carry a keyword (the shell rule above).
 _INLINE_ENV_SECRET = re.compile(rf"(?<![A-Za-z0-9_])({_SECRET_NAME})[ \t]*=[ \t]*\S+")
 
 # Order matters: private keys span multiple lines and must be consumed before
@@ -50,7 +60,9 @@ def redact(text: str, extra_patterns: Iterable[str] = ()) -> str:
     """Apply the D13 redaction table (+ any config-supplied extras) to ``text``."""
     for pattern, replacement in _BUILTIN_PATTERNS:
         text = pattern.sub(replacement, text)
-    # env-secret rules keep the variable name (and any indent), redact the value.
+    # env-secret rules keep the variable name (and any indent/keyword), redact
+    # the value. Shell-context rule first: it is the most specific.
+    text = _SHELL_ENV_SECRET.sub(r"\1\2\3=[REDACTED:env-secret]", text)
     text = _ENV_SECRET.sub(r"\1\2=[REDACTED:env-secret]", text)
     text = _INLINE_ENV_SECRET.sub(r"\1=[REDACTED:env-secret]", text)
     for raw_pattern in extra_patterns:

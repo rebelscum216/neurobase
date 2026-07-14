@@ -233,7 +233,9 @@ def _assemble_body(parsed: dict[str, Any], reason: str, scrub: Redactor) -> str:
     summary = scrub(parsed["summary"][:MAX_SUMMARY_CHARS])
     lines = [
         "## Session",
-        f"- ended: {reason}",
+        # `reason` is hook-supplied, so it is captured input like any other: it
+        # gets the same scrub-then-render treatment, not f-string interpolation.
+        bullet(f"ended: {scrub(reason)}"),
         f"- prompts captured: {len(kept)}",
         "",
         "## Prompts",

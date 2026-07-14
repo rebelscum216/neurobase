@@ -357,8 +357,9 @@ def curate(
         return dry_summary
 
     if plan_error is not None and batch_count == 0:
-        # Nothing was applied: the v0.1 abort, byte for byte (D9). No derived
-        # state changed, so there is nothing to refresh.
+        # Nothing was applied: the v0.1 abort, state for state (D9). No derived
+        # state changed, so there is nothing to refresh. (The summary itself is
+        # not byte-identical to v0.1's — it carries the new `batches: 0`.)
         summary = {"status": "error", "raw": len(raw_docs), "batches": 0, "error": plan_error}
         _log_pass(root, project, summary)
         return summary

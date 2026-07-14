@@ -41,12 +41,15 @@ reports (1,500 chars) are routinely multi-line markdown; a live spike against
 the largest local transcript produced a 20 KB raw carrying **seven forged `##`
 sections**, including a content-supplied `## Final assistant summary`.
 
-1. **Escape a leading `#` run on every line, then indent bullet continuations**
-   (spec §4). Indentation alone is insufficient — CommonMark parses a heading
-   indented up to three spaces — so escaping is the load-bearing half. This
-   applies to section bodies too, not just bullets: §5's IDE context block is
-   the sharpest case, since it precedes `## Prompts` and a heading forged there
-   shadows every section after it.
+1. **Escape both heading syntaxes, then indent bullet continuations** (spec §4).
+   Indentation alone is insufficient — CommonMark parses a heading indented up
+   to three spaces — so escaping is the load-bearing half. Escaping only ATX
+   (`#`) is *also* insufficient: Setext underlines (`===` / `---`) promote the
+   line above them to a heading retroactively, and nothing about the promoted
+   line looks like a heading. Both are escaped. This applies to section bodies
+   and to the hook-supplied `reason`, not just bullets: §5's IDE context block
+   is the sharpest case, since it precedes `## Prompts` and a heading forged
+   there shadows every section after it.
 2. **Redact each captured value *before* rendering it, not the finished
    document** (spec §10). D13's env rule is line-anchored, so a `"- "` bullet
    prefix shifts the text off column 0 and shields it: `bullet()` then
@@ -57,10 +60,15 @@ sections**, including a content-supplied `## Final assistant summary`.
 Fixing (2) surfaced a second gap in the D13 table itself, independent of this
 branch: the env rule only ever matched a *line-initial* assignment, so
 `export API_TOKEN=<secret>` — the single most common way a secret appears in a
-shell command — was never redacted at all. §10 gains a case-sensitive
-word-boundary variant to cover it, kept case-sensitive so ordinary code
-(`sort(key=…)`) is not swallowed. The line-anchored rule also now preserves the
-indent it consumes, so redaction cannot reflow a body's structure.
+shell command — was never redacted at all. §10 now separates the assignment
+rules by **context rather than by casing**, which was the key correction: a
+first attempt used case-sensitivity as the lever to avoid swallowing
+`sort(key=…)`, but that silently left `export api_token=<secret>` exposed, and
+shell variable names are not required to be uppercase. The keyword in
+`export`/`env`/`declare` is what identifies a variable assignment, so that rule
+is case-insensitive; only the *bare* inline assignment — where the name's shape
+is the sole signal — stays case-sensitive. The line-anchored rule also now
+preserves the indent it consumes, so redaction cannot reflow a body's structure.
 
 ## Consequences
 

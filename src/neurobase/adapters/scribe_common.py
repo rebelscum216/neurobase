@@ -17,11 +17,17 @@ from collections.abc import Callable
 # before any markdown prefix can shield it from a line-anchored rule.
 Redactor = Callable[[str], str]
 
-# A `#` run opening any line of captured content. Session text is untrusted:
-# a prompt, an assistant message, or an IDE context block can contain its own
-# markdown headings, and rendered as-is they become *the raw document's own*
-# sections — content forging the structure the curator then reads.
-_LEADING_HEADING = re.compile(r"^([ \t]*)(#+)", re.MULTILINE)
+# Session text is untrusted: a prompt, an assistant message, or an IDE context
+# block can contain its own markdown headings, and rendered as-is they become
+# *the raw document's own* sections — content forging the structure the curator
+# then reads. CommonMark has TWO heading syntaxes and both must be neutralized.
+#
+# ATX: a `#` run opening a line.
+_ATX_HEADING = re.compile(r"^([ \t]*)(#+)", re.MULTILINE)
+# Setext: a line of only `=` or `-` *underlining* the paragraph line above it,
+# which promotes that line to a heading retroactively. Easy to miss — nothing
+# about the promoted line looks like a heading.
+_SETEXT_UNDERLINE = re.compile(r"^([ \t]*)(=+|-+)[ \t]*$", re.MULTILINE)
 
 # Tuned defaults (spec §8).
 MAX_ASSISTANT_MSG_CHARS = 500
@@ -48,11 +54,17 @@ def bounded_highlights(messages: list[str]) -> list[str]:
 def block(text: str) -> str:
     """Make one captured value safe to place in a capture body (spec §4).
 
-    Escapes the leading ``#`` of every line, so captured content can never
-    forge one of the body's own ``##`` sections. Indentation alone does not
-    close this: CommonMark still reads a heading indented up to three spaces.
+    Escapes **both** CommonMark heading syntaxes — an ATX ``#`` run opening a
+    line, and a Setext ``===``/``---`` underline, which promotes the line above
+    it to a heading — so captured content can never forge one of the body's own
+    sections. Indentation alone closes neither: CommonMark still reads a heading
+    indented up to three spaces.
+
+    Escaping the Setext underline also defuses the same line read as a thematic
+    break, which is the other way a value could inject document structure.
     """
-    return _LEADING_HEADING.sub(r"\1\\\2", text)
+    text = _ATX_HEADING.sub(r"\1\\\2", text)
+    return _SETEXT_UNDERLINE.sub(r"\1\\\2", text)
 
 
 def bullet(text: str) -> str:

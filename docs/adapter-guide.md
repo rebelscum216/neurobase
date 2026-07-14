@@ -48,7 +48,11 @@ A function that turns "a session/turn just ended" into **zero or one**
   `scribe_common.block()` (or `bullet()`, which wraps it) so a heading inside a
   prompt or an assistant message can't forge one of your body's own `##`
   sections — the curator reads that structure. Indenting is not enough on its
-  own; CommonMark still parses a heading indented up to three spaces.
+  own; CommonMark still parses a heading indented up to three spaces. Note
+  "every value" means *every* value: the section bodies, and anything the hook
+  payload hands you (Claude's `reason` is captured input too). The one that bit
+  us twice was assuming a value was structurally inert because it "looked like"
+  a fixed string.
 - **Opt-in.** Write only if the resolved project's memory tree already
   exists (i.e., the project ran `neurobase enable`) — a scribe must never
   create a store as a side effect of a hook firing.

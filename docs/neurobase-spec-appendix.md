@@ -659,22 +659,35 @@ Scope notes:
   caught. The rule that separates these from a wholly quoted *argument*
   (`'api_token=v'`, which MUST survive verbatim) is where the `=` lies: an
   assignment's `=` is at the **top level**, outside every quote.
-- **Commands that EXECUTE a string argument** — `eval '…'`, `sh -c "…"` (and
-  `bash`/`zsh`/`dash`/`ksh`) — are the one place a quoted argument is *code*, not
-  data, so their string is scrubbed as shell. The executor is honoured **only in
-  command position** (first word of the text or of a new command). This is the one
-  scrap of position tracking that survives, and it is safe *because it can only
-  under-arm*: `echo sh -c '…'` executes nothing, and arming there would delete a
-  quoted argument. A missed executor degrades to "treated as data" — never to
-  mangled input. **Residuals:** `sudo sh -c '…'` (executor not in command
-  position), and a secret in a string that some *other* command evals or that
-  `printf` assembles, are not redacted.
+  The shell also *expands* those fragments, so comparing their **raw text** to the
+  secret-name pattern is not enough: ANSI-C escapes MUST be decoded
+  (`api_$'to\x6ben'` is `api_token`), and a fragment containing a substitution or
+  variable (`api_"to$(printf ken)"`) makes the name **unknowable** — that MUST
+  fail **closed** and redact the value.
+- **A quoted argument is ALWAYS data — there is no executor exception.**
+  `eval '…'` and `sh -c "…"` do execute their string, and two attempts to detect
+  that both **leaked and mangled**: keying on any `sh`/`bash` token destroyed
+  `echo sh -c '…'` (which executes nothing), and keying on command position still
+  missed `env sh -c '…'` and `command sh -c '…'` while over-arming `sh -- -c '…'`
+  (after `--`, `-c` is the command *name*). Recognizing an executor is the POSIX
+  command grammar again, and the claim that such a gate "can only under-arm" was
+  false. **Declared residual:** a secret inside a string executed by `eval`/`sh -c`
+  is not redacted in the command channel. It is bounded and tested
+  (`test_executed_string_residual_is_known_and_bounded`); the prose rules still
+  see the text, so `.env`-shaped and uppercase inline forms in it are still caught.
+- **An assignment VALUE is a RUN of adjacent fragments**, quoted or bare — the
+  shell concatenates them into one word (`api_token="a b"tail` is a single value).
+  Matching one balanced fragment and stopping both leaks the rest of the secret
+  and leaves the marker abutting text, which the next pass then swallows.
 - **Redaction MUST be idempotent.** It is applied more than once to the same text
   — each captured value, then the whole assembled document as defense in depth —
   so a second pass MUST be a no-op. `[REDACTED:…]` contains no word-break
   character, so a value scanner that does not recognize the marker will read
   `[REDACTED:env-secret]export …` as one bare token and eat the following word.
-  An already-redacted value matches as *exactly the marker*.
+  An already-redacted value matches only when the marker is the **complete** value
+  (a marker *prefix* is not: `api_token=[REDACTED:env-secret]SECRET` must redact
+  the suffix, or a marker pasted into captured text becomes an escape hatch for
+  the secret beside it).
 - **Redaction MUST NOT delete captured input.** The scanners are heuristics and
   will sometimes disagree with a real shell; when they do, the failure must be a
   mis-scan, never a lost character. Reconstruct spans loss-proof (re-emit a

@@ -38,8 +38,20 @@ _SECRET_NAME = r"[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-
 # without this alternative a second pass reads `[REDACTED:env-secret]export …` as
 # ONE bare value token and replaces it — silently eating the following word.
 # Matching the marker alone makes the replacement a no-op, i.e. **idempotent**.
+#
+# The marker alternative requires a VALUE BOUNDARY after it. Accepting a marker
+# *prefix* made idempotence pass while a secret leaked:
+# `api_token=[REDACTED:env-secret]SECRET` was read as "already redacted, nothing
+# to do" and the trailing `SECRET` was left in the clear. A pre-existing marker in
+# captured text must never become an escape hatch for the text beside it.
 _MARKER = r"\[REDACTED:[a-z-]+\]"
-_VALUE = rf"""(?:{_MARKER}|"(?:\\.|[^"])*"|'[^']*'|\$'(?:\\.|[^'])*'|["'][^\n]*|[^\s;&|()<>]+)"""
+# A value is a RUN of adjacent fragments, quoted or bare — the shell concatenates
+# them into one word. Matching a single balanced fragment and stopping left the
+# rest of the word behind: `api_token="a b"export …` redacted only `"a b"`, and
+# the marker then abutted `export`, which the *next* pass swallowed as one token.
+# Non-idempotence and data loss from the same root: a value is not one fragment.
+_VALUE_FRAGMENT = r"""(?:"(?:\\.|[^"])*"|'[^']*'|\$'(?:\\.|[^'])*'|[^\s;&|()<>'"]+)"""
+_VALUE = rf"""(?:{_MARKER}(?=[\s;&|()<>]|$)|(?:{_VALUE_FRAGMENT})+|["'][^\n]*)"""
 # `.env`-style line: NAME=value, at the start of a line. `[ \t]*` (not `\s*`)
 # so the rule can never eat a newline, and the leading indent is *captured* and
 # re-emitted — a body's structural indentation must survive redaction (spec §4).
@@ -161,6 +173,21 @@ def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
 _SECRET_NAME_FULL = re.compile(rf"^{_SECRET_NAME}$", re.IGNORECASE)
 _NAME_CHARS = re.compile(r"""[A-Za-z0-9_]+""")
 _MARKER_RE = re.compile(_MARKER)
+# Syntax the shell EXPANDS inside a double-quoted fragment. If a name contains
+# any of it, the real name is unknowable without running the shell.
+_EXPANDS = re.compile(r"""\$\(|\$\{|\$[A-Za-z_]|`""")
+
+
+def _decode_ansi_c(fragment: str) -> str:
+    r"""Decode an ANSI-C quoted fragment (`$'to\x6ben'` → `token`), because the
+    shell does. Comparing the *raw* text against the secret-name pattern missed
+    `export api_$'to\x6ben'=<secret>`, which bash exports as `api_token`."""
+    try:
+        return fragment.encode("utf-8", "surrogateescape").decode("unicode_escape")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return fragment
+
+
 # A credential option: an ALLOW-LIST, never a `*key*` pattern — `--sort-key=name`,
 # `--key=id` and `--password-policy=strict` select and configure, they don't auth.
 _SECRET_OPTION_NAMES = frozenset(
@@ -178,14 +205,20 @@ _HEREDOC_OP = re.compile(r"""<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2""")
 # A word boundary: an assignment can only START a word. `\r` is here so a CRLF
 # command keeps its carriage return (dropping it deletes captured input).
 _WORD_BREAK = " \t\r\n;&|()<>"
-_SEPARATORS_RESET = frozenset({";", "&&", "||", "|"})
-# `eval "…"` and `sh -c "…"` EXECUTE their string argument. Under the "a quoted
-# argument is data" invariant those would be an unredacted channel, so the
-# executed string is scrubbed as shell instead. This is a narrow allow-list, not
-# a return of the position model: missing a shell here degrades to "treated as
-# data", which spec §10 records as a residual.
-_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-_BARE_WORD = re.compile(r"""[A-Za-z0-9_./-]+""")
+# There is NO executor inference. `eval '…'` / `sh -c '…'` execute their string
+# argument, and two attempts to detect that leaked AND mangled: keying on any
+# `sh`/`bash` token mangled `echo sh -c '…'` (which executes nothing), and keying
+# on command position still missed `env sh -c '…'` / `command sh -c '…'` while
+# over-arming `sh -- -c '…'` (after `--`, `-c` is the command NAME, and a data
+# argument was being destroyed). Detecting an executor is the POSIX command
+# grammar again, and the claim that it "can only under-arm" was simply false.
+#
+# So the invariant has no exception: **a quoted argument is ALWAYS data.** The
+# residual — a secret inside a string that `eval`/`sh -c` executes — is recorded
+# in spec §10. That is a bounded, honest leak; the alternative was an unbounded
+# grammar that destroyed captured commands. Note the body-level D13 pass still
+# sees the raw text, so `.env`-shaped and uppercase inline forms inside such a
+# string are still caught by the prose rules.
 # `${NAME:=value}` / `${NAME=value}` assign; `${NAME:-value}` does not.
 _EXPANSION_ASSIGN = re.compile(rf"""\$\{{({_SECRET_NAME}):?=""", re.IGNORECASE)
 
@@ -212,9 +245,6 @@ def _scrub_shell(text: str) -> str:
     index, size = 0, len(text)
     heredocs: list[tuple[str, bool]] = []  # (delimiter, strip_leading_tabs)
     at_word_start = True
-    executes_next = False  # the next quoted word is CODE (`eval …`, `sh -c …`)
-    shell_seen = False
-    at_command_start = True  # only an executor HERE can execute a string
 
     while index < size:
         char = text[index]
@@ -265,23 +295,14 @@ def _scrub_shell(text: str) -> str:
         if char == "'":
             end = text.find("'", index + 1)
             end = size if end == -1 else end + 1  # unterminated ⇒ to the end
-            # `eval '…'` / `sh -c '…'` — the quoted string is CODE the shell
-            # executes, not data it consumes, so it gets scrubbed like shell.
-            out.append(
-                _scrub_executed_string(text[index:end]) if executes_next else text[index:end]
-            )
-            executes_next = False
+            out.append(text[index:end])  # single quotes are inert — always data
             index = end
             at_word_start = False
             continue
 
         if char == '"':
             end = _end_of_double_quote(text, index)
-            span = text[index:end]
-            out.append(
-                _scrub_executed_string(span) if executes_next else _scrub_double_quoted(span)
-            )
-            executes_next = False
+            out.append(_scrub_double_quoted(text[index:end]))
             index = end
             at_word_start = False
             continue
@@ -328,39 +349,9 @@ def _scrub_shell(text: str) -> str:
             at_word_start = False
             continue
 
-        if at_word_start:
-            word = _BARE_WORD.match(text, index)
-            if word is not None:
-                token = word.group(0)
-                # Arm the executed-string channel ONLY when the executor is the
-                # command itself — the first word of the text or of a new command.
-                # `echo sh -c 'api_token=x'` does not execute anything; `echo`
-                # just prints it, and scrubbing that quoted argument would delete
-                # captured data. This is the ONE place a scrap of command position
-                # survives, and it is safe *because it can only under-arm*: a
-                # missed executor degrades to "treated as data" (a documented
-                # residual), never to mangled input. That asymmetry is the whole
-                # reason the general position model had to go — it failed the
-                # other way, on secrets.
-                if at_command_start:
-                    if token == "eval":
-                        executes_next = True
-                    elif token in _SHELLS:
-                        shell_seen = True
-                elif token == "-c" and shell_seen:
-                    executes_next = True
-                out.append(token)
-                index = word.end()
-                at_word_start = False
-                at_command_start = False
-                continue
-
         out.append(char)
         index += 1
         at_word_start = char in _WORD_BREAK
-        if char in ";&|\n(":
-            shell_seen = executes_next = False  # a new command begins
-            at_command_start = True
 
     return "".join(out)
 
@@ -374,14 +365,6 @@ def _scrub_expansion(span: str) -> str:
         return span
     closer = "}" if span.endswith("}") else ""
     return f"{match.group(0)}[REDACTED:env-secret]{closer}"
-
-
-def _scrub_executed_string(span: str) -> str:
-    """The string argument of `eval` / `sh -c` is CODE the shell executes, not
-    data it consumes, so it is scrubbed as shell. Quotes are preserved."""
-    if len(span) >= 2 and span[0] in "\"'" and span[-1] == span[0]:
-        return span[0] + _scrub_shell(span[1:-1]) + span[-1]
-    return _scrub_shell(span)
 
 
 def _scrub_substitution(text: str, start: int, end: int) -> str:
@@ -418,6 +401,7 @@ def _match_assignment_name(text: str, index: int) -> int:
     size = len(text)
     cursor = index
     name: list[str] = []
+    dynamic = False  # a fragment the shell EXPANDS — we cannot know the name
     while cursor < size:
         char = text[cursor]
         if char == "=":
@@ -433,16 +417,23 @@ def _match_assignment_name(text: str, index: int) -> int:
             end = _end_of_double_quote(text, cursor)
             if end > size or text[end - 1 : end] != '"':
                 return -1
-            name.append(text[cursor + 1 : end - 1])
+            fragment = text[cursor + 1 : end - 1]
+            # `api_"to$(printf ken)"=v` expands to `api_token=v`. We cannot run the
+            # shell, so a dynamic fragment means the name is UNKNOWABLE.
+            if _EXPANDS.search(fragment):
+                dynamic = True
+            name.append(fragment)
             cursor = end
             continue
-        if text.startswith("$'", cursor):  # ANSI-C quoting
+        if text.startswith("$'", cursor):  # ANSI-C quoting — the shell decodes it
             end = text.find("'", cursor + 2)
             if end == -1:
                 return -1
-            name.append(text[cursor + 2 : end])
+            name.append(_decode_ansi_c(text[cursor + 2 : end]))
             cursor = end + 1
             continue
+        if text.startswith(("$(", "${", "`"), cursor):
+            return -1  # a bare substitution here is a command word, not a name
         chunk = _NAME_CHARS.match(text, cursor)
         if chunk is None:
             return -1  # anything else (space, `/`, `.`, …) — not an assignment
@@ -450,7 +441,10 @@ def _match_assignment_name(text: str, index: int) -> int:
         cursor = chunk.end()
     if cursor >= size or text[cursor] != "=" or not name:
         return -1
-    if _SECRET_NAME_FULL.match("".join(name)) is None:
+    # Fail CLOSED on an unknowable name: `api_"$(…)"=<secret>` is redacted rather
+    # than guessed at. The cost is over-redacting a *dynamically named* assignment
+    # that happens not to be a secret — vanishingly rare, and only its value goes.
+    if not dynamic and _SECRET_NAME_FULL.match("".join(name)) is None:
         return -1
     return cursor + 1
 
@@ -474,8 +468,11 @@ def _skip_value(text: str, index: int) -> int:
     """
     size = len(text)
     already = _MARKER_RE.match(text, index)
-    if already is not None:
-        return already.end()  # already redacted ⇒ the value is exactly the marker
+    if already is not None and (already.end() >= size or text[already.end()] in _WORD_BREAK):
+        # Already redacted — but ONLY when the marker is the COMPLETE value. A
+        # marker *prefix* (`api_token=[REDACTED:env-secret]SECRET`) is not: taking
+        # it as one left the secret suffix in the clear while idempotence passed.
+        return already.end()
     while index < size:
         char = text[index]
         if char == "\\" and index + 1 < size:

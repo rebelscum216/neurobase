@@ -148,10 +148,19 @@ COMMAND_ONLY_LEAKS = [
     "echo $((API_TOKEN=SECRET))",
     # An ESCAPED backtick is how a legacy substitution nests.
     "echo `echo \\`api_token=SECRET ./run\\``",
-    # `eval` / `sh -c` EXECUTE their string argument: it is code, not data.
-    "eval 'api_token=SECRET ./run'",
-    'sh -c "api_token=SECRET ./run"',
-    'bash -c "api_token=SECRET ./run"',
+]
+
+# A DOCUMENTED RESIDUAL (spec §10), asserted so it cannot drift unnoticed.
+#
+# `eval '…'` and `sh -c '…'` execute their string argument, so a secret in there
+# is not redacted in the command channel. Detecting an executor requires the POSIX
+# command grammar — two attempts both LEAKED (`env sh -c …`, `command sh -c …`)
+# and MANGLED (`echo sh -c …` executes nothing; `sh -- -c …` makes `-c` the
+# command name). "A quoted argument is always data" has no exception, because
+# every exception has cost more than it bought.
+EXECUTED_STRING_RESIDUAL = [
+    "eval 'api_token=hunter2 ./run'",
+    'sh -c "api_token=hunter2 ./run"',
 ]
 
 # A quoted argument is DATA and must survive byte for byte — *including* when its
@@ -239,9 +248,23 @@ EXACT: list[tuple[str, str]] = [
     ('echo "$(api_token=SECRET ./run)"', f'echo "$(api_token={R} ./run)"'),
     ("echo api_token=SECRET\r\n", f"echo api_token={R}\r\n"),
     ("pytest --api-key=SECRET -q", f"pytest --api-key={R} -q"),
-    # executed strings: the executor must be the COMMAND, not an argument
-    ("eval 'api_token=SECRET ./run'", f"eval 'api_token={R} ./run'"),
-    ("echo sh -c 'api_token=SECRET'", "echo sh -c 'api_token=SECRET'"),  # data!
+    # names the SHELL assembles: quote-concatenated, ANSI-C escaped, dynamic
+    ('export api_"token"=SECRET', f'export api_"token"={R}'),
+    ("export api_$'token'=SECRET", f"export api_$'token'={R}"),
+    ("export api_$'to\\x6ben'=SECRET", f"export api_$'to\\x6ben'={R}"),  # decoded
+    ('export api_"to$(printf ken)"=SECRET', f'export api_"to$(printf ken)"={R}'),  # unknowable
+    # a marker in the INPUT is data, and must not shield the text beside it
+    ("api_token=[REDACTED:env-secret]SECRET ./run", f"api_token={R} ./run"),
+    # a value is a RUN of adjacent fragments — the shell concatenates them into
+    # one word. Redacting only the first left the rest of the secret behind, and
+    # left the marker abutting text for the next pass to swallow.
+    ('api_token="a b"tail ./run', f"api_token={R} ./run"),
+    ("echo 'already [REDACTED:env-secret] here'", "echo 'already [REDACTED:env-secret] here'"),
+    # NO executor inference: a quoted argument is ALWAYS data. Detecting `eval` /
+    # `sh -c` is the POSIX command grammar again — it leaked (`env sh -c …`) and
+    # mangled (`echo sh -c …`, `sh -- -c …`). The eval residual is in spec §10.
+    ("echo sh -c 'api_token=example'", "echo sh -c 'api_token=example'"),
+    ("sh -- -c 'api_token=example'", "sh -- -c 'api_token=example'"),
     # heredoc: body is data, but D13's assignment forms still apply to it
     (
         "cat > d.sh <<EOF\nexport API_TOKEN=SECRET\nEOF",
@@ -273,6 +296,42 @@ def test_redaction_is_idempotent(text: str) -> None:
     for scrub in (redact, redact_command):
         once = scrub(text)
         assert scrub(once) == once
+
+
+ALL_SAMPLES = (
+    [c for c, _ in EXACT]
+    + NOT_SECRETS
+    + COMMANDS_WITH_EMBEDDED_CONTENT
+    + QUOTED_ARGUMENTS_ARE_DATA
+    + HEREDOC_BODIES_ARE_DATA
+    + COMMAND_ONLY_LEAKS
+)
+
+
+@pytest.mark.parametrize("text", ALL_SAMPLES)
+def test_metamorphic_properties_hold(text: str) -> None:
+    """Properties checkable WITHOUT an oracle, over every sample we have.
+
+    An oracle (the exact table) says what one output should be; these say what
+    must be true of *every* output, which is what catches the case nobody wrote a
+    fixture for. Idempotence alone already exposed a live data-loss bug.
+    """
+    for scrub in (redact, redact_command):
+        once = scrub(text)
+        # 1. Idempotence — redaction runs twice on every capture (per value, then
+        #    over the whole document), so a second pass must be a no-op.
+        assert scrub(once) == once, once
+        # 2. A second pass creates or destroys no markers.
+        assert once.count("[REDACTED:") == scrub(once).count("[REDACTED:")
+        # 3. Marker conservation — a marker already present in the INPUT survives.
+        assert text.count("[REDACTED:") <= once.count("[REDACTED:")
+        # 4. Nothing outside a replaced value is deleted. Line breaks are the
+        #    cheapest proxy: they carry the command's structure. The one legal
+        #    exception is a `\<newline>` continuation, which is *part of* the
+        #    value the shell assembles, so redacting the value consumes it.
+        if "\\\n" not in text:
+            assert once.count("\n") == text.count("\n")
+            assert once.count("\r") == text.count("\r")
 
 
 @pytest.mark.parametrize(("command", "expected"), EXACT, ids=[c for c, _ in EXACT])
@@ -399,6 +458,21 @@ def test_redaction_never_deletes_captured_input() -> None:
 @pytest.mark.parametrize("command", NON_CREDENTIAL_OPTIONS)
 def test_selection_and_policy_options_are_not_credentials(command: str) -> None:
     assert redact_command(command) == command
+
+
+@pytest.mark.parametrize("command", EXECUTED_STRING_RESIDUAL)
+def test_executed_string_residual_is_known_and_bounded(command: str) -> None:
+    """Pins spec §10's residual rather than pretending it isn't there: a secret
+    inside a string that `eval`/`sh -c` executes is NOT redacted in the command
+    channel, because the quoted argument is treated as data.
+
+    If someone later adds executor detection, this test fails — and they must
+    then prove it neither leaks (`env sh -c …`) nor mangles (`echo sh -c …`,
+    `sh -- -c …`), which two attempts failed to do.
+    """
+    out = redact_command(command)
+    assert out == command  # unchanged: the quoted argument is data
+    assert "hunter2" in out  # the residual, stated plainly
 
 
 def test_heredoc_body_is_data_not_shell() -> None:

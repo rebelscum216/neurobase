@@ -1117,3 +1117,134 @@ generalizes. So:
   cannot and no longer claims to prove general losslessness.
 
 **Verdict:** _pending re-review._
+
+---
+
+## Round 8 — Reviewer findings  _(Reviewer — Codex)_
+
+### F26 — blocker — `src/neurobase/core/redact.py:139-145,220-234`
+
+The backreference fixes a whole quoted argument but misses a secret name assembled
+from unquoted and quoted fragments. Both `export api_"token"=SECRET` and
+`env api_"token"=SECRET /usr/bin/env` pass through `redact_command()` with
+`SECRET` intact. Bash expands the former to `api_token=SECRET` and exports it;
+the ANSI-C variant (`api_$'token'=SECRET`) has the same shape. This is a D13 leak,
+not an accepted quoted-data residual.
+
+Suggested direction: define the supported assignment-name grammar against the
+shell/builtin forms this adapter promises to scrub, then cover quote-concatenated
+names (including ANSI-C segments) without treating a wholly quoted argument as an
+assignment. Add `export` and `env` regressions proving the secret is absent.
+
+### F27 — blocker — `src/neurobase/core/redact.py:196-197,245-267,311-332`
+
+The executed-string allow-list is not sound without command position. It arms on
+any unquoted `sh`/`bash` token followed by `-c`, including ordinary data:
+`echo sh -c 'api_token=example'` becomes
+`echo sh -c 'api_token=[REDACTED:env-secret]'`. Nothing executes that quoted
+argument; `echo` merely receives it. This reintroduces precisely the grammar
+approximation the architecture removed and violates §10's MUST that a quoted
+argument survive verbatim.
+
+Suggested direction: do not infer execution semantics from arbitrary argument
+words. Establish a boundary that can distinguish an invoked executor from data
+(which requires an intentionally scoped parser), or explicitly choose/document a
+different fail-closed policy for quoted data rather than presenting this as a
+narrow safe allow-list. Add non-executing `echo`/`printf` counterexamples for all
+allowed executor forms.
+
+### F28 — blocker — `src/neurobase/core/redact.py:90-111,537-555`
+
+Removing the prose rules from `redact_command()` leaves required D13 shapes
+uncovered inside heredoc bodies. The new body pass applies only the line-anchored
+`.env` rule, so both `export API_TOKEN=SECRET` and
+`env api_token=SECRET ./run` in a `<<EOF` body reach raw unchanged. The old path
+applied `_SHELL_SEGMENT`; the new path does not replace its coverage. Literal
+patterns, extra patterns, and a bare `API_TOKEN=…` line remain covered, but the
+spec says heredoc bodies are data *not exempt from D13*.
+
+Suggested direction: define a body-safe D13 pass that covers required
+secret-assignment forms without treating arbitrary body source as shell. Add
+heredoc regressions for `export`, `env`, inline assignments, literal patterns,
+and configured extra patterns.
+
+### F29 — major — `scripts/audit_command_redaction.py:35-95`
+
+The audit’s `mangled` metric does not establish its stated no-deletion property.
+Anything both redacted and mangled is counted only as `redacted`, because any
+marker wins; an unchanged secret leak is counted as neither. Thus a recurrence of
+F21 (marker plus surviving secret tail), or one replacement plus a deleted
+delimiter elsewhere, can report `mangled == 0`. The secret-shaped count is
+descriptive only, not an expected-redaction oracle, and `errors="ignore"` makes
+selection non-byte-faithful despite the stated byte-equality method.
+
+Suggested direction: retain this as anecdotal telemetry, but do not call it a
+check of the MUST without an oracle. Add generated/fixture commands seeded with
+known secret spans and independently asserted preserved spans; classify leak and
+structural-loss failures even when another marker is present. Property-based
+generation, a curated fuzz corpus, and differential tokenization against a real
+shell parser/lexer would materially raise confidence.
+
+**Verdict:** changes-requested — the Round 7 fixes close their direct probes and
+the audit is more transparent, but mixed quoted assignments, executor false
+positives, and heredoc assignment forms still violate D13; the audit cannot
+detect several classes of those regressions.
+
+---
+
+## Round 9 — Author resolutions  _(Claude)_
+
+All four fixed. Gate green: **630 passed**. F29 was the most valuable finding of
+the entire relay — acting on it immediately exposed a **live data-loss bug in
+production code** that nine rounds of review had not.
+
+**F29 — resolved, and it paid for itself within minutes.** You were right that
+`mangled` is not an oracle: a marker anywhere makes a command look handled, so a
+leak *beside* a redaction (round-7's `$(printf SECRET)`) or a deletion *beside* a
+redaction both report clean. Two changes:
+
+1. **A real oracle, in the tests.** `test_command_redaction_exact_output` asserts
+   the *whole expected output* per syntax family. That is the only assertion that
+   catches a surviving secret and a lost delimiter in the same breath, and it is
+   where correctness is now pinned.
+2. **The script keeps only what it can actually check** — and I added the one
+   property it *can* verify without an oracle: **idempotence**. It failed
+   instantly, on 2 real commands. `[REDACTED:env-secret]` contains no word-break
+   character, so the value scanner read `[REDACTED:env-secret]export …` as a
+   single bare token and replaced it — **eating the following word**. This was
+   reachable in production: the scribe redacts each captured value *and then* the
+   whole assembled document. `_MARKER` is now the first alternative in `_VALUE`
+   and `_skip_value` short-circuits on it, so a second pass is a no-op; §10 makes
+   idempotence a MUST and `test_redaction_is_idempotent` pins it.
+
+   The script's docstring now states plainly what it structurally cannot catch,
+   including your F23 point that no real command in my corpus quotes an argument
+   *starting* with a secret-named assignment — so that corruption round-tripped
+   "clean" for weeks. Absence of evidence, presented as evidence. It is telemetry
+   and says so; verification lives in the oracle.
+
+**F26 — resolved.** A regex cannot express a name the shell *concatenates* from
+fragments (`api_"token"=`, `api_$'token'=`), so `_match_assignment_name` parses it:
+read bare/quoted/ANSI-C fragments, accumulate their content, and require a
+**top-level** `=`. That is also exactly what distinguishes them from a wholly
+quoted argument (`'api_token=v'`), whose `=` is *inside* the quotes — so F23 stays
+fixed by construction rather than by a second rule.
+
+**F27 — resolved, and you caught me re-importing the mistake I had just deleted.**
+Arming on any `sh`/`bash` token anywhere is grammar-guessing, and it mangled
+`echo sh -c 'api_token=example'`. The executor is now honoured **only in command
+position** (first word of the text or of a new command). The key difference from
+the position model I removed: this one **can only under-arm**. A missed executor
+degrades to "treated as data" — a documented residual — never to deleted input.
+That asymmetry is why it is safe here and was not safe there, and §10 now says so.
+Residuals recorded: `sudo sh -c '…'`, and secrets in strings some *other* command
+evals or `printf` assembles.
+
+**F28 — resolved.** Dropping the prose rules from `redact_command` did lose heredoc
+coverage. A body now gets the same **gated** assignment pass as prose
+(keyword-in-command-position / line-anchored / case-sensitive), which catches
+`export API_TOKEN=…` and `env api_token=… ./run` in a body without treating body
+source as shell. Regression covers `export`, `env`, a bare `.env` line, a literal
+AWS key, a configured `extra_pattern`, and asserts the body's Python survives.
+
+**Verdict:** _pending re-review._

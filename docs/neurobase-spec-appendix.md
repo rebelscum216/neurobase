@@ -639,8 +639,11 @@ Scope notes:
   **exactly** (`<<-` strips leading TABS only, never spaces). A `<<` inside a
   *quoted* argument is a bit-shift or prose, never a heredoc — treating it as one
   hides the following command from redaction entirely. The rest of the table
-  still applies to a heredoc body — `cat > .env <<EOF` is exactly where real
-  secrets live — but the shell assignment scrub steps around it.
+  still applies to a heredoc body — `cat > .env <<EOF` and `cat > deploy.sh <<EOF`
+  are exactly where real secrets live, so a body gets the same **gated** assignment
+  pass as prose (keyword-in-command-position / line-anchored / case-sensitive),
+  which catches `export API_TOKEN=…` and `env api_token=…` without treating body
+  source as shell. What a body does *not* get is the position-free command scrub.
 - **An assignment's VALUE can contain spaces without being quoted** — inside a
   substitution or expansion (`api_token=$(printf …)`). Value consumption MUST
   understand nested `$( )`, `${ }`, and backticks, or it stops at the first space
@@ -650,12 +653,28 @@ Scope notes:
   `$((NAME=value))` assigns. All are redacted. `${NAME:-value}` only substitutes
   and is left alone. An **escaped** backtick (`` \` ``) opens a *nested* legacy
   substitution and must be recursed into, not treated as a plain escape.
+- **An assignment NAME may be assembled from quoted and unquoted fragments** —
+  the shell concatenates them before the `=`, so `api_token=`, `"api_token"=`,
+  `api_"token"=` and `api_$'token'=` are all the same assignment and all MUST be
+  caught. The rule that separates these from a wholly quoted *argument*
+  (`'api_token=v'`, which MUST survive verbatim) is where the `=` lies: an
+  assignment's `=` is at the **top level**, outside every quote.
 - **Commands that EXECUTE a string argument** — `eval '…'`, `sh -c "…"` (and
   `bash`/`zsh`/`dash`/`ksh`) — are the one place a quoted argument is *code*, not
-  data, so their string is scrubbed as shell. This is a narrow allow-list, not a
-  return of position tracking: an unrecognized executor degrades to "treated as
-  data". **Residual:** a secret inside a string that some *other* command later
-  evals (or that is assembled by `printf`) is not redacted.
+  data, so their string is scrubbed as shell. The executor is honoured **only in
+  command position** (first word of the text or of a new command). This is the one
+  scrap of position tracking that survives, and it is safe *because it can only
+  under-arm*: `echo sh -c '…'` executes nothing, and arming there would delete a
+  quoted argument. A missed executor degrades to "treated as data" — never to
+  mangled input. **Residuals:** `sudo sh -c '…'` (executor not in command
+  position), and a secret in a string that some *other* command evals or that
+  `printf` assembles, are not redacted.
+- **Redaction MUST be idempotent.** It is applied more than once to the same text
+  — each captured value, then the whole assembled document as defense in depth —
+  so a second pass MUST be a no-op. `[REDACTED:…]` contains no word-break
+  character, so a value scanner that does not recognize the marker will read
+  `[REDACTED:env-secret]export …` as one bare token and eat the following word.
+  An already-redacted value matches as *exactly the marker*.
 - **Redaction MUST NOT delete captured input.** The scanners are heuristics and
   will sometimes disagree with a real shell; when they do, the failure must be a
   mis-scan, never a lost character. Reconstruct spans loss-proof (re-emit a

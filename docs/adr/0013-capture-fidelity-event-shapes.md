@@ -148,6 +148,24 @@ redirections, and quoted substitutions. The lesson generalizes: **when a
 security rule depends on approximating a grammar, stop approximating and remove
 the dependency.**
 
+Two rules fell out of the review's attack on the *evidence* rather than the code,
+and they are the most transferable part of this ADR:
+
+- **Redaction must be idempotent.** It runs twice on every capture (per value,
+  then over the whole document). The `[REDACTED:…]` marker contains no word-break
+  character, so a value scanner blind to it read `[REDACTED:env-secret]export …`
+  as one token and ate the following word. A live data-loss path, found by an
+  *idempotence* check — the one property a corpus round-trip can verify without
+  an oracle.
+- **A corpus round-trip has no oracle, so it cannot verify a MUST.** It knows what
+  changed, never what the output should have been: a leak *beside* a redaction and
+  a deletion *beside* a redaction both look like "redacted", and nothing in a real
+  corpus exercises a shape the corpus does not contain. The oracle is an
+  exact-expected-output table per syntax family (`test_command_redaction_exact_output`),
+  which catches a surviving secret and a lost delimiter in one assertion. The
+  corpus script is a canary over shapes fixtures might not imagine — telemetry,
+  not verification — and it says so.
+
 One further rule fell out of validating against reality rather than fixtures:
 **redaction must never delete captured input.** Round-tripping the whole local corpus
 caught a lone apostrophe inside a heredoc body making the substitution scanner

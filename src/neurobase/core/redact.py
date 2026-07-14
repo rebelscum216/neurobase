@@ -31,7 +31,15 @@ _SECRET_NAME = r"[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-
 # it. Only then the bare-word form.
 # The bare-word form stops at shell-structural closers, not just at whitespace:
 # `\S+` swallowed the `))` of `$((API_TOKEN=1))`, deleting captured structure.
-_VALUE = r"""(?:"(?:\\.|[^"])*"|'[^']*'|\$'(?:\\.|[^'])*'|["'][^\n]*|[^\s;&|()<>]+)"""
+#
+# An ALREADY-REDACTED value matches first, and this is load-bearing: redaction is
+# applied more than once to the same text (each captured value, then the whole
+# document as defense in depth). The marker contains no word-break character, so
+# without this alternative a second pass reads `[REDACTED:env-secret]export …` as
+# ONE bare value token and replaces it — silently eating the following word.
+# Matching the marker alone makes the replacement a no-op, i.e. **idempotent**.
+_MARKER = r"\[REDACTED:[a-z-]+\]"
+_VALUE = rf"""(?:{_MARKER}|"(?:\\.|[^"])*"|'[^']*'|\$'(?:\\.|[^'])*'|["'][^\n]*|[^\s;&|()<>]+)"""
 # `.env`-style line: NAME=value, at the start of a line. `[ \t]*` (not `\s*`)
 # so the rule can never eat a newline, and the leading indent is *captured* and
 # re-emitted — a body's structural indentation must survive redaction (spec §4).
@@ -72,16 +80,25 @@ _BUILTIN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
+def _redact_assignments_in_text(text: str) -> str:
+    """The D13 assignment rules for text that is NOT known to be a command —
+    prose, a code snippet, or a heredoc body.
+
+    All three are gated so ordinary content survives: the shell scrub runs only
+    on a segment led by an assignment keyword in command position, the `.env` rule
+    is line-anchored, and the bare inline rule is case-sensitive. An unquoted
+    `key=…` in a prompt is a keyword argument, not a secret.
+    """
+    text = _SHELL_SEGMENT.sub(lambda m: _scrub_shell(m.group(0)), text)
+    text = _ENV_SECRET.sub(r"\1\2=[REDACTED:env-secret]", text)
+    return _INLINE_ENV_SECRET.sub(r"\1=[REDACTED:env-secret]", text)
+
+
 def redact(text: str, extra_patterns: Iterable[str] = ()) -> str:
     """Apply the D13 redaction table (+ any config-supplied extras) to ``text``."""
     for pattern, replacement in _BUILTIN_PATTERNS:
         text = pattern.sub(replacement, text)
-    # A shell command sitting in prose (a pasted `export …` line) gets the full
-    # shell scrub; the rest of the text does not, because unquoted `key=…` in
-    # ordinary prose or code is a keyword argument, not a secret.
-    text = _SHELL_SEGMENT.sub(lambda m: _scrub_shell(m.group(0)), text)
-    text = _ENV_SECRET.sub(r"\1\2=[REDACTED:env-secret]", text)
-    text = _INLINE_ENV_SECRET.sub(r"\1=[REDACTED:env-secret]", text)
+    text = _redact_assignments_in_text(text)
     for raw_pattern in extra_patterns:
         text = re.sub(raw_pattern, "[REDACTED:custom]", text)
     return text
@@ -136,12 +153,14 @@ def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
 # `scripts/audit_command_redaction.py` is a local, reproducible smoke test of the
 # no-mangling MUST, not a general guarantee. Spec §10 records this.
 
-# `name=` opening an unquoted word. The name may itself be quoted, but the quote
-# must CLOSE before the `=` — `"api_token"=v` is an assignment; `'api_token=v'` is
-# an entire quoted ARGUMENT and must survive verbatim. The backreference is what
-# tells them apart; `["']?…["']?` matched the opening quote of a quoted argument
-# and ate its closing delimiter.
-_ASSIGN_HEAD = re.compile(rf"""(["']?)({_SECRET_NAME})\1=""", re.IGNORECASE)
+# An assignment NAME is a run of fragments, each bare or quoted, concatenated by
+# the shell before the `=`: `api_token=`, `"api_token"=`, and `api_"token"=` and
+# `api_$'token'=` are all the same assignment to bash. A regex cannot express
+# that, so `_match_assignment_name` parses it (see there for why the distinction
+# from a wholly quoted ARGUMENT — `'api_token=v'` — is the load-bearing part).
+_SECRET_NAME_FULL = re.compile(rf"^{_SECRET_NAME}$", re.IGNORECASE)
+_NAME_CHARS = re.compile(r"""[A-Za-z0-9_]+""")
+_MARKER_RE = re.compile(_MARKER)
 # A credential option: an ALLOW-LIST, never a `*key*` pattern — `--sort-key=name`,
 # `--key=id` and `--password-policy=strict` select and configure, they don't auth.
 _SECRET_OPTION_NAMES = frozenset(
@@ -195,6 +214,7 @@ def _scrub_shell(text: str) -> str:
     at_word_start = True
     executes_next = False  # the next quoted word is CODE (`eval …`, `sh -c …`)
     shell_seen = False
+    at_command_start = True  # only an executor HERE can execute a string
 
     while index < size:
         char = text[index]
@@ -221,14 +241,14 @@ def _scrub_shell(text: str) -> str:
         # (`export "api_token"=secret` is valid shell for the same assignment),
         # and a quote branch would otherwise swallow it as an opaque argument.
         if at_word_start:
-            head = _ASSIGN_HEAD.match(text, index)
-            if head is None:
+            after_name = _match_assignment_name(text, index)
+            if after_name == -1:
                 option = _OPTION_HEAD.match(text, index)
                 if option is not None and _is_credential_option(option.group(1)):
-                    head = option
-            if head is not None:
-                out.append(head.group(0))
-                index = _skip_value(text, head.end())
+                    after_name = option.end()
+            if after_name != -1:
+                out.append(text[index:after_name])
+                index = _skip_value(text, after_name)
                 out.append("[REDACTED:env-secret]")
                 at_word_start = False
                 continue
@@ -308,28 +328,39 @@ def _scrub_shell(text: str) -> str:
             at_word_start = False
             continue
 
-        if at_word_start:  # arm the executed-string channel on `eval` / `sh -c`
+        if at_word_start:
             word = _BARE_WORD.match(text, index)
             if word is not None:
                 token = word.group(0)
-                if token == "eval":
-                    executes_next = True
-                elif token in _SHELLS:
-                    shell_seen = True
+                # Arm the executed-string channel ONLY when the executor is the
+                # command itself — the first word of the text or of a new command.
+                # `echo sh -c 'api_token=x'` does not execute anything; `echo`
+                # just prints it, and scrubbing that quoted argument would delete
+                # captured data. This is the ONE place a scrap of command position
+                # survives, and it is safe *because it can only under-arm*: a
+                # missed executor degrades to "treated as data" (a documented
+                # residual), never to mangled input. That asymmetry is the whole
+                # reason the general position model had to go — it failed the
+                # other way, on secrets.
+                if at_command_start:
+                    if token == "eval":
+                        executes_next = True
+                    elif token in _SHELLS:
+                        shell_seen = True
                 elif token == "-c" and shell_seen:
                     executes_next = True
-                elif token in _SEPARATORS_RESET:
-                    shell_seen = executes_next = False
                 out.append(token)
                 index = word.end()
                 at_word_start = False
+                at_command_start = False
                 continue
 
         out.append(char)
         index += 1
         at_word_start = char in _WORD_BREAK
-        if char in ";&|\n":
+        if char in ";&|\n(":
             shell_seen = executes_next = False  # a new command begins
+            at_command_start = True
 
     return "".join(out)
 
@@ -368,6 +399,62 @@ def _scrub_substitution(text: str, start: int, end: int) -> str:
     return _scrub_shell(text[start:end])
 
 
+def _match_assignment_name(text: str, index: int) -> int:
+    """If a secret-named assignment head starts at ``index``, return the position
+    just past its ``=``; otherwise return ``-1``.
+
+    The shell concatenates quoted and unquoted fragments *before* the ``=``, so
+    all of these are the same assignment and all must be caught::
+
+        api_token=v      "api_token"=v      api_"token"=v      api_$'token'=v
+
+    The load-bearing distinction is against a **wholly quoted argument** —
+    ``echo 'api_token=v'`` — where the ``=`` lies *inside* the quotes. So: read
+    fragments, accumulating the unquoted *content* of each; the assignment exists
+    only if a **top-level** ``=`` follows. In `'api_token=v'` the `=` is consumed
+    by the quoted fragment, so no top-level `=` is ever seen, and the argument is
+    left verbatim.
+    """
+    size = len(text)
+    cursor = index
+    name: list[str] = []
+    while cursor < size:
+        char = text[cursor]
+        if char == "=":
+            break
+        if char == "'":
+            end = text.find("'", cursor + 1)
+            if end == -1:
+                return -1  # unterminated ⇒ not a well-formed name
+            name.append(text[cursor + 1 : end])
+            cursor = end + 1
+            continue
+        if char == '"':
+            end = _end_of_double_quote(text, cursor)
+            if end > size or text[end - 1 : end] != '"':
+                return -1
+            name.append(text[cursor + 1 : end - 1])
+            cursor = end
+            continue
+        if text.startswith("$'", cursor):  # ANSI-C quoting
+            end = text.find("'", cursor + 2)
+            if end == -1:
+                return -1
+            name.append(text[cursor + 2 : end])
+            cursor = end + 1
+            continue
+        chunk = _NAME_CHARS.match(text, cursor)
+        if chunk is None:
+            return -1  # anything else (space, `/`, `.`, …) — not an assignment
+        name.append(chunk.group(0))
+        cursor = chunk.end()
+    if cursor >= size or text[cursor] != "=" or not name:
+        return -1
+    if _SECRET_NAME_FULL.match("".join(name)) is None:
+        return -1
+    return cursor + 1
+
+
 def _is_credential_option(name: str) -> bool:
     return name.lower().replace("_", "-") in _SECRET_OPTION_NAMES
 
@@ -386,6 +473,9 @@ def _skip_value(text: str, index: int) -> int:
     credential.
     """
     size = len(text)
+    already = _MARKER_RE.match(text, index)
+    if already is not None:
+        return already.end()  # already redacted ⇒ the value is exactly the marker
     while index < size:
         char = text[index]
         if char == "\\" and index + 1 < size:
@@ -543,16 +633,19 @@ def _copy_heredoc_body(
     spaces (POSIX). A missing terminator means the body runs to the end of the
     text, which is also the safe reading: it is all data, not shell.
 
-    The body is data, but it is not exempt from D13: `cat > .env <<EOF` is exactly
-    where real secrets live, so each line still gets the `.env`-style rule. It is
-    line-anchored, so it cannot eat shell structure the way the prose rules would.
+    The body is data, but it is **not exempt from D13** (spec §10): `cat > .env
+    <<EOF` and `cat > deploy.sh <<EOF` are exactly where real secrets live. It gets
+    the same assignment pass as prose — which is gated (keyword in command
+    position / line-anchored / case-sensitive) precisely so that arbitrary source
+    in a body is not treated as shell. Redacting only `.env`-shaped lines here left
+    `export API_TOKEN=…` and `env api_token=… ./run` inside a body in the clear.
     """
     size = len(text)
     while index < size:
         line_end = text.find("\n", index)
         line_end = size if line_end == -1 else line_end + 1
         line = text[index:line_end]
-        out.append(_ENV_SECRET.sub(r"\1\2=[REDACTED:env-secret]", line))
+        out.append(_redact_assignments_in_text(line))
         index = line_end
         candidate = line.rstrip("\n")
         if (candidate.lstrip("\t") if strip_tabs else candidate) == delimiter:

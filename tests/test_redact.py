@@ -162,6 +162,13 @@ QUOTED_ARGUMENTS_ARE_DATA = [
     'python -c "api_token=example"',
     "echo 'hello world'",
     "echo ${API_TOKEN:-default}",  # `:-` substitutes, it does not assign
+    # An executor NAME appearing as an argument executes nothing. Arming on any
+    # `sh`/`bash`/`eval` token anywhere would mangle these — it is armed only when
+    # the executor is the command itself.
+    "echo sh -c 'api_token=example'",
+    'echo bash -c "api_token=example"',
+    "echo eval 'api_token=example'",
+    "printf '%s' 'api_token=example'",
 ]
 
 # `key`/`secret`/`password` appear constantly in options that SELECT or CONFIGURE
@@ -203,6 +210,77 @@ COMMANDS_WITH_EMBEDDED_CONTENT = [
     'sqlite3 db "DECLARE api_key=value"',
     'echo "we export api_token=example in docs"',
 ]
+
+
+R = "[REDACTED:env-secret]"
+
+# The EXACT-OUTPUT oracle. The boolean assertions elsewhere ("no SECRET" +
+# "a marker appeared") are each half-blind: a marker can coexist with a surviving
+# secret tail, and a marker can coexist with a deleted delimiter somewhere else in
+# the command. Both have actually happened here. Writing the whole expected string
+# is the only assertion that catches a leak and a structural loss at once, so
+# every syntax family gets one.
+EXACT: list[tuple[str, str]] = [
+    # value forms
+    ("api_token=SECRET ./run", f"api_token={R} ./run"),
+    ('env api_token="SECRET two" x', f"env api_token={R} x"),
+    ("api_token=$(printf SECRET) x", f"api_token={R} x"),
+    ("api_token=`printf SECRET` x", f"api_token={R} x"),
+    ('api_token="SECRET two', f"api_token={R}"),  # unterminated ⇒ fail closed
+    # name forms — bare, quoted, and quote-CONCATENATED (the shell joins them)
+    ('export "api_token"=SECRET', f'export "api_token"={R}'),
+    ('export api_"token"=SECRET', f'export api_"token"={R}'),
+    ("export api_$'token'=SECRET", f"export api_$'token'={R}"),
+    # assignment-shaped syntax that is not an assignment WORD
+    ("echo ${API_TOKEN:=SECRET}", f"echo ${{API_TOKEN:={R}}}"),
+    ("echo $((API_TOKEN=SECRET))", f"echo $((API_TOKEN={R}))"),
+    # structure around the value survives exactly
+    ("echo ok; api_token=SECRET ./run", f"echo ok; api_token={R} ./run"),
+    ('echo "$(api_token=SECRET ./run)"', f'echo "$(api_token={R} ./run)"'),
+    ("echo api_token=SECRET\r\n", f"echo api_token={R}\r\n"),
+    ("pytest --api-key=SECRET -q", f"pytest --api-key={R} -q"),
+    # executed strings: the executor must be the COMMAND, not an argument
+    ("eval 'api_token=SECRET ./run'", f"eval 'api_token={R} ./run'"),
+    ("echo sh -c 'api_token=SECRET'", "echo sh -c 'api_token=SECRET'"),  # data!
+    # heredoc: body is data, but D13's assignment forms still apply to it
+    (
+        "cat > d.sh <<EOF\nexport API_TOKEN=SECRET\nEOF",
+        f"cat > d.sh <<EOF\nexport API_TOKEN={R}\nEOF",
+    ),
+    (
+        "cat <<'PY'\nitems.sort(key=lambda x: x.id)\nPY",
+        "cat <<'PY'\nitems.sort(key=lambda x: x.id)\nPY",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [c for c, _ in EXACT] + NOT_SECRETS + COMMANDS_WITH_EMBEDDED_CONTENT,
+    ids=None,
+)
+def test_redaction_is_idempotent(text: str) -> None:
+    """Redaction runs MORE THAN ONCE over the same text — the scribe scrubs each
+    captured value, then the whole assembled document as defense in depth. So a
+    second pass must be a no-op.
+
+    It wasn't: `[REDACTED:env-secret]` contains no word-break character, so the
+    value scanner read `[REDACTED:env-secret]export …` as a single bare token and
+    replaced it, **silently eating the following word**. Caught by the idempotence
+    check in `scripts/audit_command_redaction.py`, which is the one real property
+    that script can test without an oracle.
+    """
+    for scrub in (redact, redact_command):
+        once = scrub(text)
+        assert scrub(once) == once
+
+
+@pytest.mark.parametrize(("command", "expected"), EXACT, ids=[c for c, _ in EXACT])
+def test_command_redaction_exact_output(command: str, expected: str) -> None:
+    """Byte-exact expectation: catches a surviving secret AND a deleted delimiter
+    in one assertion. `scripts/audit_command_redaction.py` structurally cannot —
+    it has no oracle for what the output *should* be, only for what changed."""
+    assert redact_command(command) == expected
 
 
 @pytest.mark.parametrize("command", SHELL_LEAKS)
@@ -259,6 +337,28 @@ def test_unquoted_credential_named_argument_is_redacted_by_design(command: str) 
 @pytest.mark.parametrize("command", HEREDOC_BODIES_ARE_DATA)
 def test_heredoc_bodies_are_data_not_shell(command: str) -> None:
     assert redact_command(command) == command
+
+
+def test_heredoc_body_is_data_but_not_exempt_from_d13() -> None:
+    """A body is data — and `cat > .env <<EOF` / `cat > deploy.sh <<EOF` is exactly
+    where real secrets live. It gets the same *gated* assignment pass as prose, so
+    `export`/`env`/`.env` forms are caught while body source is left alone."""
+    command = (
+        "cat > deploy.sh <<EOF\n"
+        "export API_TOKEN=hunter2\n"
+        "env api_token=hunter2 ./run\n"
+        "MY_SECRET=hunter2\n"
+        "items.sort(key=lambda x: x.id)\n"
+        "aws AKIAABCDEFGHIJKLMNOP\n"
+        "internal-id-77123\n"
+        "EOF"
+    )
+    out = redact_command(command, extra_patterns=[r"internal-id-\d+"])
+    assert "hunter2" not in out
+    assert out.count("[REDACTED:env-secret]") == 3
+    assert "[REDACTED:aws-key]" in out  # literal shapes still apply to a body
+    assert "[REDACTED:custom]" in out  # configured extra patterns too
+    assert "items.sort(key=lambda x: x.id)" in out  # body source untouched
 
 
 @pytest.mark.parametrize("command", QUOTED_ARGUMENTS_ARE_DATA)

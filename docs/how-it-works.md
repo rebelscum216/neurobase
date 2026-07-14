@@ -274,7 +274,7 @@ This subsystem is the "outer shell" of Neurobase: it defines how the project is 
 
 The single build/config manifest for the project, using a `[project]` (PEP 621) table plus `[tool.*]` sections for the dev toolchain.
 
-- **Identity**: package name is `neurobase-cli` (PyPI/distribution name — deliberately distinct from the importable module `neurobase`), version `0.1.0.dev0`, `requires-python = ">=3.11"`, license `Apache-2.0` with `license-files = ["LICENSE"]`.
+- **Identity**: package name is `neurobase-cli` (PyPI/distribution name — deliberately distinct from the importable module `neurobase`), version `0.1.0`, `requires-python = ">=3.11"`, license `Apache-2.0` with `license-files = ["LICENSE"]`.
 - **Runtime dependencies** (`dependencies`), each pinned to a rationale:
   - `typer>=0.12` — the CLI framework; the `app = typer.Typer(...)` object in `src/neurobase/cli/__init__.py` is the router for every non-hook command.
   - `pyyaml>=6.0` — reading/writing the YAML frontmatter and config files used throughout the store/curator/adapters.

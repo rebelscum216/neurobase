@@ -4,13 +4,15 @@
 
 Neurobase is **local-first with zero cloud dependency and zero telemetry,
 permanently.** Everything it writes lives under your store root (default
-`~/neurobase`) or your agent's own config files, on disk, in local,
-inspectable files: markdown for facts/nodes, TOML for config/registry, and
-JSON/JSONL for backup manifests, the recommender ledger, and agent hook
-configs. There is no Neurobase-run server, no analytics call, and no
-phone-home of any kind — this isn't a policy promise layered on top of the
-code, it's the absence of any network client in the codebase outside the
-pieces below.
+`~/neurobase`), your agent's own config files, or — only when you explicitly
+run `neurobase recommend accept` — a `SKILL.md`/`AGENTS.md`/`CLAUDE.md`
+artifact in the repo you accepted it into. In every case it's on disk, in
+local, inspectable files: markdown for facts/nodes/accepted artifacts, TOML
+for config/registry, and JSON/JSONL for backup manifests, the recommender
+ledger, and agent hook configs. There is no Neurobase-run server, no
+analytics call, and no phone-home of any kind — this isn't a policy promise
+layered on top of the code, it's the absence of any network client in the
+codebase outside the pieces below.
 
 The only network calls Neurobase's own code can make are the ones you already
 made possible yourself:

@@ -72,7 +72,7 @@ in particular moves — verify current numbers before quoting them elsewhere.
 | Storage | Markdown, wikilinked | Markdown, wikilinked (Obsidian) | SQLite + Orama search | Postgres + Qdrant (Docker) |
 | Cross-agent | Claude Code + Codex CLI (hooks + MCP) | Any MCP client | Many agents (MCP + plugins) | Any MCP client |
 | Fact set | Curator **folds & deletes** — small, current, non-redundant | Editable notes (`write_note`/`edit_note`/`delete_note`), no automatic curation | Notes + generated briefs; no documented automatic pruning | Vector-recalled memories, no documented automatic pruning |
-| Skill/rule promotion | **Mines the corpus for recurring patterns, proposes SKILL.md/AGENTS.md, and tracks accept/edit/reject + 30-day survival per proposal** | — | Has a `memorix promote` command into skill files; README doesn't document automatic pattern-mining or post-promotion tracking | — |
+| Skill/rule promotion | **Mines the corpus for recurring patterns, proposes SKILL.md/AGENTS.md, and tracks accept/edit/reject + 30-day survival per proposal** | — | Has `memorix skills` (CLI) / `memorix_promote` (MCP tool) to promote knowledge into skill files; README doesn't document automatic pattern-mining or post-promotion tracking | — |
 | Cost | Free | Free, self-hosted + a paid hosted-sync tier (check current pricing — it's changed more than once) | Free | Free self-hosted (mem0 also sells a cloud product) |
 
 What basic-memory and Memorix do well, they do well — a mature markdown+

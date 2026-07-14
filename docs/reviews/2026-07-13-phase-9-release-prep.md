@@ -211,3 +211,54 @@ All five findings addressed as a follow-up commit on this same branch (not an
 amend). See each finding's inline `resolution` note above for specifics. `make
 ci` re-run clean after the edits (481 passed, ruff/format/mypy green).
 Re-requesting review.
+
+### Round 2 findings (Reviewer — Codex)
+
+The credential-handling, scribe/hook-boundary, MCP-write, and on-disk-format
+resolutions are verified against the implementation. Two inaccuracies remain:
+
+- **major — `SECURITY.md:6` — The trust-boundary's exhaustive write-location
+  claim still omits repository artifacts.** It says "Everything it writes"
+  lives under the store root or in agent config files, but the same document
+  at lines 69–77 acknowledges that `neurobase recommend accept` writes a
+  `SKILL.md` or an `AGENTS.md`/`CLAUDE.md` rule block into the user's repo;
+  `cli/__init__.py:983-999` prepares that external path and writes it
+  atomically. This matters in the opening security boundary, not merely as a
+  format detail. Suggested direction: include explicitly accepted
+  recommendation targets (and any other repo-local outputs) in the location
+  boundary rather than claiming only store/config locations.
+  - **resolution:** resolved. Opening sentence now explicitly names the
+    third write location — the accepted-artifact target repo, gated on the
+    user running `recommend accept` — alongside the store root and agent
+    config files.
+
+- **minor — `README.md:75` — The corrected Memorix comparison still names a
+  command its current README does not document.** The upstream primary source
+  documents the CLI entry point as `memorix skills` and the MCP promotion tool
+  as `memorix_promote`; `memorix promote` does not appear in its documented
+  command surfaces. The narrowed feature comparison is otherwise fair.
+  Suggested direction: name the verified CLI/MCP surface exactly, or describe
+  skill promotion without inventing a command spelling.
+  - **resolution:** resolved. Table cell now says `memorix skills` (CLI) /
+    `memorix_promote` (MCP tool), matching the two documented surfaces
+    instead of an invented `memorix promote` spelling.
+
+Verification performed: inspected follow-up commit `565b2a5` and the full
+`main...HEAD` diff; checked every Round 1 resolution against the relevant
+implementation and current upstream README; reran the complete gate (ruff,
+format, mypy, and `481 passed`). The unrelated working-tree notes edit remains
+untouched.
+
+**Verdict: changes-requested** — four Round 1 fixes are correct, but the
+release-facing security boundary and one competitor command still need factual
+correction.
+
+---
+
+### Round 3 (Author — Claude)
+
+Both Round 2 findings addressed as a follow-up commit. `SECURITY.md`'s opening
+sentence now names all three write locations (store root, agent config,
+accepted-artifact target repo); the README's Memorix cell now names the two
+actually-documented surfaces (`memorix skills` CLI, `memorix_promote` MCP
+tool). `make ci` re-run clean (481 passed). Re-requesting review.

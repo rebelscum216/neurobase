@@ -14,17 +14,14 @@ patterns and proposes promoting them into standard **SKILL.md** and
 It all runs on your machine, on the agent subscriptions you already pay for, with
 **zero cloud dependency and zero telemetry — permanently.**
 
-> **Status: release-ready, pending PyPI publication.** The full loop is
-> implemented for Claude Code and Codex CLI: deterministic capture, an LLM
-> curator that folds and deletes, cross-agent recall, consent-first hook
-> installers, an MCP server, and the v1 recommender (mine → rank → propose →
-> accept/reject/edit → metrics) — see [CHANGELOG.md](CHANGELOG.md) for the full
-> `0.1.0` scope. Docs ([SECURITY.md](SECURITY.md),
-> [docs/adapter-guide.md](docs/adapter-guide.md),
-> [CONTRIBUTING.md](CONTRIBUTING.md)) and the trusted-publishing release
-> workflow are in place; the `v0.1.0` tag and PyPI publish are the last step.
-> Until that lands, install from source below. Treat the current install path
-> as "works on the maintainer's machine," not yet "battle-tested by strangers."
+> **Status: `0.1.0` — the first public release.** The full loop is implemented
+> for Claude Code and Codex CLI: deterministic capture, an LLM curator that
+> folds and deletes, cross-agent recall, consent-first hook installers, an MCP
+> server, and the v1 recommender (mine → rank → propose → accept/reject/edit →
+> metrics) — see [CHANGELOG.md](CHANGELOG.md) for the full scope. This is a
+> young, solo-maintained project: "works as designed and live-verified by the
+> maintainer," not yet "battle-tested by strangers on every platform." File an
+> issue if something doesn't match what's documented here.
 
 ## How it works
 
@@ -87,7 +84,14 @@ that actively deletes instead of just accumulating, is the actual bet.
 
 ## Quickstart
 
-Neurobase is not published to PyPI yet. From a local checkout:
+```bash
+uv tool install neurobase-cli     # command: `neurobase`
+```
+
+(`neurobase-cli` because `neurobase` is taken on PyPI — decision D2. `pip
+install` works too; `uv` is recommended, not required.)
+
+Building from a checkout instead? From the repo root:
 
 ```bash
 uv tool install .     # installs the `neurobase` command
@@ -154,15 +158,6 @@ neurobase uninstall
 
 Use `neurobase uninstall --purge-store` only when you also want to delete the
 local store.
-
-Once Neurobase is published, the install command will pull from PyPI directly:
-
-```bash
-uv tool install neurobase-cli     # command: `neurobase`
-```
-
-(`neurobase-cli` because `neurobase` is taken on PyPI — decision D2. `pip install`
-will also work; `uv` recommended, not required.)
 
 ## Documentation
 

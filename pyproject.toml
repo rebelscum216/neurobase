@@ -1,6 +1,6 @@
 [project]
 name = "neurobase-cli"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Local-first, cross-agent memory layer for coding agents — captures, curates, injects, and recommends."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,7 +9,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "The Neurobase Authors" }]
 keywords = ["memory", "agents", "claude-code", "codex", "mcp", "local-first", "obsidian"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3.11",

@@ -108,7 +108,7 @@ def _redact_assignments_in_text(text: str) -> str:
     return _INLINE_ENV_SECRET.sub(r"\1=[REDACTED:env-secret]", text)
 
 
-def _apply_extra_patterns(text: str, extra_patterns: Iterable[str]) -> str:
+def _apply_extra_patterns(text: str, extra_patterns: Iterable[re.Pattern[str]]) -> str:
     """Apply configured regexes to unredacted spans and return a fixed point.
 
     Markers are opaque: a custom pattern may be deliberately broad, but it must
@@ -124,7 +124,7 @@ def _apply_extra_patterns(text: str, extra_patterns: Iterable[str]) -> str:
     make ``$`` treat a marker boundary as end-of-string; requiring the same match
     to start in the complete string rejects that artificial anchor.
     """
-    patterns = tuple(re.compile(raw_pattern) for raw_pattern in extra_patterns)
+    patterns = tuple(extra_patterns)
     changed = True
     while changed:
         changed = False
@@ -140,6 +140,28 @@ def _apply_extra_patterns(text: str, extra_patterns: Iterable[str]) -> str:
                 for start, end in reversed(spans):
                     text = text[:start] + _CUSTOM_MARKER + text[end:]
     return text
+
+
+def _compile_extra_patterns(extra_patterns: Iterable[str]) -> tuple[re.Pattern[str], ...]:
+    return tuple(re.compile(raw_pattern) for raw_pattern in extra_patterns)
+
+
+def _apply_redactions(text: str, extra_patterns: Iterable[str], *, command: bool) -> str:
+    """Apply built-ins and configured extras to a fixed point.
+
+    Extras can expose a built-in assignment boundary by replacing an adjacent
+    character with a marker. The public calls must therefore stabilize the
+    composed system, not only the extras among themselves.
+    """
+    patterns = _compile_extra_patterns(extra_patterns)
+    while True:
+        before = text
+        for pattern, replacement in _BUILTIN_PATTERNS:
+            text = pattern.sub(replacement, text)
+        text = _scrub_shell(text) if command else _redact_assignments_in_text(text)
+        text = _apply_extra_patterns(text, patterns)
+        if text == before:
+            return text
 
 
 def _custom_match_spans(
@@ -160,10 +182,7 @@ def _custom_match_spans(
 
 def redact(text: str, extra_patterns: Iterable[str] = ()) -> str:
     """Apply the D13 redaction table (+ any config-supplied extras) to ``text``."""
-    for pattern, replacement in _BUILTIN_PATTERNS:
-        text = pattern.sub(replacement, text)
-    text = _redact_assignments_in_text(text)
-    return _apply_extra_patterns(text, extra_patterns)
+    return _apply_redactions(text, extra_patterns, command=False)
 
 
 def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
@@ -182,10 +201,7 @@ def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
     (private keys, AWS/GitHub/Slack tokens, bearers) still apply — those are shape
     matches, not syntax.
     """
-    for pattern, replacement in _BUILTIN_PATTERNS:
-        text = pattern.sub(replacement, text)
-    text = _scrub_shell(text)
-    return _apply_extra_patterns(text, extra_patterns)
+    return _apply_redactions(text, extra_patterns, command=True)
 
 
 # --- shell scrubbing --------------------------------------------------------
@@ -225,17 +241,111 @@ _NAME_CHARS = re.compile(r"""[A-Za-z0-9_]+""")
 _EXPANDS = re.compile(r"""\$\(|\$\{|\$[A-Za-z_]|`""")
 
 
-def _decode_ansi_c(fragment: str) -> str:
-    r"""Decode an ANSI-C quoted fragment (`$'to\x6ben'` → `token`), because the
-    shell does. Comparing the *raw* text against the secret-name pattern missed
-    `export api_$'to\x6ben'=<secret>`, which bash exports as `api_token`."""
-    try:
-        decoded = fragment.encode("utf-8", "surrogateescape").decode("unicode_escape")
-    except (UnicodeDecodeError, UnicodeEncodeError):
-        return fragment
-    # Bash strings cannot contain NUL. ANSI-C `\0` / `\x00` bytes are discarded,
-    # so `$'api_token\0'` reaches `export` as the real name `api_token`.
-    return decoded.replace("\x00", "")
+def _decode_ansi_c(fragment: str) -> tuple[str, bool]:
+    r"""Decode an ANSI-C quoted NAME fragment.
+
+    Returns ``(decoded, fail_closed)``. Python's ``unicode_escape`` is not Bash's
+    grammar: it leaves Bash-valid forms such as ``\x0`` and ``\c@`` literal. For
+    assignment names, an unrecognized escape is security-sensitive, so it makes
+    the name unknowable and the caller redacts the value.
+    """
+    out: list[str] = []
+    fail_closed = False
+    cursor = 0
+    size = len(fragment)
+    while cursor < size:
+        char = fragment[cursor]
+        if char != "\\":
+            out.append(char)
+            cursor += 1
+            continue
+        if cursor + 1 >= size:
+            fail_closed = True
+            cursor += 1
+            continue
+
+        esc = fragment[cursor + 1]
+        simple = {
+            "a": "\a",
+            "b": "\b",
+            "e": "\x1b",
+            "E": "\x1b",
+            "f": "\f",
+            "n": "\n",
+            "r": "\r",
+            "t": "\t",
+            "v": "\v",
+            "\\": "\\",
+            "'": "'",
+            '"': '"',
+            "?": "?",
+        }
+        if esc in simple:
+            out.append(simple[esc])
+            cursor += 2
+            continue
+        if esc in "01234567":
+            end = cursor + 2
+            while end < size and end < cursor + 4 and fragment[end] in "01234567":
+                end += 1
+            value = int(fragment[cursor + 1 : end], 8)
+            if value == 0:
+                fail_closed = True
+            else:
+                out.append(chr(value))
+            cursor = end
+            continue
+        if esc == "x":
+            end = cursor + 2
+            while end < size and end < cursor + 4 and fragment[end] in "0123456789abcdefABCDEF":
+                end += 1
+            if end == cursor + 2:
+                fail_closed = True
+                cursor += 2
+                continue
+            value = int(fragment[cursor + 2 : end], 16)
+            if value == 0:
+                fail_closed = True
+            else:
+                out.append(chr(value))
+            cursor = end
+            continue
+        if esc in {"u", "U"}:
+            digits = 4 if esc == "u" else 8
+            start = cursor + 2
+            end = start + digits
+            raw = fragment[start:end]
+            if len(raw) != digits or any(c not in "0123456789abcdefABCDEF" for c in raw):
+                fail_closed = True
+                cursor += 2
+                continue
+            try:
+                value = int(raw, 16)
+                if value == 0:
+                    fail_closed = True
+                else:
+                    out.append(chr(value))
+            except ValueError:
+                fail_closed = True
+            cursor = end
+            continue
+        if esc == "c":
+            if cursor + 2 >= size:
+                fail_closed = True
+                cursor += 2
+                continue
+            control = chr(ord(fragment[cursor + 2].upper()) & 0x1F)
+            if control == "\x00":
+                fail_closed = True
+            else:
+                out.append(control)
+            cursor += 3
+            continue
+
+        fail_closed = True
+        cursor += 2
+
+    return "".join(out), fail_closed
 
 
 # A credential option: an ALLOW-LIST, never a `*key*` pattern — `--sort-key=name`,
@@ -479,7 +589,10 @@ def _match_assignment_name(text: str, index: int) -> int:
             end = text.find("'", cursor + 2)
             if end == -1:
                 return -1
-            name.append(_decode_ansi_c(text[cursor + 2 : end]))
+            fragment, fail_closed = _decode_ansi_c(text[cursor + 2 : end])
+            if fail_closed:
+                dynamic = True
+            name.append(fragment)
             cursor = end + 1
             continue
         if text.startswith(("$(", "${", "`"), cursor):

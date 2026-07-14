@@ -664,9 +664,11 @@ Scope notes:
   (`api_$'to\x6ben'` is `api_token`), and a fragment containing a substitution or
   variable (`api_"to$(printf ken)"`) makes the name **unknowable** — that MUST
   fail **closed** and redact the value. ANSI-C escapes that produce NUL MUST
-  follow the shell's effective name (`$'api_token\0'` reaches `export` as
-  `api_token`) or fail closed; a decoded NUL must not turn a secret name into an
-  apparent non-secret.
+  follow the shell's effective name (`$'api_token\0'`, `$'api_token\x0'`, and
+  `$'api_token\c@'` reach `export` as `api_token`) or fail closed; a decoded NUL
+  must not turn a secret name into an apparent non-secret. Non-NUL control
+  escapes do not fail closed solely because they are controls: `$'api_token\cA'`
+  is not the secret name `api_token`.
 - **A quoted argument is ALWAYS data — there is no executor exception.**
   `eval '…'` and `sh -c "…"` do execute their string, and two attempts to detect
   that both **leaked and mangled**: keying on any `sh`/`bash` token destroyed
@@ -691,9 +693,9 @@ Scope notes:
   (a marker *prefix* is not: `api_token=[REDACTED:env-secret]SECRET` must redact
   the suffix, or a marker pasted into captured text becomes an escape hatch for
   the secret beside it). This invariant includes configured `extra_patterns`:
-  existing markers are opaque, composed patterns MUST reach a fixed point in one
-  call, and zero-width matches are ignored because they contain no captured text
-  to redact.
+  existing markers are opaque, the built-in table and composed custom patterns
+  MUST reach one combined fixed point in one call, and zero-width matches are
+  ignored because they contain no captured text to redact.
 - **Redaction MUST NOT delete captured input.** The scanners are heuristics and
   will sometimes disagree with a real shell; when they do, the failure must be a
   mis-scan, never a lost character. Reconstruct spans loss-proof (re-emit a

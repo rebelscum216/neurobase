@@ -261,7 +261,10 @@ EXACT: list[tuple[str, str]] = [
     ("export api_$'to\\u006ben'=SECRET", f"export api_$'to\\u006ben'={R}"),
     ("export api_$'to\\153en'=SECRET", f"export api_$'to\\153en'={R}"),
     ("export $'api_token\\0'=SECRET", f"export $'api_token\\0'={R}"),
+    ("export $'api_token\\x0'=SECRET", f"export $'api_token\\x0'={R}"),
+    ("export $'api_token\\c@'=SECRET", f"export $'api_token\\c@'={R}"),
     ("export api_$'token\\x00'=SECRET", f"export api_$'token\\x00'={R}"),
+    ("export $'api_token\\cA'=SECRET", "export $'api_token\\cA'=SECRET"),
     ('export api_"to$(printf ken)"=SECRET', f'export api_"to$(printf ken)"={R}'),  # unknowable
     # a marker in the INPUT is data, and must not shield the text beside it
     ("api_token=[REDACTED:env-secret]SECRET ./run", f"api_token={R} ./run"),
@@ -342,6 +345,25 @@ def test_metamorphic_properties_hold(text: str) -> None:
         if "\\\n" not in text:
             assert once.count("\n") == text.count("\n")
             assert once.count("\r") == text.count("\r")
+
+
+@pytest.mark.parametrize(
+    ("text", "patterns"),
+    [
+        ("run zAPI_TOKEN=v", [r"z"]),
+        ("internal-id-77123 API_TOKEN=v", [r"internal-id-\d+"]),
+        ("prefix SECRET_KEY=v", [r"prefix "]),
+    ],
+)
+def test_metamorphic_properties_hold_with_extra_patterns(text: str, patterns: list[str]) -> None:
+    """Configured extras compose with built-ins in the same idempotent pass."""
+    for scrub in (redact, redact_command):
+        once = scrub(text, patterns)
+        assert scrub(once, patterns) == once, once
+        assert once.count("[REDACTED:") == scrub(once, patterns).count("[REDACTED:")
+        assert text.count("[REDACTED:") <= once.count("[REDACTED:")
+        assert once.count("\n") == text.count("\n")
+        assert once.count("\r") == text.count("\r")
 
 
 @pytest.mark.parametrize(("command", "expected"), EXACT, ids=[c for c, _ in EXACT])
@@ -554,6 +576,11 @@ def test_extra_patterns_redact_as_custom() -> None:
         ),
         ("x", [r"(?=x)"], "x"),  # zero-width matches contain nothing to redact
         ("ba", [r"^a", r"b"], "[REDACTED:custom]a"),
+        (
+            "run zAPI_TOKEN=v",
+            [r"z"],
+            f"run [REDACTED:custom]API_TOKEN={R}",
+        ),
     ],
 )
 def test_extra_patterns_are_marker_safe_and_idempotent(

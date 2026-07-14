@@ -1448,3 +1448,122 @@ both `redact()` and `redact_command()`. Spec §10, ADR-0013, and the implementat
 guide state the boundary.
 
 **Verdict:** _pending independent re-review._
+
+## Round 11 — Reviewer findings  _(Reviewer — Claude)_
+
+Verified `git diff main...HEAD` against the running code and against real bash
+(GNU bash 3.2.57). F35's default-vs-custom idempotence instance is fixed as
+described — markers are opaque to configured regexes, the fixed-point loop
+terminates, zero-width matches are ignored, and the `endpos`/`$` guard works.
+F34's `\0`/`\x00` instances are fixed. But the F34 fix closes only the ANSI-C
+spellings Python's `unicode_escape` happens to decode, and the re-affirmed
+idempotence MUST still does not hold once `extra_patterns` compose with the
+built-in assignment rules.
+
+### F36 — blocker — `src/neurobase/core/redact.py:228-238`
+
+The NUL fix matches Python's codec, not bash's ANSI-C grammar, so it still
+leaks NUL-spelled secret exports that `unicode_escape` cannot decode.
+`_decode_ansi_c` strips `\x00` *after* `unicode_escape` runs, which covers
+`\0`, `\00`, `\000`, `\x00`. But bash also produces NUL (and discards it) from
+spellings the codec leaves literal: a **single** hex digit `\xH` and the
+control escape `\cX`. Verified against real bash and against the running code:
+
+- `export $'api_token\x0'=SECRET` — bash exports `api_token=SECRET`;
+  `_decode_ansi_c` returns `api_token\x0`, the full-name regex rejects it, and
+  both `redact()` and `redact_command()` return `SECRET` in the clear.
+- `export $'api_token\c@'=SECRET` — same: bash exports `api_token`, the decoder
+  returns `api_token\c@`, `SECRET` survives.
+
+(`\cA` correctly does *not* redact — it is SOH, not NUL, so bash's effective
+name is not `api_token`; the boundary is specifically NUL-producing escapes.)
+This is the same D13 leak class F34 named, and F34's own suggested direction —
+"match the shell's NUL behavior **or fail closed** when a fragment contains a
+NUL-producing escape" — is only half-taken: NUL is stripped for the decodable
+subset, and nothing fails closed for the rest.
+
+Suggested direction: stop treating `unicode_escape` as the ANSI-C decoder. Either
+decode the ANSI-C forms bash actually supports (single-digit `\xH`, `\cX`
+controls, `\e`) or, more conservatively, detect any NUL-producing escape in a
+name fragment and fail closed (redact) rather than emit a literal that no longer
+matches the secret-name pattern. Add `\x0`, `\c@`, and a non-NUL control
+counter-case to the exact-output oracle so the codec/grammar gap is pinned.
+
+### F37 — major — `src/neurobase/core/redact.py:111-142,165-166`
+
+The idempotence MUST that this commit re-affirms for `extra_patterns`
+("composed patterns MUST reach a fixed point in one call", §10) holds only among
+the extras themselves. `_apply_extra_patterns` runs *after*
+`_redact_assignments_in_text`, so when a custom replacement forms a new word
+boundary it exposes an assignment the already-run built-in rules would have
+caught — and `redact()` as a whole is no longer idempotent. Verified on the
+running code:
+
+```
+redact("run zAPI_TOKEN=v", ["z"])
+  -> "run [REDACTED:custom]API_TOKEN=v"          # assignment NOT redacted on pass 1
+redact("run [REDACTED:custom]API_TOKEN=v", ["z"])
+  -> "run [REDACTED:custom]API_TOKEN=[REDACTED:env-secret]"   # pass 2 differs
+```
+
+So `redact(redact(x)) != redact(x)` for a trivial configured pattern. The
+security impact is marginal — the exposed `API_TOKEN` only exists because the
+custom pattern rewrote the surrounding name-char `z`, so bash's real variable
+was `zAPI_TOKEN`, not a secret — which is why this is major, not a blocker. But
+it is a concrete violation of the stated MUST, and it sits in exactly the blind
+spot F35 named: `test_metamorphic_properties_hold` runs default patterns only,
+and `test_extra_patterns_are_marker_safe_and_idempotent` uses inputs that never
+place an extra adjacent to a built-in assignment rule, so neither oracle can see
+it. `redact_command()` happens to dodge this case (its case-insensitive
+`_scrub_shell` catches `zAPI_TOKEN` before the extras run), which makes the two
+paths quietly disagree.
+
+Suggested direction: either run the built-in table to a fixed point *with* the
+extras (so a marker-formed boundary is re-examined in the same call), or narrow
+the §10 claim to state plainly that extra-vs-built-in composition is not
+idempotent and why that residual is acceptable. Extend the metamorphic suite to
+run over the extras path — including a pattern whose replacement abuts a bare
+secret assignment — so this class is covered by an oracle, not prose.
+
+**Verdict:** changes-requested — the two round-10 blockers are addressed at their
+reported instances, but the ANSI-C decoder still leaks NUL-spelled secret names
+that bash accepts (`\x0`, `\c@`), and the re-stated idempotence MUST does not
+hold once `extra_patterns` compose with the built-in assignment rules.
+
+## Round 12 — Author resolutions  _(Codex, at user request)_
+
+Both findings confirmed against the running code and fixed in a follow-up
+commit. Before patching, I reproduced the reviewer examples against
+GNU bash 3.2.57: `\x0` and `\c@` export `api_token=SECRET`, while `\cA`
+is rejected as a non-identifier and does not export `api_token`.
+
+**F36 — resolved.** `_decode_ansi_c()` no longer delegates Bash ANSI-C name
+fragments to Python's `unicode_escape`. It now decodes the bounded Bash subset
+it relies on (`\xH`/`\xHH`, octal, `\u`/`\U`, simple escapes, and `\cX`) and
+returns a fail-closed signal for NUL-producing or otherwise unknowable escapes.
+`_match_assignment_name()` treats that signal like any other unknowable name and
+redacts the value. The exact-output oracle now pins `\x0`, `\c@`, and the
+non-NUL control counter-case `\cA`.
+
+**F37 — resolved.** I kept the stronger §10 idempotence contract and fixed the
+implementation rather than narrowing the claim. `redact()` and `redact_command()`
+now compile configured extras once and iterate built-ins, assignment scrubbing,
+and extra patterns to one combined fixed point. This closes the case where a
+custom marker creates a new boundary before `API_TOKEN=v`. The extra-pattern
+tests now include the reviewer repro exactly, and the metamorphic suite has an
+extras path with custom replacements abutting built-in assignment shapes.
+
+Verification:
+
+```bash
+uv run pytest tests/test_redact.py
+# 265 passed
+
+uv run python scripts/ci.py
+# ruff/format/mypy clean; 757 passed
+
+uv run python scripts/audit_command_redaction.py
+# 2,535 unique commands; 0 changed-without-marker; 0 non-idempotent
+```
+
+**Verdict:** _pending independent re-review._

@@ -101,27 +101,40 @@ SHELL_LEAKS = [
 # position to latch onto (the line starts with `echo`/`sudo`), and inventing one
 # would mean treating any prose keyword as shell — the F9 mistake. Knowing the
 # value IS a command is exactly what buys this coverage.
+#
+# NOTE the shape of this list: it is all the syntax that six revisions of a
+# *position model* got wrong — pipelines, wrappers, redirections, option
+# operands, substitutions, continuations. The current rule tracks no position at
+# all, so none of it is special: an unquoted secret assignment is redacted
+# wherever it appears.
 COMMAND_ONLY_LEAKS = [
-    # A secret can sit in the prefix of ANY command in a pipeline or list, not
-    # just the first — the position model resets at every separator.
+    # A secret can sit in the prefix of ANY command in a pipeline or list.
     "echo ok; api_token=SECRET ./run",
     "echo ok && api_token=SECRET ./run",
     "echo ok | api_token=SECRET ./run",
-    # Wrappers run another command, so the real command hasn't started yet.
+    # Wrappers — with short OR long option operands.
     "sudo -E env api_token=SECRET ./run",
     "command env api_token=SECRET ./run",
-    "sudo -u root env api_token=SECRET ./run",  # -u takes an operand, not a command
+    "sudo -u root env api_token=SECRET ./run",
+    "sudo --user root env api_token=SECRET ./run",
+    "timeout --signal TERM env api_token=SECRET ./run",
+    "nice -n 5 env api_token=SECRET ./run",
+    # Redirections are shell syntax, not a command name.
+    "2>&1 api_token=SECRET /usr/bin/env",
+    "env 2>&1 api_token=SECRET /usr/bin/env",
+    # The shell EXECUTES a substitution, even inside double quotes.
+    'echo "$(api_token=SECRET ./run)"',
+    'echo "`api_token=SECRET ./run`"',
+    'echo "$(echo "$(api_token=SECRET x)")"',  # nested
+    # A `<<` inside a quoted argument is not a heredoc — treating it as one hid
+    # the whole next command from redaction.
+    'echo "1 << EOF"\nsudo api_token=SECRET ./run',
+    # A backslash-newline continues the VALUE onto the next physical line.
+    "export api_token=FIRST\\\nSECRET /usr/bin/env",
+    # Credential options, in any position.
     "pytest --api-key=SECRET",
     "curl --token=SECRET",
     "deploy --client-secret=SECRET",
-]
-
-# `env` has its own grammar: options, operands, and assignments — and THEN a
-# command, after which the words are that command's arguments. A single
-# "builtin seen" flag gets this wrong in both directions.
-ENV_COMMAND_ARGS = [
-    "env PATH=/bin pytest api_key=example",
-    "env PATH=/bin -- pytest api_key=example",
 ]
 
 # `key`/`secret`/`password` appear constantly in options that SELECT or CONFIGURE
@@ -131,6 +144,15 @@ NON_CREDENTIAL_OPTIONS = [
     "sort --sort-key=name file.csv",
     "csvtool --key=id in.csv",
     "useradd --password-policy=strict bob",
+]
+
+# Heredoc bodies are DATA the command consumes — a file, a script, SQL. All the
+# heredocs one line declares are consumed in order, and the terminator must match
+# exactly (`<<-` strips leading TABS only, never spaces).
+HEREDOC_BODIES_ARE_DATA = [
+    "cat <<ONE <<TWO\nfirst\nONE\nitems.sort(key=lambda x: x.id)\nTWO",
+    "cat <<EOF\nitems.sort(key=lambda x: x.id)\n EOF\nEOF",
+    "cat <<-EOF\n\titems.sort(key=lambda x: x.id)\n\tEOF",
 ]
 
 # Position — not the keyword alone — is what establishes shell syntax. A keyword
@@ -183,10 +205,44 @@ def test_command_channel_closes_pipelines_wrappers_and_credential_options(comman
     assert "[REDACTED:" in out
 
 
-@pytest.mark.parametrize("command", ENV_COMMAND_ARGS)
-def test_env_stops_assigning_once_its_command_begins(command: str) -> None:
-    """`api_key=example` here is an argument to `pytest`, not an environment
-    assignment — redacting it is the same corruption, reached via a builtin."""
+@pytest.mark.parametrize(
+    "command",
+    ["env PATH=/bin pytest api_key=example", "awk -v api_key=example file"],
+)
+def test_unquoted_credential_named_argument_is_redacted_by_design(command: str) -> None:
+    """The accepted cost of having NO position model.
+
+    `api_key=example` here is an argument to `pytest`/`awk`, not an environment
+    assignment, and a perfect shell parser would leave it alone. We redact it
+    anyway: deciding otherwise requires tracking command position through
+    pipelines, wrappers, redirections, `env`'s grammar, substitutions and
+    continuations — six revisions of exactly that leaked secrets every time.
+
+    Fail-closed is the right side to err on here, and the cost is tiny: the
+    command's SHAPE survives (`api_key=[REDACTED:env-secret]`), and across 2,686
+    real captured commands only 1.38% contain a secret-named `name=` token at
+    all. See spec §10.
+    """
+    out = redact_command(command)
+    assert "example" not in out
+    assert "api_key=[REDACTED:env-secret]" in out
+
+
+@pytest.mark.parametrize("command", HEREDOC_BODIES_ARE_DATA)
+def test_heredoc_bodies_are_data_not_shell(command: str) -> None:
+    assert redact_command(command) == command
+
+
+def test_redaction_never_deletes_captured_input() -> None:
+    """The scanners are heuristics and WILL disagree with a real shell. When they
+    do, the failure must be a mis-scan — never a lost character.
+
+    This exact command (a heredoc inside `$(…)`, whose body contains a lone
+    apostrophe) made the substitution scanner run to end-of-text, and an
+    unconditional `end - 1` slice then silently ate the command's final byte.
+    Found by round-tripping 2,699 real captured commands, not by a unit test.
+    """
+    command = "git commit -m \"$(cat <<'EOF'\nit can't be wrong\nEOF\n)\"\ngit log --stat"
     assert redact_command(command) == command
 
 

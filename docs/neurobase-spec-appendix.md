@@ -601,30 +601,46 @@ Scope notes:
   `api_token="hunter two"` into `api_token=[REDACTED:env-secret] two"`, leaking
   half the secret in the clear. The **name** may be quoted too (`"api_token"=v`
   is valid shell for the same assignment) and must still match.
-- **In shell, an assignment is a TOKEN IN ASSIGNMENT POSITION — not a substring.**
-  Once the command name is seen, every later word is that command's *argument*,
-  and an argument is often quoted code or prose (`python -c "items.sort(key=…)"`).
-  Redacting inside one corrupts captured content and redacts no secret. The
-  position model is therefore **per command**, and four things move it:
-  - **Separators** (`;` `&&` `||` `|` `&` newline `(` `)`) start a fresh command.
-    A secret can sit in the prefix of *any* command in a pipeline or list —
-    `echo ok; api_token=… ./run` — not only the first.
-  - **Wrappers** (`sudo`, `command`, `nohup`, `nice`, `exec`, `timeout`, …) run
-    another command, so the real command has not begun and assignment position
-    survives them (`sudo -E env api_token=… ./run`).
-  - **Assignment builtins** (`export`, `declare`, `readonly`, `typeset`, `local`)
-    take a word list that is assignments all the way down.
-  - **`env` has its own grammar** — options, option operands, and assignments,
-    and *then* a command. After that command word its arguments are ordinary
-    arguments: `env PATH=/bin pytest api_key=example` MUST NOT redact
-    `api_key=example`, while `env -u OLD api_token=… pytest` MUST redact (an
-    option operand is not a command name). A single "a builtin appeared" flag
-    gets this wrong in both directions.
+- **Do NOT model shell command position.** The obvious rule — "an assignment only
+  counts before the command name" — requires the whole POSIX command grammar:
+  pipelines and lists, transparent wrappers (`sudo`, `nice`, `timeout`) and their
+  long-option operands, redirections (`2>&1`), `env`'s own grammar, command
+  substitutions, `\`-newline continuations. Six successive implementations of it
+  each shipped a **secret leak**, because an approximation of that grammar fails
+  *open*. The rule is therefore position-free and fail-closed:
+
+  > In **unquoted** shell text, redact the value of every secret-named assignment,
+  > wherever it appears. Never touch a **quoted** argument — except to recurse
+  > into command substitutions, which the shell executes. **Heredoc bodies** are
+  > data.
+
+  This needs only what a lexer gets right — quoting, substitution, heredocs — and
+  none of the command grammar.
+- **The accepted cost:** a credential-*named* argument to some other command
+  (`env PATH=/bin pytest api_key=example`, `awk -v api_key=x`) is redacted even
+  though a perfect parser would leave it alone. This is deliberate. It is
+  fail-closed, the command's *shape* survives (`api_key=[REDACTED:env-secret]`),
+  and across **2,699 real captured commands only ~1% contain a secret-named
+  `name=` token at all** — so precise position tracking buys almost no fidelity
+  while costing correctness that could not be delivered.
+- **A quoted argument is data** — `python -c "items.sort(key=…)"`,
+  `sqlite3 db "DECLARE api_key=…"`, `echo "…"` carry code, SQL, and prose, and
+  MUST survive verbatim. But a **command substitution is executed even inside
+  double quotes**: `echo "$(api_token=… ./run)"` and its backtick form MUST be
+  scrubbed recursively, or a secret hides one quote deep.
 - **A heredoc body is data, not shell.** Everything between `<<EOF` and its
   terminator is a file, script, or SQL blob the command consumes; its lines are
-  not shell words, so `key=lambda …` there is not an assignment. The rest of the
-  table still applies to it — `cat > .env <<EOF` is exactly where real secrets
-  live — but the shell assignment walker steps around it.
+  not shell words, so `key=lambda …` there is not an assignment. All heredocs a
+  line declares are consumed **in order**, and the terminator must match
+  **exactly** (`<<-` strips leading TABS only, never spaces). A `<<` inside a
+  *quoted* argument is a bit-shift or prose, never a heredoc — treating it as one
+  hides the following command from redaction entirely. The rest of the table
+  still applies to a heredoc body — `cat > .env <<EOF` is exactly where real
+  secrets live — but the shell assignment scrub steps around it.
+- **Redaction MUST NOT delete captured input.** The scanners are heuristics and
+  will sometimes disagree with a real shell; when they do, the failure must be a
+  mis-scan, never a lost character. Reconstruct spans loss-proof (re-emit a
+  closing delimiter only when it was actually there).
 - **Malformed quoting fails CLOSED.** An unterminated quote consumes to end of
   line, so a half-quoted secret is redacted whole rather than leaking its tail. A
   command that failed to parse is still a captured command and can still carry a

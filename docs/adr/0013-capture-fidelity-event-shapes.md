@@ -110,13 +110,45 @@ stepped around entirely — they are data the command consumes, not shell. Optio
 are recognized from an allow-list of credential names, never a `*key*` pattern,
 because `--sort-key`/`--key`/`--password-policy` are selection and policy flags.
 
-The through-line across all six attempts: **a secret assignment is a syntactic
-construct, and every heuristic short of parsing the structure traded one failure
-for another** — uppercase-only missed lowercase; keyword-anywhere ate prose;
+A seventh attempt then found that *tokenizing* is not *parsing* either: a walker
+that tracks command position must model pipelines, transparent wrappers and their
+long-option operands, redirections, `env`'s grammar, command substitutions inside
+quotes, and `\`-newline continuations — and each revision that missed one of those
+**leaked a secret**.
+
+So the position model was **deleted**, and that is this ADR's real decision:
+
+> **Do not model shell command position.** In unquoted shell text, redact every
+> secret-named assignment wherever it appears. Never touch a quoted argument —
+> except to recurse into command substitutions, which the shell executes. Heredoc
+> bodies are data.
+
+This needs only quoting, substitution, and heredocs — the three things a lexer
+gets right — and none of the command grammar. It fails **closed**: an
+approximation of a grammar fails open, which is the wrong direction for a secret.
+
+The price is admitted rather than hidden: a credential-*named argument* to another
+command (`env PATH=/bin pytest api_key=example`) is redacted even though a perfect
+parser would not. The evidence says that price is near zero — across **2,699 real
+captured Bash commands, only ~1% contain a secret-named `name=` token at all**, so
+the fidelity that precise position tracking would buy is almost entirely
+theoretical, while the correctness it cost was repeatedly real.
+
+The through-line across all seven attempts: **a secret assignment is a syntactic
+construct, and every heuristic short of the real grammar traded one failure for
+another** — uppercase-only missed lowercase; keyword-anywhere ate prose;
 keyword-plus-one-token leaked multi-assignment commands; `\S+` values leaked
-quoted tails; substring scanning corrupted embedded code; and a tokenizer blind
-to separators leaked whole commands. Verified against 328 real captured Bash
-commands from a live transcript: none is altered by the assignment walker.
+quoted tails; substring scanning corrupted embedded code; a tokenizer blind to
+separators leaked whole commands; and a position model leaked through wrappers,
+redirections, and quoted substitutions. The lesson generalizes: **when a
+security rule depends on approximating a grammar, stop approximating and remove
+the dependency.**
+
+One further rule fell out of validating against reality rather than fixtures:
+**redaction must never delete captured input.** Round-tripping all 2,699 commands
+caught a lone apostrophe inside a heredoc body making the substitution scanner
+run to end-of-text, whereupon an unconditional `end - 1` slice silently ate the
+final byte of a real `git commit`. Scanners may mis-scan; they may not lose data.
 
 D13 is also confirmed as a **whole-raw** guarantee, not body-only: scribes scrub
 the informational frontmatter they write (`cwd`, `branch`), but never

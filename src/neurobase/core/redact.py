@@ -37,20 +37,19 @@ _ENV_SECRET = re.compile(
     rf"""^([ \t]*)["']?({_SECRET_NAME})["']?[ \t]*=[ \t]*{_VALUE}""",
     re.MULTILINE | re.IGNORECASE,
 )
-# A shell segment: an assignment keyword **in command position** — opening a
-# line, or following a shell separator (`;` `&&` `||` `|` `(` `` ` ``) — through
-# the end of that segment. Position is what establishes shell syntax; a bare
-# keyword does not, or prose ("we export api_token=x in the docs") and SQL
-# ("SQL DECLARE api_key=v") would be redacted as if they were commands.
+# A shell command pasted into PROSE: an assignment keyword in command position —
+# opening a line, or after a shell separator. This gate exists only for the global
+# `redact()` path, where most text is not shell: an unquoted `key=…` in a prompt
+# or a code snippet is a keyword argument, not a secret, so the shell scrub must
+# not run over everything. Inside a matched segment, `_scrub_shell` takes over.
 #
-# The segment runs to end of line and steps OVER quoted spans, so a `;` inside
-# quotes can't truncate it (`export api_token="a;b"` must not leave `b"` behind).
-# Separators *within* the segment are handled by `_scrub_shell`, which resets to
-# a fresh command at each one. `setenv` is deliberately absent — its syntax is
+# The segment steps OVER quoted spans (so a `;` in quotes can't truncate it) and
+# over `\<newline>` continuations (so a value continued onto the next physical
+# line stays with its assignment). `setenv` is deliberately absent — its syntax is
 # `setenv NAME value`, with no `=`.
 _SHELL_SEGMENT = re.compile(
     r"""(?:^|(?<=[;&|(`]))([ \t]*(?:export|env|declare|typeset|local|readonly)\b"""
-    r"""(?:'[^']*'|"(?:\\.|[^"])*"|[^\n])*)""",
+    r"""(?:'[^']*'|"(?:\\.|[^"])*"|\\\n|[^\n])*)""",
     re.MULTILINE | re.IGNORECASE,
 )
 # Bare inline assignment with no keyword and no command context — `API_TOKEN=…`
@@ -61,68 +60,6 @@ _SHELL_SEGMENT = re.compile(
 # command (the rules above).
 _INLINE_ENV_SECRET = re.compile(rf"(?<![A-Za-z0-9_])({_SECRET_NAME})[ \t]*=[ \t]*{_VALUE}")
 
-# --- shell tokenization -----------------------------------------------------
-#
-# A shell command is NOT "not prose and not code" — `python -c "…"`, `sqlite3 db
-# "…"`, and `echo "…"` all carry source, SQL, and prose as *quoted arguments*.
-# So a secret assignment cannot be found by scanning for a substring: it has to
-# be a whole TOKEN sitting in an assignment POSITION. Anything inside a quoted
-# argument is data the command consumes, and must be left exactly as captured.
-
-# A token that IS an assignment (optionally quoting the name: `"api_token"=v`).
-_SECRET_ASSIGN_TOKEN = re.compile(rf"""^["']?({_SECRET_NAME})["']?=""", re.IGNORECASE)
-_ANY_ASSIGN_TOKEN = re.compile(r"""^["']?[A-Za-z_][A-Za-z0-9_]*["']?=""")
-
-# Options whose name *is* a credential, so the value is a secret wherever it
-# appears. Deliberately an ALLOW-LIST, not a `*key*` pattern: `key`, `secret` and
-# `password` show up constantly in options that select or configure rather than
-# authenticate — `--sort-key=name`, `--key=id`, `--password-policy=strict` — and
-# mangling those destroys the captured command for no security gain. The cost of
-# the allow-list is the mirror residual (a genuinely secret `--key=…` survives);
-# that is recorded in spec §10.
-_SECRET_OPTION_NAMES = frozenset(
-    {
-        "api-key",
-        "apikey",
-        "auth",
-        "auth-token",
-        "access-token",
-        "bearer",
-        "client-secret",
-        "credential",
-        "credentials",
-        "id-token",
-        "password",
-        "passwd",
-        "refresh-token",
-        "secret",
-        "secret-key",
-        "token",
-    }
-)
-_OPTION_TOKEN = re.compile(r"""^(--?)([A-Za-z0-9][A-Za-z0-9_-]*)=""")
-
-# Builtins whose ENTIRE word list is assignments (`export A=1 B=2`).
-_ASSIGNMENT_BUILTINS = frozenset({"export", "declare", "typeset", "local", "readonly"})
-# Wrappers that run another command: the real command hasn't started yet, so
-# assignment position survives them (`sudo -E env api_token=… ./run`).
-_WRAPPERS = frozenset({"sudo", "doas", "command", "nohup", "nice", "exec", "stdbuf", "timeout"})
-# Short options that take a separate operand — the operand must not be mistaken
-# for the command name (`env -u OLD api_token=…`, `sudo -u root env …`).
-_OPERAND_FLAGS = frozenset({"-u", "-g", "-p", "-C", "-t", "-S"})
-
-_SEPARATORS = ";&|()\n"
-
-# `<<EOF` / `<<-'EOF'` — everything until the terminator line is a heredoc BODY:
-# a file, a script, a SQL blob. It is data the command consumes, not shell, so it
-# must survive verbatim — a Python heredoc whose line begins `key=lambda …` is not
-# an environment assignment. (A `1 << 2` bit-shift can't match: a digit is not a
-# delimiter.) The D13 table still runs over it via `redact`; only the shell
-# assignment walker steps around it.
-_HEREDOC_START = re.compile(r"""<<-?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1""")
-
-# Order matters: private keys span multiple lines and must be consumed before
-# any single-line rule could partially match inside one.
 _BUILTIN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (_PRIVATE_KEY, "[REDACTED:private-key]"),
     (_AWS_KEY, "[REDACTED:aws-key]"),
@@ -137,10 +74,9 @@ def redact(text: str, extra_patterns: Iterable[str] = ()) -> str:
     """Apply the D13 redaction table (+ any config-supplied extras) to ``text``."""
     for pattern, replacement in _BUILTIN_PATTERNS:
         text = pattern.sub(replacement, text)
-    # env-secret rules keep the variable name (and any indent), redact the value.
-    # Shell segments first — inside one, assignments are found by TOKEN, not by
-    # substring. Then the line-anchored `.env` rule, then the conservative bare
-    # rule for text that is neither a command nor a `.env` line.
+    # A shell command sitting in prose (a pasted `export …` line) gets the full
+    # shell scrub; the rest of the text does not, because unquoted `key=…` in
+    # ordinary prose or code is a keyword argument, not a secret.
     text = _SHELL_SEGMENT.sub(lambda m: _scrub_shell(m.group(0)), text)
     text = _ENV_SECRET.sub(r"\1\2=[REDACTED:env-secret]", text)
     text = _INLINE_ENV_SECRET.sub(r"\1=[REDACTED:env-secret]", text)
@@ -153,162 +89,308 @@ def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
     """D13 for a value that is *known* to be a shell command — spec §4's
     tool-activity digest, where the scribe captured `input.command` verbatim.
 
-    Being a command means we can find assignments *structurally* (a token in
-    assignment position) instead of guessing from a keyword. It does NOT mean the
-    text is free of prose or code: `python -c "…"`, `sqlite3 db "…"` and
-    `echo "…"` all carry source, SQL, and prose as quoted arguments, and those are
-    data the command consumes — they are left exactly as captured.
+    Knowing the value is shell is what lets us scrub it structurally instead of
+    guessing from keywords. It does NOT mean the text is free of prose or code:
+    `python -c "…"`, `sqlite3 db "…"` and `echo "…"` carry source, SQL, and prose
+    as quoted arguments, and those are data the command consumes — left verbatim.
     """
     return _scrub_shell(redact(text, extra_patterns))
 
 
-def _redact_assignment(token: str) -> str:
-    """`name=<value>` → `name=[REDACTED:env-secret]`, keeping the name verbatim
-    (including any quoting) and dropping the whole value token."""
-    name, _, _value = token.partition("=")
-    return f"{name}=[REDACTED:env-secret]"
+# --- shell scrubbing --------------------------------------------------------
+#
+# Six revisions of this code tried to decide *whether a word sits in assignment
+# position* — tracking command names, pipelines, wrappers, `env`'s grammar,
+# redirections, option operands. Every revision shipped a leak, because that is
+# the full POSIX command grammar and an approximation of it fails open.
+#
+# So the position model is gone. The rule is now positional-free and fail-closed:
+#
+#   In UNQUOTED shell text, redact the value of every secret-named assignment,
+#   wherever it appears. Never touch a quoted argument — except to recurse into
+#   command substitutions, which the shell executes. Heredoc bodies are data.
+#
+# This needs only three things a lexer can get right — quoting, substitution,
+# heredocs — and none of the command grammar. The cost is that a *credential-named
+# argument* to some other command (`env PATH=/bin pytest api_key=example`) is
+# redacted even though it is not an environment assignment. That is a deliberate
+# trade: it is fail-closed, it preserves the command's shape
+# (`api_key=[REDACTED:env-secret]`), and across 2,686 real captured commands only
+# 1.38% contain a secret-named `name=` token at all — so precise position tracking
+# buys almost no fidelity in practice, while costing correctness we could not
+# deliver. Spec §10 records this.
 
-
-def _is_secret_option(token: str) -> bool:
-    """`--api-key=…` yes; `--sort-key=name`, `--password-policy=strict` no."""
-    match = _OPTION_TOKEN.match(token)
-    if match is None:
-        return False
-    return match.group(2).lower().replace("_", "-") in _SECRET_OPTION_NAMES
-
-
-def _lex_shell(text: str) -> list[tuple[str, str]]:
-    """Split shell text into ``("word"|"sep"|"gap", text)`` pieces, losslessly.
-
-    Quoted spans are held inside their word, so `a="b c"` is one word and a `;`
-    inside quotes is not a separator. An **unterminated** quote swallows the rest
-    of the text into that word — which makes malformed input fail *closed*: a
-    half-quoted secret (`api_token="hunter two`) is redacted whole rather than
-    leaking its tail. A captured command that failed to parse is still a captured
-    command, and can still carry a live credential.
-    """
-    pieces: list[tuple[str, str]] = []
-    index, size = 0, len(text)
-    while index < size:
-        char = text[index]
-        if char in " \t":
-            start = index
-            while index < size and text[index] in " \t":
-                index += 1
-            pieces.append(("gap", text[start:index]))
-        elif char in _SEPARATORS:
-            end = index + 1
-            if char in "&|" and end < size and text[end] == char:
-                end += 1  # `&&`, `||`
-            pieces.append(("sep", text[index:end]))
-            index = end
-        else:
-            start = index
-            while index < size and text[index] not in " \t" and text[index] not in _SEPARATORS:
-                if text[index] == "\\":
-                    index += 2
-                    continue
-                if text[index] in "'\"":
-                    quote = text[index]
-                    index += 1
-                    while index < size and text[index] != quote:
-                        index += 2 if quote == '"' and text[index] == "\\" else 1
-                    if index >= size:
-                        index = size  # unterminated ⇒ consume to end (fail closed)
-                        break
-                    index += 1
-                    continue
-                index += 1
-            pieces.append(("word", text[start : min(index, size)]))
-    return pieces
+# `name=` opening an unquoted word. The name may be quoted (`"api_token"=v`).
+_ASSIGN_HEAD = re.compile(rf"""["']?({_SECRET_NAME})["']?=""", re.IGNORECASE)
+# A credential option: an ALLOW-LIST, never a `*key*` pattern — `--sort-key=name`,
+# `--key=id` and `--password-policy=strict` select and configure, they don't auth.
+_SECRET_OPTION_NAMES = frozenset(
+    {
+        "api-key", "apikey", "api-token", "auth", "auth-token", "access-token",
+        "bearer", "client-secret", "credential", "credentials", "id-token",
+        "password", "passwd", "refresh-token", "secret", "secret-key", "token",
+    }
+)  # fmt: skip
+_OPTION_HEAD = re.compile(r"""--?([A-Za-z0-9][A-Za-z0-9_-]*)=""")
+# A heredoc operator, only ever matched in UNQUOTED text (a `<<` inside a quoted
+# argument is a bit-shift or prose, not a heredoc — promoting it hid an entire
+# following command from redaction).
+_HEREDOC_OP = re.compile(r"""<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2""")
+# A word boundary: an assignment can only START a word.
+_WORD_BREAK = " \t\n;&|()<>"
 
 
 def _scrub_shell(text: str) -> str:
-    """Walk shell text, stepping *around* heredoc bodies (which are data, not
-    shell) and scrubbing assignments in the shell parts."""
-    out: list[str] = []
-    position = 0
-    while True:
-        start = _HEREDOC_START.search(text, position)
-        if start is None:
-            out.append(_scrub_shell_words(text[position:]))
-            break
-        newline = text.find("\n", start.end())
-        if newline == -1:  # the operator line never ends — no body follows
-            out.append(_scrub_shell_words(text[position:]))
-            break
-        out.append(_scrub_shell_words(text[position : newline + 1]))
+    """Redact secret assignments in shell text, without parsing its grammar.
 
-        body = text[newline + 1 :]
-        delimiter = start.group(2)
-        offset = 0
-        for line in body.split("\n"):
-            if line.strip() == delimiter:
-                break
-            offset += len(line) + 1
-        else:  # unterminated heredoc ⇒ the rest of the text is body
-            out.append(body)
-            break
-        out.append(body[:offset])  # the body, verbatim
-        position = newline + 1 + offset
-    return "".join(out)
+    Walks the text once, tracking only what a lexer can be trusted with:
 
-
-def _scrub_shell_words(text: str) -> str:
-    """Redact secret assignments in shell text by walking its words *in position*.
-
-    A word is an assignment only in **assignment position**, and the position
-    model is per-command, because a secret can sit in the prefix of *any* command
-    in a pipeline or list (`echo ok; api_token=… ./run`):
-
-    - Every separator (`;` `&&` `||` `|` `&` newline `(` `)`) starts a fresh
-      command, so assignment position reopens.
-    - **Wrappers** (`sudo`, `command`, `nohup`, …) run another command, so the
-      real command hasn't begun yet and assignment position survives them.
-    - **Assignment builtins** (`export`, `declare`, `readonly`, …) take a word
-      list that is assignments all the way down.
-    - **`env`** has its own grammar: options, option operands, and assignments —
-      and then a COMMAND, after which its arguments are ordinary arguments. This
-      is the asymmetry that a single "builtin seen" flag gets wrong in both
-      directions: `env PATH=/bin pytest api_key=example` must NOT redact
-      `api_key=example` (it is pytest's argument), while `env -u OLD api_token=…
-      pytest` MUST redact (an option operand is not the command name).
-
-    Once the command name is seen, every later word is an argument — quoted code,
-    SQL, or prose the command consumes — and is left exactly as captured.
+    - **Single quotes** are inert — copied verbatim, nothing inside them is shell.
+    - **Double quotes** are inert *except* for `$(…)` and backticks, which the
+      shell executes: those are scrubbed recursively, so `echo "$(api_token=… ./run)"`
+      cannot smuggle a secret past us inside a quoted argument.
+    - **Heredoc bodies** are data the command consumes (a file, a script, SQL) and
+      are copied verbatim. All heredocs a logical line declares are queued and
+      consumed in order, and the terminator must match exactly (`<<-` strips
+      leading TABS only, per POSIX — not spaces).
+    - **Backslash escapes**, including `\\<newline>` line continuations, keep a
+      value glued to its assignment across physical lines.
+    - Everything else is unquoted shell, where a secret-named assignment at a word
+      boundary has its whole value redacted, regardless of position.
     """
     out: list[str] = []
-    mode = "prefix"  # prefix | env | assignments | args
-    pending_operand = False
+    index, size = 0, len(text)
+    heredocs: list[tuple[str, bool]] = []  # (delimiter, strip_leading_tabs)
+    at_word_start = True
 
-    for kind, piece in _lex_shell(text):
-        if kind != "word":
-            if kind == "sep":
-                mode, pending_operand = "prefix", False  # a new command begins
-            out.append(piece)
+    while index < size:
+        char = text[index]
+
+        if char == "\\" and index + 1 < size:  # escape, incl. `\<newline>`
+            out.append(text[index : index + 2])
+            index += 2
+            at_word_start = False
             continue
 
-        word = piece
-        if pending_operand:  # the operand of `-u`/`-g`/… — never the command name
-            pending_operand = False
-        elif _is_secret_option(word):
-            word = _redact_assignment(word)  # the option name announces the value
-        elif word.startswith("-") and word != "-":
-            if word in _OPERAND_FLAGS:
-                pending_operand = True
-        elif mode != "args" and _SECRET_ASSIGN_TOKEN.match(word):
-            word = _redact_assignment(word)
-        elif mode != "args" and _ANY_ASSIGN_TOKEN.match(word):
-            pass  # a non-secret assignment (PATH=/bin) — keep it, stay in position
-        elif mode != "args":
-            lowered = word.lower()
-            if lowered in _ASSIGNMENT_BUILTINS:
-                mode = "assignments"
-            elif lowered == "env":
-                mode = "env"
-            elif lowered in _WRAPPERS:
-                mode = "prefix"  # the real command is still ahead
-            elif mode != "assignments":
-                mode = "args"  # this is the command name
-        out.append(word)
+        # Checked BEFORE the quote branches: the NAME may itself be quoted
+        # (`export "api_token"=secret` is valid shell for the same assignment),
+        # and a quote branch would otherwise swallow it as an opaque argument.
+        if at_word_start:
+            head = _ASSIGN_HEAD.match(text, index)
+            if head is None:
+                option = _OPTION_HEAD.match(text, index)
+                if option is not None and _is_credential_option(option.group(1)):
+                    head = option
+            if head is not None:
+                out.append(head.group(0))
+                index = _skip_value(text, head.end())
+                out.append("[REDACTED:env-secret]")
+                at_word_start = False
+                continue
+
+        if char == "\n":
+            out.append(char)
+            index += 1
+            at_word_start = True
+            while heredocs:  # bodies begin on the line after the operator
+                delimiter, strip_tabs = heredocs.pop(0)
+                index = _copy_heredoc_body(text, index, delimiter, strip_tabs, out)
+            continue
+
+        if char == "'":
+            end = text.find("'", index + 1)
+            end = size if end == -1 else end + 1  # unterminated ⇒ to the end
+            out.append(text[index:end])
+            index = end
+            at_word_start = False
+            continue
+
+        if char == '"':
+            end = _end_of_double_quote(text, index)
+            out.append(_scrub_double_quoted(text[index:end]))
+            index = end
+            at_word_start = False
+            continue
+
+        if char == "`":
+            end = text.find("`", index + 1)
+            end = size if end == -1 else end
+            out.append("`" + _scrub_shell(text[index + 1 : end]))
+            if end < size:
+                out.append("`")
+            index = end + 1
+            at_word_start = False
+            continue
+
+        if text.startswith("$(", index):
+            end = _end_of_substitution(text, index + 1)
+            out.append("$(" + _scrub_substitution(text, index + 2, end))
+            index = end
+            at_word_start = False
+            continue
+
+        heredoc = _HEREDOC_OP.match(text, index)
+        if heredoc is not None:
+            heredocs.append((heredoc.group(3), heredoc.group(1) == "-"))
+            out.append(heredoc.group(0))
+            index = heredoc.end()
+            at_word_start = False
+            continue
+
+        out.append(char)
+        index += 1
+        at_word_start = char in _WORD_BREAK
+
     return "".join(out)
+
+
+def _scrub_substitution(text: str, start: int, end: int) -> str:
+    """Scrub the body of a `$(…)` and re-emit its closing `)` if there was one.
+
+    Reconstruction is **loss-proof by construction**: the closer is only stripped
+    when it is actually there. The scanners here are heuristics — a lone
+    apostrophe inside a heredoc body, for instance, makes `_end_of_substitution`
+    run to the end of the text — and an unconditional `end - 1` slice silently
+    deleted the command's last character when they disagreed. A scrubber may
+    over- or under-scan; it must never *delete captured input*.
+    """
+    if text[end - 1 : end] == ")":
+        return _scrub_shell(text[start : end - 1]) + ")"
+    return _scrub_shell(text[start:end])
+
+
+def _is_credential_option(name: str) -> bool:
+    return name.lower().replace("_", "-") in _SECRET_OPTION_NAMES
+
+
+def _skip_value(text: str, index: int) -> int:
+    """Consume a whole shell VALUE — quoted spans, escapes, and `\\<newline>`
+    continuations included — so the redaction can never leave half a secret
+    behind. An unterminated quote consumes to the end: malformed input fails
+    CLOSED, because a command that failed to parse still carried a real
+    credential."""
+    size = len(text)
+    while index < size:
+        char = text[index]
+        if char == "\\" and index + 1 < size:
+            index += 2  # keeps a `\<newline>`-continued value in one piece
+            continue
+        if char == "'":
+            end = text.find("'", index + 1)
+            index = size if end == -1 else end + 1
+            continue
+        if char == '"':
+            index = _end_of_double_quote(text, index)
+            continue
+        if char in _WORD_BREAK:
+            break
+        index += 1
+    return index
+
+
+def _end_of_double_quote(text: str, index: int) -> int:
+    """Index just past the closing `"` (or end of text if unterminated).
+
+    Steps over `$(…)` and backticks: a `"` *inside* a command substitution does
+    not close the outer quote (`echo "$(echo "x")"` is one argument). Missing
+    that truncates the span and hands the rest of the command to the wrong
+    scrubber — which is how a nested substitution lost a quote.
+    """
+    size = len(text)
+    cursor = index + 1
+    while cursor < size:
+        char = text[cursor]
+        if char == "\\":
+            cursor += 2
+            continue
+        if text.startswith("$(", cursor):
+            cursor = _end_of_substitution(text, cursor + 1)
+            continue
+        if char == "`":
+            end = text.find("`", cursor + 1)
+            cursor = size if end == -1 else end + 1
+            continue
+        if char == '"':
+            return cursor + 1
+        cursor += 1
+    return size
+
+
+def _end_of_substitution(text: str, index: int) -> int:
+    """Index just past the `)` closing a `$(`, honouring nesting and quotes."""
+    size = len(text)
+    depth = 0
+    cursor = index
+    while cursor < size:
+        char = text[cursor]
+        if char == "\\":
+            cursor += 2
+            continue
+        if char == "'":
+            end = text.find("'", cursor + 1)
+            cursor = size if end == -1 else end + 1
+            continue
+        if char == '"':
+            cursor = _end_of_double_quote(text, cursor)
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
+        cursor += 1
+    return size
+
+
+def _scrub_double_quoted(span: str) -> str:
+    """A double-quoted argument is data — EXCEPT `$(…)` and backticks, which the
+    shell still executes inside it. Recurse into those and nothing else, so
+    `python -c "items.sort(key=lambda x: x.id)"` survives verbatim while
+    `echo "$(api_token=… ./run)"` does not hide a secret."""
+    out: list[str] = []
+    index, size = 0, len(span)
+    while index < size:
+        char = span[index]
+        if char == "\\" and index + 1 < size:
+            out.append(span[index : index + 2])
+            index += 2
+            continue
+        if span.startswith("$(", index):
+            end = _end_of_substitution(span, index + 1)
+            out.append("$(" + _scrub_substitution(span, index + 2, end))
+            index = end
+            continue
+        if char == "`":
+            end = span.find("`", index + 1)
+            end = size if end == -1 else end
+            out.append("`" + _scrub_shell(span[index + 1 : end]))
+            if end < size:
+                out.append("`")
+            index = end + 1
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _copy_heredoc_body(
+    text: str, index: int, delimiter: str, strip_tabs: bool, out: list[str]
+) -> int:
+    """Copy one heredoc body verbatim, up to and including its terminator line.
+
+    The terminator must match EXACTLY — `<<-` strips leading tabs only, never
+    spaces (POSIX). A missing terminator means the body runs to the end of the
+    text, which is also the safe reading: it is all data, not shell.
+    """
+    size = len(text)
+    while index < size:
+        line_end = text.find("\n", index)
+        line_end = size if line_end == -1 else line_end + 1
+        line = text[index:line_end]
+        out.append(line)
+        index = line_end
+        candidate = line.rstrip("\n")
+        if (candidate.lstrip("\t") if strip_tabs else candidate) == delimiter:
+            break
+    return index

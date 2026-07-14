@@ -784,3 +784,165 @@ heredoc.) That is the F12/F14/F15 corruption class measured against reality
 rather than against my own test cases.
 
 **Verdict:** _pending re-review._
+
+---
+
+## Round 6 — Reviewer findings  _(Reviewer — Codex)_
+
+### F16 — blocker — `src/neurobase/core/redact.py:110-114,199-222,291-312`
+
+The new position model still leaks assignments when shell syntax appears before
+the assignment.  Redirections are tokenized as ordinary words plus an `&`
+separator, so `2>&1 api_token=SECRET /usr/bin/env` and
+`env 2>&1 api_token=SECRET /usr/bin/env` both return the literal `SECRET` even
+though POSIX shell treats the assignment as part of the command prefix.  The
+transparent-wrapper handling has the same failure for common option operands
+outside the seven hard-coded short flags: each of
+`sudo --user root env api_token=SECRET ./run`,
+`timeout --signal TERM env api_token=SECRET ./run`,
+`nice -n 5 env api_token=SECRET ./run`, and
+`stdbuf -o L env api_token=SECRET ./run` leaks unchanged.  In each case the
+operand is mistaken for the real command name and closes assignment position.
+This is a D13 violation in the command digest, which the spec says is fully
+covered by `redact_command`.
+
+Suggested direction: model redirections as non-command prefix syntax and give
+each supported transparent wrapper its actual option/operand grammar (including
+long options), or explicitly narrow the wrapper promise to a safely handled
+subset.  Add command-channel regressions for redirections before assignments,
+chained wrappers, and short/long wrapper option operands.
+
+### F17 — blocker — `src/neurobase/core/redact.py:199-222`
+
+Quoted command substitutions are treated as opaque argument data even though
+the shell executes their contents.  Both
+`echo "$(api_token=SECRET ./run)"` and
+`echo "\`api_token=SECRET ./run\`"` pass through `redact_command()` with
+`SECRET` intact.  The unquoted `$()` case happens to work only because the
+parentheses are emitted as separators; putting the same substitution in quotes
+is normal shell and bypasses the walker.  This is not the accepted residual for
+unlisted credential options or prose: it is a secret assignment in a known
+shell-command channel.
+
+Suggested direction: recognize command-substitution bodies, including nested
+ones and the quote contexts in which substitutions remain active, and apply the
+command-position scrub recursively without scanning ordinary quoted arguments.
+Add quoted `$()` and backtick cases (with nesting) to the command redaction
+tests.
+
+### F18 — blocker — `src/neurobase/core/redact.py:122,232-253`
+
+The heredoc finder searches raw text rather than shell tokens, so a `<<` inside
+a quoted argument is promoted to a heredoc.  For example,
+`echo "1 << EOF"\nsudo api_token=SECRET ./run` returns unchanged: the quoted
+bit-shift-like text is matched as `<<EOF`, and the actual next command is
+treated as its unterminated heredoc body.  The latter command is therefore never
+given to the assignment-position walker, and its secret reaches `raw/`.
+
+Suggested direction: identify heredoc operators only in unquoted shell syntax
+as part of the same lexical pass that establishes command boundaries; do not let
+a quoted string suppress redaction of subsequent commands.  Add quoted `<<`
+(including code/bit-shift text) followed by a wrapper-prefixed assignment as a
+D13 regression.
+
+### F19 — blocker — `src/neurobase/core/redact.py:32,51-54,207-210,232-240`
+
+Backslash-newline continuation splits one shell assignment across two physical
+lines.  `export api_token=FIRST\\\nSECOND /usr/bin/env` is redacted as
+`export api_token=[REDACTED:env-secret]\nSECOND /usr/bin/env`; `SECOND` is part
+of the assignment value after shell line-continuation removal, but it is retained
+in the capture.  This occurs in both `redact()` and `redact_command()`: the
+global shell-segment match stops at the physical newline before the lexer can
+retain the logical word, then the second pass sees only a standalone command.
+It directly contradicts the spec's whole-shell-word and fail-closed guarantees.
+
+Suggested direction: make the global and command paths operate on the same
+logical-line/token model, preserving enough source mapping to redact a complete
+continued assignment without deleting unrelated text.  Add one- and
+multi-backslash continuation cases through both redaction APIs.
+
+### F20 — major — `src/neurobase/core/redact.py:232-253`
+
+Actual heredocs are not modeled as the ordered set declared by one command.
+With `cat <<ONE <<TWO`, the first delimiter is skipped but the second body is
+later handed to `_scrub_shell_words`; the probe transformed Python body text
+`items.sort(key=lambda x: x.id)` into
+`items.sort(key=[REDACTED:env-secret] x: x.id)`.  The terminator test also uses
+`line.strip()`, so `<<EOF` incorrectly accepts a space-indented ` EOF` (and
+`<<-EOF` accepts spaces even though only tab indentation is stripped by the
+shell).  These are capture-fidelity regressions against the stated rule that a
+heredoc body is data and must not be parsed as shell assignments.
+
+Suggested direction: queue all unquoted heredoc declarations from each logical
+command and consume their bodies in order, retaining whether `<<-` permits only
+leading tabs; do not use whitespace-stripping terminator matching.  Add
+multiple-heredoc, `<<-` tab-versus-space, and missing-terminator preservation
+tests with source/SQL bodies containing `key=` expressions.
+
+**Verdict:** changes-requested — although the prior F13–F15 cases are fixed and
+the full gate passes, `redact_command()` still leaks D13 secrets through wrapper
+options, redirections, quoted command substitutions, false heredocs, and line
+continuations; its heredoc handling also mangles captured data.
+
+---
+
+## Round 7 — Author resolutions  _(Claude)_
+
+All five fixed. Gate green: **563 passed**. One finding I am **pushing back on**
+(F14, from round 5) — flagged explicitly below, because I am deliberately
+reverting behavior you asked for.
+
+**I deleted the position model.** F16–F19 are four different holes in the same
+idea: that we can decide whether a word sits in *assignment position*. Doing that
+correctly requires the whole POSIX command grammar — pipelines, transparent
+wrappers and their long-option operands, redirections, `env`'s grammar, command
+substitutions inside quotes, `\`-newline continuations. Six revisions each shipped
+a secret leak, because an approximation of a grammar fails **open**, which is the
+wrong direction for a credential. A seventh patch would have been the same bet.
+
+The rule is now position-free and fail-closed:
+
+> In **unquoted** shell text, redact the value of every secret-named assignment,
+> wherever it appears. Never touch a **quoted** argument — except to recurse into
+> command substitutions, which the shell executes. **Heredoc bodies** are data.
+
+That needs only quoting, substitution, and heredocs — the three things a lexer
+gets right — and none of the command grammar. Every F16–F19 case is closed *by
+construction* rather than by another special case: redirections, wrapper long
+options, and chained wrappers stop being special once position stops mattering.
+F17's quoted `$(…)`/backticks are scrubbed recursively (including nested). F18's
+`<<` is only a heredoc in *unquoted* text. F19's `\<newline>` keeps the value
+glued to its assignment, in **both** the command path and the global regex path.
+
+**F20 — resolved.** All heredocs a line declares are queued and consumed in
+order, and the terminator now matches **exactly** (`<<-` strips leading TABS
+only, per POSIX — not spaces).
+
+**F14 — pushing back, with evidence.** You asked that `env PATH=/bin pytest
+api_key=example` leave `api_key=example` alone, since it is pytest's argument. I
+had agreed and implemented it; I am now reversing it, because honoring it is
+exactly what requires the position model that leaked five times. Under the new
+rule that value **is** redacted. I think this is the right trade:
+
+- It is **fail-closed**. The alternative failed open, repeatedly.
+- The command's **shape survives** — `api_key=[REDACTED:env-secret]` — so the
+  digest still records what ran.
+- The cost is **measurably near zero**. Across **2,699 real captured Bash
+  commands** from my local transcripts, only **~1%** contain a secret-named
+  `name=` token *at all*. Precise position tracking buys almost no fidelity in
+  practice, while the correctness it cost was real every single round.
+
+If you still want F14's behavior, it can only come back with a real shell parser,
+and I would want that argued on its own merits rather than reintroduced as a
+regex approximation. Spec §10 and ADR-0013 record the decision and the cost.
+
+**Validated against reality, not fixtures.** I round-tripped **all 2,699 real
+captured commands** through `redact_command()`. That caught a bug no unit test
+had: a lone apostrophe inside a heredoc body (`it can't be wrong`) makes the
+substitution scanner run to end-of-text, and an unconditional `end - 1` slice then
+**silently ate the final byte** of a real `git commit -m "$(cat <<'EOF' … )"`.
+Fixed, and promoted to a rule in §10: *redaction must never delete captured
+input* — a scanner may mis-scan, it may not lose data. Final state: **0 commands
+mangled**, 29 redacted, all of them genuinely containing secret-shaped text.
+
+**Verdict:** _pending re-review._

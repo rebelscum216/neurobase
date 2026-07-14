@@ -282,15 +282,20 @@ def scribe(
         return None  # empty capture ⇒ write nothing
 
     extra_patterns = load_config().redact.extra_patterns
+    scrub: Redactor = lambda text: redact(text, extra_patterns)  # noqa: E731
     body = _assemble_body(
         prompts,
         summary,
         parsed["ide_context"],
         parsed["highlights"],
-        lambda text: redact(text, extra_patterns),
+        scrub,
     )
     body = redact(body, extra_patterns)  # defense in depth over the whole document
 
+    # D13 covers the whole raw, not just its body (spec §10): `cwd` and `branch`
+    # are informational frontmatter, so they are scrubbed too. `session_id` is
+    # NOT — it keys the filename and the per-turn overwrite trick, so rewriting
+    # it would break dedupe. It is agent-generated, never user-authored text.
     sid = session_id or parsed["session_id"]
     started = _parse_started_at(parsed["started_at"])
     try:
@@ -299,8 +304,8 @@ def scribe(
             project,
             agent="codex",
             session_id=sid,
-            cwd=str(resolve_cwd),
-            branch=parsed["branch"],
+            cwd=scrub(str(resolve_cwd)),
+            branch=scrub(parsed["branch"]),
             captured_at=started,
             body=body,
         )
@@ -312,8 +317,8 @@ def scribe(
             project,
             agent="codex",
             session_id=sid,
-            cwd=str(resolve_cwd),
-            branch=parsed["branch"],
+            cwd=scrub(str(resolve_cwd)),
+            branch=scrub(parsed["branch"]),
             captured_at=datetime.now(UTC),
             body=body,
         )

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from neurobase.core.redact import redact
+import pytest
+
+from neurobase.core.redact import redact, redact_command
 
 
 def test_private_key_block() -> None:
@@ -66,28 +68,67 @@ def test_env_rule_does_not_redact_non_secret_vars() -> None:
     assert out == "PATH=/usr/bin:/bin"
 
 
-def test_shell_assignments_are_redacted_in_either_case() -> None:
-    """§4's command digest captures shell commands, and `export API_TOKEN=…` is
-    the commonest shape a secret takes there. The keyword marks an assignment
-    context, so this rule is case-insensitive: shell names are case-sensitive
-    but nothing requires them to be uppercase."""
-    assert redact("export api_token=hunter2") == "export api_token=[REDACTED:env-secret]"
+# A shell segment carries a keyword in COMMAND POSITION. Inside one, every
+# secret-named assignment is redacted in either case — real commands set several
+# variables and carry option operands, so scrubbing only the token right after
+# the keyword leaves the rest exposed.
+SHELL_LEAKS = [
+    "export api_token=SECRET",
+    "export API_TOKEN=SECRET && ./deploy.sh",
+    "env api_key=SECRET pytest",
+    "declare -x my_secret=SECRET",
+    "env PATH=/bin api_token=SECRET pytest",  # a non-secret assignment first
+    "export PATH=/bin api_token=SECRET",
+    "declare -x PATH=/bin my_secret=SECRET",
+    "env -u OLD api_token=SECRET pytest",  # an option operand in the way
+    "make && export api_token=SECRET",  # after a shell separator
+    "api_token=SECRET",  # line-anchored .env rule
+    "API_TOKEN=SECRET cmd",  # bare inline, uppercase
+]
+
+# Position — not the keyword alone — is what establishes shell syntax. A keyword
+# in the middle of a sentence is prose, and redacting it would destroy exactly
+# the technical content the richer skim exists to keep.
+NOT_SECRETS = [
+    "we export api_token=example in docs",
+    "SQL DECLARE api_key=value",
+    "items.sort(key=lambda x: x.id)",
+    "df.groupby(key=col, secret=False)",
+    "the local secret_key=... convention we discussed",
+    "PATH=/usr/bin",
+]
+
+
+@pytest.mark.parametrize("command", SHELL_LEAKS)
+def test_shell_assignments_are_redacted_in_either_case(command: str) -> None:
+    out = redact(command)
+    assert "SECRET" not in out
+    assert "[REDACTED:env-secret]" in out
+
+
+@pytest.mark.parametrize("text", NOT_SECRETS)
+def test_prose_and_code_are_not_redacted_as_shell(text: str) -> None:
+    assert redact(text) == text
+
+
+def test_env_assignments_redact_every_occurrence_not_just_the_first() -> None:
     assert (
-        redact("export API_TOKEN=hunter2 && ./deploy.sh")
-        == "export API_TOKEN=[REDACTED:env-secret] && ./deploy.sh"
+        redact("env api_token=one other_secret=two pytest")
+        == "env api_token=[REDACTED:env-secret] other_secret=[REDACTED:env-secret] pytest"
     )
-    assert redact("env api_key=hunter2 pytest") == "env api_key=[REDACTED:env-secret] pytest"
-    assert redact("declare -x my_secret=hunter2") == "declare -x my_secret=[REDACTED:env-secret]"
 
 
-def test_bare_inline_assignment_is_redacted_without_swallowing_code() -> None:
-    """With no keyword to mark an assignment context, the *name's* shape is the
-    only signal — so the bare inline rule stays case-sensitive. Lowercase would
-    make ordinary keyword arguments collateral."""
-    assert redact("API_TOKEN=hunter2 ./run.sh") == "API_TOKEN=[REDACTED:env-secret] ./run.sh"
-    assert redact("make && API_TOKEN=hunter2") == "make && API_TOKEN=[REDACTED:env-secret]"
-    assert redact("items.sort(key=lambda x: x.id)") == "items.sort(key=lambda x: x.id)"
-    assert redact("df.groupby(key=col, secret=False)") == "df.groupby(key=col, secret=False)"
+def test_redact_command_needs_no_keyword_to_prove_it_is_shell() -> None:
+    """The §4 activity digest captured `input.command` — we KNOW it is a shell
+    command, so no keyword is needed and case carries no weight. That knowledge
+    is what lets `redact_command` be aggressive where `redact` must not be."""
+    assert redact_command("api_token=hunter2 ./run.sh") == (
+        "api_token=[REDACTED:env-secret] ./run.sh"
+    )
+    assert redact_command("pytest --api-key=hunter2") == "pytest --api-key=[REDACTED:env-secret]"
+    # The same lowercase assignment mid-line is left alone by the global table,
+    # which is the whole point of separating the channel.
+    assert redact("run it with api_token=hunter2 please") == "run it with api_token=hunter2 please"
 
 
 def test_env_rule_preserves_leading_indent() -> None:

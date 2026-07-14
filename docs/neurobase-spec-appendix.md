@@ -571,34 +571,58 @@ first modification of any agent config file in a given init run.
 | `\bxox[baprs]-[A-Za-z0-9-]{10,}\b` | `[REDACTED:slack-token]` |
 | `\bghp_[A-Za-z0-9]{36}\b` and `\bgithub_pat_[A-Za-z0-9_]{20,}\b` | `[REDACTED:github-token]` |
 | `Bearer\s+[A-Za-z0-9._~+/=-]{20,}` | `Bearer [REDACTED:bearer]` |
-| (case-insensitive) `\b(export\|declare\|typeset\|local\|setenv\|env)((?:[ \t]+-\S+)*[ \t]+)(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the **keyword** and the name, value → `[REDACTED:env-secret]` |
+| **shell segment** (multiline, case-insensitive) `(?:^\|(?<=[;&\|(` + "`" + `]))([ \t]*(?:export\|env\|declare\|typeset\|local)\b[^\n;&\|` + "`" + `]*)` | within the matched segment, **every** `(<SECRET_NAME>)[ \t]*=[ \t]*\S+` (case-insensitive) → keep the name, value → `[REDACTED:env-secret]` |
 | (multiline, case-insensitive) `^([ \t]*)(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the **indent** and the name, value → `[REDACTED:env-secret]` |
 | (case-**sensitive**) `(?<![A-Za-z0-9_])(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the name, value → `[REDACTED:env-secret]` |
 
 where `<SECRET_NAME>` is `[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*`.
+
+**`redact_command(text)`** — a stricter pass for a value **known to be a shell
+command** (§4's tool-activity digest captured `input.command` verbatim). It
+applies the table above, then redacts *every* secret-named assignment in the
+string, case-insensitively, with no keyword required. Knowing the channel is
+what licenses that aggression: a command is not prose and not code, so
+`api_token=… ./run.sh` and `pytest --api-key=…` can both go without taxing
+everything else. Scribes MUST use it for the command digest.
 
 Scope notes:
 
 - The env rules intentionally match only secret-ish variable names — a pasted
   `PATH=/usr/bin` survives. The `[REDACTED:<type>]` vocabulary above is closed;
   `extra_patterns` additions use `[REDACTED:custom]`.
-- Three rules cover assignments, because **the signal that "this is a secret
-  being set" differs by context**, and casing alone is too blunt a lever:
-  - **Shell-context** (`export API_TOKEN=…`, `env api_key=… cmd`,
-    `declare -x my_secret=…`). The *keyword* is what marks an assignment, so
-    this rule is **case-insensitive** — shell variable names are case-sensitive
-    but nothing requires them to be uppercase, and `export api_token=…` is a
-    perfectly ordinary way to leak a secret. §4's command digest is what makes
-    this shape reachable at all: a shell command is exactly where it lives.
+- Assignments need three rules, because **the signal that "this is a secret being
+  set" is contextual**. Neither casing nor a keyword alone is a sufficient lever:
+  - **Shell segment.** A keyword (`export`/`env`/`declare`/`typeset`/`local`) in
+    **command position** — opening a line, or after a shell separator
+    (`;` `&&` `||` `|` `(` `` ` ``) — through the end of that segment. *Position*
+    is what establishes shell syntax; a bare keyword does not, or prose ("we
+    export api_token=x in the docs") and SQL ("SQL DECLARE api_key=v") would be
+    mangled as if they were commands, destroying exactly the technical content
+    §4's richer skim exists to keep. Inside a matched segment the rule is
+    **case-insensitive** and applies to **every** assignment, not just the first
+    one after the keyword: real commands carry option operands and several
+    assignments (`env -u OLD PATH=/bin api_token=… pytest`), and scrubbing only
+    the first token leaves the rest exposed. `setenv` is deliberately *not* a
+    keyword here — its syntax is `setenv NAME value`, with no `=`.
   - **Line-anchored** (`.env`-style lines), case-insensitive. It MUST capture
     and re-emit the leading indent — a scribe body's structural indentation (§4)
     has to survive redaction — and use `[ \t]` (not `\s`) so it can never
     swallow a newline.
-  - **Bare inline** (`API_TOKEN=… cmd`, `foo && API_TOKEN=…`), where no keyword
+  - **Bare inline** (`API_TOKEN=… cmd`, `foo && API_TOKEN=…`), where nothing
     disambiguates and the *name's shape* is the only signal. This one is
     **case-sensitive**: lowercase would make ordinary keyword arguments
-    (`sort(key=…)`, `groupby(key=col, secret=False)`) collateral. Lowercase bare
-    assignments are still covered when they open a line or carry a keyword.
+    (`sort(key=…)`, `groupby(key=col, secret=False)`) collateral.
+- **Known residual:** a lowercase secret-named assignment embedded *mid-sentence
+  in prose* — "…and then I ran export api_token=abc123" — is **not** redacted.
+  Catching it means treating any keyword anywhere as shell, which is the
+  over-broad rule this design deliberately rejects. D13 is a best-effort regex
+  table (SECURITY.md says so); silently gutting captured prose was judged the
+  worse failure. Commands themselves are fully covered via `redact_command`.
+- **Scope: D13 is a whole-raw guarantee, not body-only.** Scribes MUST also
+  scrub the informational frontmatter they write (`cwd`, `branch`). They MUST
+  NOT scrub `session_id`: it keys the raw filename and the §5 per-turn overwrite,
+  so rewriting it would break dedupe — and it is agent-generated, never
+  user-authored text.
 - **Redact the captured value, not the rendered document.** A scribe MUST apply
   the table to each captured value *before* rendering it into the body: a
   structural prefix like `"- "` shifts text off column 0 and shields it from

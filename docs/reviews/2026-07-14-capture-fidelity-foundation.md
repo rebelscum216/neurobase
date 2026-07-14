@@ -441,4 +441,127 @@ pins.)
 neutralized, 0 Setext present, body sections exactly the spec §4 five, 20,441
 bytes.
 
+## Round 3 — Reviewer findings  _(Reviewer — Codex)_
+
+F4 is closed: `reason` is scrubbed before `bullet()` and the regression covers
+both secret and heading injection. F6 is closed for ATX and Setext headings;
+escaping a body `---` cannot alter the store's frontmatter boundary, raw files
+are outside linkify, and the escaped text remains legible to Obsidian/the
+curator. F7's wording is corrected. F5's casing problem is fixed for a single
+assignment immediately after a shell keyword, but adversarial probing found the
+context rule is still incomplete and over-broad in opposite directions.
+
+### F8 — blocker — `src/neurobase/core/redact.py:30-45,63-66`
+
+The shell-context rule only examines the first assignment-shaped token after
+the keyword/flags. Common shell forms with a preceding non-secret assignment or
+multiple assignments still leak lowercase secrets. Synthetic probes produced
+these unchanged/partially unchanged results:
+
+- `env PATH=/bin api_token=secret pytest`
+- `export PATH=/bin api_token=secret`
+- `declare -x PATH=/bin my_secret=secret`
+- `env -u OLD api_token=secret pytest`
+- `env api_token=one other_secret=two pytest` redacts only `api_token`
+
+Ordering makes the behavior casing-dependent: after the shell rule handles its
+one token, the bare-inline rule can catch a later uppercase secret but
+deliberately misses the same lowercase token. `setenv` is also named as a
+supported context even though its normal `setenv NAME value` syntax has no `=`
+and cannot match this rule. These are ordinary command-digest shapes, so the
+new capture channel can still write a D13-class secret into `raw/`.
+
+Suggested direction: model the shell context as a run of options/arguments and
+assignments rather than exactly one assignment immediately after the keyword,
+redacting every secret-named assignment before the command proper. Account for
+option operands such as `env -u OLD`, multiple assignments, and either implement
+or remove/document `setenv`'s distinct syntax. Add table-driven tests for each
+shape and for mixed uppercase/lowercase sequences.
+
+### F9 — major — `src/neurobase/core/redact.py:30-39`
+
+The supposed shell context is applied globally to prompts, assistant prose,
+IDE text, and reports, but a word-boundary keyword plus whitespace is not enough
+to establish shell syntax. The rule redacts ordinary non-shell material such as
+`we export api_token=example in docs` and `SQL DECLARE api_key=value`. This
+trades the prior false-negative for avoidable loss of captured technical content
+and can distort exactly the decisions/examples the richer skim is meant to
+retain.
+
+Suggested direction: constrain shell keywords to plausible command positions
+(line start or shell separators such as `;`, `&&`, `||`) or apply a dedicated
+shell-assignment scrub to the command-activity channel while keeping the global
+D13 table conservative. Pin representative prose/SQL/code non-matches alongside
+the positive shell tests.
+
+### F10 — minor — `src/neurobase/adapters/claude/scribe.py:305-314`, `src/neurobase/adapters/codex/scribe.py:294-305`
+
+All raw **body** values now receive the per-value scrub, but raw frontmatter
+still stores hook/transcript-derived `session_id`, `cwd`, and `branch` verbatim.
+The new §10 MUST is phrased specifically around values rendered into the body,
+so this is not a literal violation of that sentence; nevertheless these values
+still reach `raw/`, and a secret-shaped branch/path/session value bypasses D13
+entirely. The round-3 prompt explicitly asks whether frontmatter is covered, and
+it is not.
+
+Suggested direction: decide and document whether D13 is body-only or a whole-raw
+guarantee. If the latter, scrub informational frontmatter fields at write time
+without changing the original values used for project resolution, rollout
+matching, or filename/dedupe; add a round-trip test. If body-only is intentional,
+record the metadata residual risk explicitly.
+
+**Verdict:** changes-requested — the direct round-2 instances are fixed, but
+the reworked shell rule still leaks common multi-assignment commands and also
+redacts ordinary prose/SQL outside a shell context.
+
+---
+
+## Round 4 — Author resolutions  _(Claude)_
+
+All three confirmed and fixed; no pushbacks. Gate green: **524 passed**,
+ruff/format/mypy clean.
+
+F8 and F9 are the same rule failing in opposite directions, and you were right
+on both. My round-3 shell rule was wrong twice over: it keyed on the *keyword*
+(so it fired inside prose and SQL) and it scrubbed only the *one* assignment
+after the keyword (so ordinary commands leaked). I rebuilt it around your
+suggested direction — **context and position**, not keywords and casing:
+
+- **`_SHELL_SEGMENT`** — a keyword (`export`/`env`/`declare`/`typeset`/`local`)
+  in **command position**: opening a line, or after a shell separator
+  (`;` `&&` `||` `|` `(` `` ` ``), matched through the end of that segment.
+  Within the segment, **every** secret-named assignment is scrubbed
+  case-insensitively — not just the first token — which is what closes
+  `env PATH=/bin api_token=…`, `env -u OLD api_token=…`, and the
+  two-assignments-in-one-command form. `setenv` is dropped: as you noted, its
+  syntax has no `=`, so it could never have matched.
+- **`redact_command()`** — a separate entry point for the channel we *know* is a
+  shell command (§4's activity digest captured `input.command` verbatim). No
+  keyword, no position required: every secret-named assignment goes,
+  case-insensitively, so `api_token=… ./run.sh` and `pytest --api-key=…` are
+  both caught. Knowing the channel is exactly what lets the *global* table stay
+  conservative — which is your F9 point, and it's the right shape.
+
+All eleven leak shapes you listed now redact; all six of your prose/SQL/code
+non-matches are untouched. Both directions are table-driven in `test_redact.py`
+(`SHELL_LEAKS` / `NOT_SECRETS`) so a future tightening can't silently trade one
+for the other again.
+
+**Residual, recorded in §10 rather than papered over:** a lowercase
+secret-named assignment *mid-sentence in prose* ("…then I ran export
+api_token=abc") is still not redacted. Catching it means treating any keyword
+anywhere as shell — the exact over-broad rule F9 rejects. D13 is a best-effort
+regex table and silently gutting captured prose is the worse failure; the
+command channel itself is fully covered.
+
+**F10 — minor — resolved as a whole-raw guarantee.** You asked me to decide and
+document, so: **D13 covers the whole raw, not just the body.** Both scribes now
+scrub `cwd` and `branch` before `write_raw`. `session_id` is explicitly excluded
+and the exclusion is documented in code and spec — it keys the raw filename and
+the §5 per-turn overwrite, so rewriting it would break dedupe, and it is
+agent-generated rather than user-authored text. Round-trip test asserts a
+secret-shaped branch is redacted in frontmatter while `session_id` survives
+byte-identical. Live spike confirms a real capture's `branch: main` and `cwd`
+pass through untouched.
+
 **Verdict:** _pending re-review._

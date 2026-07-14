@@ -24,7 +24,7 @@ from neurobase.adapters.scribe_common import (
 )
 from neurobase.core import projects, store
 from neurobase.core.config import load_config
-from neurobase.core.redact import redact
+from neurobase.core.redact import redact, redact_command
 
 __all__ = [
     "MAX_ASSISTANT_MSG_CHARS",
@@ -225,10 +225,15 @@ def parse_transcript(transcript_path: Path) -> dict[str, Any]:
     }
 
 
-def _assemble_body(parsed: dict[str, Any], reason: str, scrub: Redactor) -> str:
+def _assemble_body(
+    parsed: dict[str, Any], reason: str, scrub: Redactor, scrub_command: Redactor
+) -> str:
     """Render the spec §4 body. ``scrub`` (D13 redaction) runs on every captured
     value *before* it is rendered: a structural prefix like ``"- "`` would shift
-    the text off column 0 and shield it from the table's line-anchored rules."""
+    the text off column 0 and shield it from the table's line-anchored rules.
+
+    ``scrub_command`` is the stricter pass for values we *know* are shell
+    commands, where every secret-named assignment goes regardless of case."""
     kept = [scrub(p[:MAX_PROMPT_CHARS]) for p in parsed["prompts"][-MAX_PROMPTS:]]
     summary = scrub(parsed["summary"][:MAX_SUMMARY_CHARS])
     lines = [
@@ -248,7 +253,9 @@ def _assemble_body(parsed: dict[str, Any], reason: str, scrub: Redactor) -> str:
         if files:
             lines.extend(["", "### Files touched", *[bullet(scrub(path)) for path in files]])
         if commands:
-            lines.extend(["", "### Commands run", *[bullet(scrub(cmd)) for cmd in commands]])
+            lines.extend(
+                ["", "### Commands run", *[bullet(scrub_command(cmd)) for cmd in commands]]
+            )
     reports: list[str] = parsed["subagent_reports"]
     if reports:
         lines.extend(["", "## Subagent reports"])
@@ -301,17 +308,23 @@ def scribe(
         return None  # empty capture ⇒ write nothing
 
     extra_patterns = load_config().redact.extra_patterns
-    body = _assemble_body(parsed, reason, lambda text: redact(text, extra_patterns))
+    scrub: Redactor = lambda text: redact(text, extra_patterns)  # noqa: E731
+    scrub_command: Redactor = lambda text: redact_command(text, extra_patterns)  # noqa: E731
+    body = _assemble_body(parsed, reason, scrub, scrub_command)
     body = redact(body, extra_patterns)  # defense in depth over the whole document
 
+    # D13 covers the whole raw, not just its body (spec §10): `cwd` and `branch`
+    # are informational frontmatter, so they are scrubbed too. `session_id` is
+    # NOT — it keys the filename and the Codex per-turn overwrite, so rewriting
+    # it would break dedupe. It is agent-generated, never user-authored text.
     sid = session_id or parsed["session_id"]
     return store.write_raw(
         root,
         project,
         agent="claude",
         session_id=sid,
-        cwd=str(resolve_cwd),
-        branch=parsed["branch"],
+        cwd=scrub(str(resolve_cwd)),
+        branch=scrub(parsed["branch"]),
         captured_at=datetime.now(UTC),
         body=body,
     )

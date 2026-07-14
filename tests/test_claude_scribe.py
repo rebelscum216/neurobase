@@ -486,6 +486,68 @@ def test_hook_supplied_reason_is_scrubbed_and_escaped_like_any_other_value(
     assert "  \\## Prompts" in body
 
 
+def test_d13_covers_frontmatter_but_never_rewrites_the_session_id(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """D13 is a whole-raw guarantee, not a body-only one (spec §10): `cwd` and
+    `branch` are informational and get scrubbed. `session_id` does NOT — it keys
+    the filename and the per-turn overwrite, so rewriting it would break dedupe.
+    It is agent-generated, never user-authored text."""
+    root, repo = enabled
+    events = [
+        {
+            "type": "user",
+            "isSidechain": False,
+            "cwd": str(repo),
+            "gitBranch": "feature/sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123",
+            "message": {"content": "hi"},
+        }
+    ]
+    written = scribe.scribe(
+        root,
+        transcript_path=_write_transcript(tmp_path / "fm.jsonl", events),
+        cwd=str(repo),
+        reason="clear",
+        session_id="sess-abc-123",
+    )
+    assert written is not None
+    doc = store.read_doc(written)
+    assert "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123" not in str(doc["branch"])
+    assert "[REDACTED:api-key]" in str(doc["branch"])
+    assert doc["session_id"] == "sess-abc-123"  # untouched — it is a key
+
+
+def test_activity_commands_use_the_stricter_command_scrub(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """A captured Bash command is known-shell, so a lowercase bare assignment in
+    it must go — the global table deliberately leaves that shape alone in prose."""
+    root, repo = enabled
+    events = [
+        {"type": "user", "isSidechain": False, "cwd": str(repo), "message": {"content": "run it"}},
+        _assistant(
+            blocks=[
+                {
+                    "type": "tool_use",
+                    "id": "b1",
+                    "name": "Bash",
+                    "input": {"command": "api_token=hunter2 ./deploy.sh"},
+                }
+            ]
+        ),
+    ]
+    body = store.read_doc(
+        scribe.scribe(  # type: ignore[arg-type]
+            root,
+            transcript_path=_write_transcript(tmp_path / "cmd.jsonl", events),
+            cwd=str(repo),
+            reason="clear",
+        )
+    ).body
+    assert "hunter2" not in body
+    assert "api_token=[REDACTED:env-secret] ./deploy.sh" in body
+
+
 def test_setext_underlines_cannot_forge_headings(tmp_path: Path) -> None:
     """CommonMark promotes a line to a heading when the *next* line underlines
     it with `===`/`---` — nothing about the promoted line looks like a heading,

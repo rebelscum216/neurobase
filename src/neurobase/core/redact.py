@@ -27,21 +27,34 @@ _ENV_SECRET = re.compile(
     rf"^([ \t]*)({_SECRET_NAME})[ \t]*=[ \t]*\S+",
     re.MULTILINE | re.IGNORECASE,
 )
-# Shell assignment *in an explicit assignment context* — `export API_TOKEN=…`,
-# `env api_token=… cmd`, `declare -x foo_secret=…`. The keyword is what tells us
-# this is a variable being set rather than a keyword argument in code, so this
-# rule can stay **case-insensitive** (shell names are case-sensitive but not
-# required to be uppercase) without swallowing `sort(key=…)`.
-_SHELL_ENV_SECRET = re.compile(
-    rf"\b(export|declare|typeset|local|setenv|env)((?:[ \t]+-\S+)*[ \t]+)({_SECRET_NAME})"
-    rf"[ \t]*=[ \t]*\S+",
+# ANY secret-named assignment, case-insensitive, anywhere in the string. Only
+# ever applied to text already known to be a shell command — never globally,
+# where it would eat `sort(key=…)`. See `_SHELL_SEGMENT` and `redact_command`.
+_ANY_SECRET_ASSIGNMENT = re.compile(
+    rf"(?<![A-Za-z0-9_])({_SECRET_NAME})[ \t]*=[ \t]*\S+",
     re.IGNORECASE,
 )
-# Bare inline assignment with no keyword to disambiguate — `API_TOKEN=… cmd`,
-# `foo && API_TOKEN=…`. Here the *name's* shape is the only signal, so this one
-# stays case-sensitive: lowercase would make `sort(key=…)` and `items[key=x]`
-# collateral. Lowercase bare assignments are still covered when they open a line
-# (the `.env` rule above) or carry a keyword (the shell rule above).
+# A shell segment: an assignment keyword **in command position** — opening a
+# line, or following a shell separator (`;` `&&` `||` `|` `(` `` ` ``) — through
+# the end of that segment. Position is what establishes shell syntax; a bare
+# keyword does not, or prose ("we export api_token=x in the docs") and SQL
+# ("SQL DECLARE api_key=v") would be redacted as if they were commands.
+#
+# The whole segment is captured, not just the first assignment after the
+# keyword: real commands carry option operands and several assignments
+# (`env -u OLD PATH=/bin api_token=… pytest`), and scrubbing only the first
+# token leaves the rest exposed. `setenv` is deliberately absent — its syntax is
+# `setenv NAME value`, with no `=`, so it cannot match an assignment rule.
+_SHELL_SEGMENT = re.compile(
+    r"(?:^|(?<=[;&|(`]))([ \t]*(?:export|env|declare|typeset|local)\b[^\n;&|`]*)",
+    re.MULTILINE | re.IGNORECASE,
+)
+# Bare inline assignment with no keyword and no command context — `API_TOKEN=…`
+# inside prose or code. The *name's* shape is the only signal here, so this one
+# stays case-sensitive: lowercase would make `sort(key=…)` and
+# `groupby(key=col, secret=False)` collateral. Lowercase bare assignments are
+# still covered when they open a line (the `.env` rule) or sit in a shell
+# command (the two rules above).
 _INLINE_ENV_SECRET = re.compile(rf"(?<![A-Za-z0-9_])({_SECRET_NAME})[ \t]*=[ \t]*\S+")
 
 # Order matters: private keys span multiple lines and must be consumed before
@@ -60,11 +73,30 @@ def redact(text: str, extra_patterns: Iterable[str] = ()) -> str:
     """Apply the D13 redaction table (+ any config-supplied extras) to ``text``."""
     for pattern, replacement in _BUILTIN_PATTERNS:
         text = pattern.sub(replacement, text)
-    # env-secret rules keep the variable name (and any indent/keyword), redact
-    # the value. Shell-context rule first: it is the most specific.
-    text = _SHELL_ENV_SECRET.sub(r"\1\2\3=[REDACTED:env-secret]", text)
+    # env-secret rules keep the variable name (and any indent), redact the value.
+    # Shell segments first: inside one, EVERY secret assignment goes, in either
+    # case. Then the line-anchored `.env` rule, then the conservative bare rule.
+    text = _SHELL_SEGMENT.sub(lambda m: _scrub_assignments(m.group(0)), text)
     text = _ENV_SECRET.sub(r"\1\2=[REDACTED:env-secret]", text)
     text = _INLINE_ENV_SECRET.sub(r"\1=[REDACTED:env-secret]", text)
     for raw_pattern in extra_patterns:
         text = re.sub(raw_pattern, "[REDACTED:custom]", text)
     return text
+
+
+def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
+    """D13 for a value that is *known* to be a shell command — spec §4's
+    tool-activity digest, where the scribe captured `input.command` verbatim.
+
+    The command channel needs no keyword to prove it is shell, so every
+    secret-named assignment in it is redacted in either case: `api_token=… ./run`
+    leaks exactly as well as `API_TOKEN=… ./run`, and `redact`'s bare-inline rule
+    is deliberately case-sensitive to protect ordinary code, which a command is
+    not. Knowing the channel is what lets us be aggressive here without taxing
+    prose everywhere else.
+    """
+    return _scrub_assignments(redact(text, extra_patterns))
+
+
+def _scrub_assignments(text: str) -> str:
+    return _ANY_SECRET_ASSIGNMENT.sub(r"\1=[REDACTED:env-secret]", text)

@@ -60,15 +60,30 @@ sections**, including a content-supplied `## Final assistant summary`.
 Fixing (2) surfaced a second gap in the D13 table itself, independent of this
 branch: the env rule only ever matched a *line-initial* assignment, so
 `export API_TOKEN=<secret>` — the single most common way a secret appears in a
-shell command — was never redacted at all. §10 now separates the assignment
-rules by **context rather than by casing**, which was the key correction: a
-first attempt used case-sensitivity as the lever to avoid swallowing
-`sort(key=…)`, but that silently left `export api_token=<secret>` exposed, and
-shell variable names are not required to be uppercase. The keyword in
-`export`/`env`/`declare` is what identifies a variable assignment, so that rule
-is case-insensitive; only the *bare* inline assignment — where the name's shape
-is the sole signal — stays case-sensitive. The line-anchored rule also now
-preserves the indent it consumes, so redaction cannot reflow a body's structure.
+shell command — was never redacted at all. Closing it took three attempts, and
+the two failures are the instructive part:
+
+- **Casing is not the lever.** The first attempt made the new rule
+  case-sensitive to avoid swallowing `sort(key=…)`. That bought the false
+  positive at the price of a false negative: `export api_token=<secret>` stayed
+  exposed, and shell variable names are not required to be uppercase.
+- **A keyword is not shell syntax, and one assignment is not a command.** The
+  second attempt keyed on the keyword anywhere, and scrubbed the single
+  assignment after it. It redacted ordinary prose ("we export api_token=x in the
+  docs") and SQL, *and* still leaked the ordinary multi-assignment forms
+  (`env PATH=/bin api_token=… pytest`, `env -u OLD api_token=… pytest`).
+
+§10's rules are therefore keyed on **context and position**: a keyword in
+*command position* (line start or after a shell separator) opens a segment, and
+every assignment within that segment is scrubbed case-insensitively. Separately,
+`redact_command` handles the channel we *know* is a shell command — §4's
+activity digest — with no keyword required at all, which is what lets the global
+table stay conservative. The line-anchored rule also now preserves the indent it
+consumes, so redaction cannot reflow a body's structure.
+
+D13 is also confirmed as a **whole-raw** guarantee, not body-only: scribes scrub
+the informational frontmatter they write (`cwd`, `branch`), but never
+`session_id`, which keys the raw filename and the §5 per-turn overwrite.
 
 ## Consequences
 

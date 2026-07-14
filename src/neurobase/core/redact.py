@@ -29,7 +29,9 @@ _SECRET_NAME = r"[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-
 # `api_token="hunter two` redacts `"hunter` and leaves ` two` in the store. A
 # command that failed to parse is still a captured command with a live secret in
 # it. Only then the bare-word form.
-_VALUE = r"""(?:"(?:\\.|[^"])*"|'[^']*'|\$'(?:\\.|[^'])*'|["'][^\n]*|\S+)"""
+# The bare-word form stops at shell-structural closers, not just at whitespace:
+# `\S+` swallowed the `))` of `$((API_TOKEN=1))`, deleting captured structure.
+_VALUE = r"""(?:"(?:\\.|[^"])*"|'[^']*'|\$'(?:\\.|[^'])*'|["'][^\n]*|[^\s;&|()<>]+)"""
 # `.env`-style line: NAME=value, at the start of a line. `[ \t]*` (not `\s*`)
 # so the rule can never eat a newline, and the leading indent is *captured* and
 # re-emitted — a body's structural indentation must survive redaction (spec §4).
@@ -93,8 +95,20 @@ def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
     guessing from keywords. It does NOT mean the text is free of prose or code:
     `python -c "…"`, `sqlite3 db "…"` and `echo "…"` carry source, SQL, and prose
     as quoted arguments, and those are data the command consumes — left verbatim.
+
+    The prose-oriented regex rules of `redact` are deliberately NOT run over a
+    command: their bare-word value (`\\S+`) has no idea what shell syntax is, and
+    it ate the closing `))` of `echo $((API_TOKEN=1))`. On a command the shell
+    scanner does that job, and it preserves structure. The literal-secret patterns
+    (private keys, AWS/GitHub/Slack tokens, bearers) still apply — those are shape
+    matches, not syntax.
     """
-    return _scrub_shell(redact(text, extra_patterns))
+    for pattern, replacement in _BUILTIN_PATTERNS:
+        text = pattern.sub(replacement, text)
+    text = _scrub_shell(text)
+    for raw_pattern in extra_patterns:
+        text = re.sub(raw_pattern, "[REDACTED:custom]", text)
+    return text
 
 
 # --- shell scrubbing --------------------------------------------------------
@@ -115,13 +129,19 @@ def redact_command(text: str, extra_patterns: Iterable[str] = ()) -> str:
 # argument* to some other command (`env PATH=/bin pytest api_key=example`) is
 # redacted even though it is not an environment assignment. That is a deliberate
 # trade: it is fail-closed, it preserves the command's shape
-# (`api_key=[REDACTED:env-secret]`), and across 2,686 real captured commands only
-# 1.38% contain a secret-named `name=` token at all — so precise position tracking
-# buys almost no fidelity in practice, while costing correctness we could not
-# deliver. Spec §10 records this.
+# (`api_key=[REDACTED:env-secret]`), and only a small minority of real captured
+# commands contain a secret-named `name=` token at all — so precise position
+# tracking buys little fidelity in practice, while costing correctness we could
+# not deliver. The security case rests on that fail-open HISTORY, not on a rate;
+# `scripts/audit_command_redaction.py` is a local, reproducible smoke test of the
+# no-mangling MUST, not a general guarantee. Spec §10 records this.
 
-# `name=` opening an unquoted word. The name may be quoted (`"api_token"=v`).
-_ASSIGN_HEAD = re.compile(rf"""["']?({_SECRET_NAME})["']?=""", re.IGNORECASE)
+# `name=` opening an unquoted word. The name may itself be quoted, but the quote
+# must CLOSE before the `=` — `"api_token"=v` is an assignment; `'api_token=v'` is
+# an entire quoted ARGUMENT and must survive verbatim. The backreference is what
+# tells them apart; `["']?…["']?` matched the opening quote of a quoted argument
+# and ate its closing delimiter.
+_ASSIGN_HEAD = re.compile(rf"""(["']?)({_SECRET_NAME})\1=""", re.IGNORECASE)
 # A credential option: an ALLOW-LIST, never a `*key*` pattern — `--sort-key=name`,
 # `--key=id` and `--password-policy=strict` select and configure, they don't auth.
 _SECRET_OPTION_NAMES = frozenset(
@@ -136,8 +156,19 @@ _OPTION_HEAD = re.compile(r"""--?([A-Za-z0-9][A-Za-z0-9_-]*)=""")
 # argument is a bit-shift or prose, not a heredoc — promoting it hid an entire
 # following command from redaction).
 _HEREDOC_OP = re.compile(r"""<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2""")
-# A word boundary: an assignment can only START a word.
-_WORD_BREAK = " \t\n;&|()<>"
+# A word boundary: an assignment can only START a word. `\r` is here so a CRLF
+# command keeps its carriage return (dropping it deletes captured input).
+_WORD_BREAK = " \t\r\n;&|()<>"
+_SEPARATORS_RESET = frozenset({";", "&&", "||", "|"})
+# `eval "…"` and `sh -c "…"` EXECUTE their string argument. Under the "a quoted
+# argument is data" invariant those would be an unredacted channel, so the
+# executed string is scrubbed as shell instead. This is a narrow allow-list, not
+# a return of the position model: missing a shell here degrades to "treated as
+# data", which spec §10 records as a residual.
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_BARE_WORD = re.compile(r"""[A-Za-z0-9_./-]+""")
+# `${NAME:=value}` / `${NAME=value}` assign; `${NAME:-value}` does not.
+_EXPANSION_ASSIGN = re.compile(rf"""\$\{{({_SECRET_NAME}):?=""", re.IGNORECASE)
 
 
 def _scrub_shell(text: str) -> str:
@@ -162,9 +193,23 @@ def _scrub_shell(text: str) -> str:
     index, size = 0, len(text)
     heredocs: list[tuple[str, bool]] = []  # (delimiter, strip_leading_tabs)
     at_word_start = True
+    executes_next = False  # the next quoted word is CODE (`eval …`, `sh -c …`)
+    shell_seen = False
 
     while index < size:
         char = text[index]
+
+        if text.startswith("\\`", index):
+            # An ESCAPED backtick opens a NESTED legacy substitution — the standard
+            # way backticks nest (``echo `echo \`inner\``` ``). Treated as a plain
+            # escape, its body never reached a word start and the secret survived.
+            close = text.find("\\`", index + 2)
+            closed = close != -1
+            inner = text[index + 2 : close] if closed else text[index + 2 :]
+            out.append("\\`" + _scrub_shell(inner) + ("\\`" if closed else ""))
+            index = close + 2 if closed else size
+            at_word_start = False
+            continue
 
         if char == "\\" and index + 1 < size:  # escape, incl. `\<newline>`
             out.append(text[index : index + 2])
@@ -200,31 +245,57 @@ def _scrub_shell(text: str) -> str:
         if char == "'":
             end = text.find("'", index + 1)
             end = size if end == -1 else end + 1  # unterminated ⇒ to the end
-            out.append(text[index:end])
+            # `eval '…'` / `sh -c '…'` — the quoted string is CODE the shell
+            # executes, not data it consumes, so it gets scrubbed like shell.
+            out.append(
+                _scrub_executed_string(text[index:end]) if executes_next else text[index:end]
+            )
+            executes_next = False
             index = end
             at_word_start = False
             continue
 
         if char == '"':
             end = _end_of_double_quote(text, index)
-            out.append(_scrub_double_quoted(text[index:end]))
+            span = text[index:end]
+            out.append(
+                _scrub_executed_string(span) if executes_next else _scrub_double_quoted(span)
+            )
+            executes_next = False
             index = end
             at_word_start = False
             continue
 
         if char == "`":
-            end = text.find("`", index + 1)
-            end = size if end == -1 else end
-            out.append("`" + _scrub_shell(text[index + 1 : end]))
-            if end < size:
-                out.append("`")
-            index = end + 1
+            end = _end_of_backticks(text, index)
+            closed = end <= size and text[end - 1 : end] == "`"
+            inner = text[index + 1 : end - 1] if closed else text[index + 1 : end]
+            out.append("`" + _scrub_shell(inner) + ("`" if closed else ""))
+            index = end
+            at_word_start = False
+            continue
+
+        if text.startswith("$((", index):
+            # Arithmetic. `$((API_TOKEN=1))` assigns, so scrub it — but the
+            # delimiters are structure and must survive intact.
+            end = _end_of_substitution(text, index + 2)
+            out.append("$(" + _scrub_substitution(text, index + 2, end))
+            index = end
             at_word_start = False
             continue
 
         if text.startswith("$(", index):
             end = _end_of_substitution(text, index + 1)
             out.append("$(" + _scrub_substitution(text, index + 2, end))
+            index = end
+            at_word_start = False
+            continue
+
+        if text.startswith("${", index):
+            # `${API_TOKEN:=SECRET}` and `${API_TOKEN=SECRET}` ASSIGN when unset —
+            # they are a secret assignment wearing an expansion's clothes.
+            end = _end_of_expansion(text, index + 1)
+            out.append(_scrub_expansion(text[index:end]))
             index = end
             at_word_start = False
             continue
@@ -237,11 +308,49 @@ def _scrub_shell(text: str) -> str:
             at_word_start = False
             continue
 
+        if at_word_start:  # arm the executed-string channel on `eval` / `sh -c`
+            word = _BARE_WORD.match(text, index)
+            if word is not None:
+                token = word.group(0)
+                if token == "eval":
+                    executes_next = True
+                elif token in _SHELLS:
+                    shell_seen = True
+                elif token == "-c" and shell_seen:
+                    executes_next = True
+                elif token in _SEPARATORS_RESET:
+                    shell_seen = executes_next = False
+                out.append(token)
+                index = word.end()
+                at_word_start = False
+                continue
+
         out.append(char)
         index += 1
         at_word_start = char in _WORD_BREAK
+        if char in ";&|\n":
+            shell_seen = executes_next = False  # a new command begins
 
     return "".join(out)
+
+
+def _scrub_expansion(span: str) -> str:
+    """`${NAME:=value}` / `${NAME=value}` ASSIGN when NAME is unset — a secret
+    assignment wearing an expansion's clothes. `${NAME:-value}` only substitutes
+    and is left alone. Delimiters are preserved either way."""
+    match = _EXPANSION_ASSIGN.match(span)
+    if match is None:
+        return span
+    closer = "}" if span.endswith("}") else ""
+    return f"{match.group(0)}[REDACTED:env-secret]{closer}"
+
+
+def _scrub_executed_string(span: str) -> str:
+    """The string argument of `eval` / `sh -c` is CODE the shell executes, not
+    data it consumes, so it is scrubbed as shell. Quotes are preserved."""
+    if len(span) >= 2 and span[0] in "\"'" and span[-1] == span[0]:
+        return span[0] + _scrub_shell(span[1:-1]) + span[-1]
+    return _scrub_shell(span)
 
 
 def _scrub_substitution(text: str, start: int, end: int) -> str:
@@ -264,16 +373,32 @@ def _is_credential_option(name: str) -> bool:
 
 
 def _skip_value(text: str, index: int) -> int:
-    """Consume a whole shell VALUE — quoted spans, escapes, and `\\<newline>`
-    continuations included — so the redaction can never leave half a secret
-    behind. An unterminated quote consumes to the end: malformed input fails
-    CLOSED, because a command that failed to parse still carried a real
-    credential."""
+    """Consume a whole shell VALUE, so redaction can never leave half a secret.
+
+    A value is not "up to the next space": it can contain quoted spans, escapes,
+    `\\<newline>` continuations, and — the case that leaked — **nested command
+    substitutions and expansions**, which legitimately contain spaces
+    (`api_token=$(printf SECRET)`). Stopping at the first space inside `$( … )`
+    left the rest of the secret in the clear.
+
+    An unterminated quote or substitution consumes to the end: malformed input
+    fails CLOSED, because a command that failed to parse still carried a real
+    credential.
+    """
     size = len(text)
     while index < size:
         char = text[index]
         if char == "\\" and index + 1 < size:
             index += 2  # keeps a `\<newline>`-continued value in one piece
+            continue
+        if text.startswith("$(", index):
+            index = _end_of_substitution(text, index + 1)
+            continue
+        if text.startswith("${", index):
+            index = _end_of_expansion(text, index + 1)
+            continue
+        if char == "`":
+            index = _end_of_backticks(text, index)
             continue
         if char == "'":
             end = text.find("'", index + 1)
@@ -286,6 +411,41 @@ def _skip_value(text: str, index: int) -> int:
             break
         index += 1
     return index
+
+
+def _end_of_backticks(text: str, index: int) -> int:
+    """Index just past the closing backtick, honouring `\\``-escaped backticks —
+    which is how a legacy substitution NESTS (``echo `echo \\`inner\\`` ``)."""
+    size = len(text)
+    cursor = index + 1
+    while cursor < size:
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == "`":
+            return cursor + 1
+        cursor += 1
+    return size
+
+
+def _end_of_expansion(text: str, index: int) -> int:
+    """Index just past the `}` closing a `${…}`, honouring nesting."""
+    size = len(text)
+    depth = 0
+    cursor = index
+    while cursor < size:
+        char = text[cursor]
+        if char == "\\":
+            cursor += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
+        cursor += 1
+    return size
 
 
 def _end_of_double_quote(text: str, index: int) -> int:
@@ -382,13 +542,17 @@ def _copy_heredoc_body(
     The terminator must match EXACTLY — `<<-` strips leading tabs only, never
     spaces (POSIX). A missing terminator means the body runs to the end of the
     text, which is also the safe reading: it is all data, not shell.
+
+    The body is data, but it is not exempt from D13: `cat > .env <<EOF` is exactly
+    where real secrets live, so each line still gets the `.env`-style rule. It is
+    line-anchored, so it cannot eat shell structure the way the prose rules would.
     """
     size = len(text)
     while index < size:
         line_end = text.find("\n", index)
         line_end = size if line_end == -1 else line_end + 1
         line = text[index:line_end]
-        out.append(line)
+        out.append(_ENV_SECRET.sub(r"\1\2=[REDACTED:env-secret]", line))
         index = line_end
         candidate = line.rstrip("\n")
         if (candidate.lstrip("\t") if strip_tabs else candidate) == delimiter:

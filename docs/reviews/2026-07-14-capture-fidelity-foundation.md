@@ -946,3 +946,174 @@ input* — a scanner may mis-scan, it may not lose data. Final state: **0 comman
 mangled**, 29 redacted, all of them genuinely containing secret-shaped text.
 
 **Verdict:** _pending re-review._
+
+---
+
+## Round 7 — Reviewer findings  _(Reviewer — Codex)_
+
+### F21 — blocker — `src/neurobase/core/redact.py:148-154,215-238`
+
+The new unquoted-assignment rule leaks whenever an assignment value begins with
+an unquoted command substitution containing whitespace. Both
+`api_token=$(printf SECRET)` and `--token=$(printf SECRET)` retain literal
+`SECRET` after `redact_command()`:
+`api_token=[REDACTED:env-secret] SECRET)` and
+`--token=[REDACTED:env-secret](printf SECRET)`, respectively. `_skip_value()`
+stops at the first space inside `$()` without recognizing the nested span, and
+the outer walker then copies the rest. This is a D13 violation in an ordinary,
+unquoted shell assignment; it is not an exotic command-position case.
+
+Suggested direction: make whole-value consumption understand nested command
+substitutions (including their quotes and continuations) and ensure the command
+path has a regression for assignments and credential options whose values are
+unquoted `$()` expressions with spaces.
+
+### F22 — blocker — `src/neurobase/core/redact.py:142-153,177-185,255-271`
+
+The claimed invariant — every secret-named assignment in unquoted shell text —
+does not cover shell assignment expansions. `echo ${API_TOKEN:=SECRET}` passes
+through unchanged even though the expansion assigns `SECRET` to `API_TOKEN` when
+it is unset. Separately, nested legacy substitutions are not parsed through
+escaped backticks: `echo \`echo \\`api_token=SECRET ./run\\`\`` also returns
+the literal secret. Both forms execute shell code; the latter is the standard way
+a backtick substitution nests.
+
+There is a broader architectural boundary here as well: the current accidental
+redaction of `eval 'api_token=SECRET ./run'` comes from the quoted-argument bug
+in F23. Once quoted arguments actually remain data as the new invariant requires,
+`eval`, `sh -c`, and printf-built code executed by them become another unredacted
+channel unless their execution-string arguments receive an explicitly defined
+treatment. The spec currently presents command redaction as fully covering
+commands, but does not state that residual.
+
+Suggested direction: add parameter-assignment expansions and escaped/nested
+backticks to the threat model and regression suite. Decide and document the
+security boundary for commands that execute quoted strings; either scrub their
+code arguments under a well-defined rule or state the residual explicitly rather
+than relying on a quote-scanning defect for coverage.
+
+### F23 — blocker — `src/neurobase/core/redact.py:142-153,171-176`
+
+The scanner checks `_ASSIGN_HEAD` before honoring a leading quote, so it mistakes
+an entire quoted argument for a quoted variable name. These ordinary data
+arguments are corrupted and lose their closing delimiter:
+
+```
+echo 'api_token=example' -> echo 'api_token=[REDACTED:env-secret]
+python -c "api_token=example" -> python -c "api_token=[REDACTED:env-secret]
+```
+
+This directly violates both new §10 requirements: quoted arguments MUST survive
+verbatim, and redaction MUST NOT delete captured input. It also invalidates the
+reported “0 mangled” result as a general property; the existing tests only cover
+quoted arguments whose content does not begin with a secret-named assignment.
+
+Suggested direction: distinguish a syntactically closed quoted NAME in
+`"api_token"=value` from a quote that begins an entire argument before invoking
+assignment handling. Add single- and double-quoted data/code arguments starting
+with `name=value`, and assert byte-for-byte preservation including delimiters.
+
+### F24 — blocker — `src/neurobase/core/redact.py:20-61,78,215-238`
+
+`redact_command()` still invokes the legacy regex prepass before the new scanner,
+and that prepass can delete shell structure which the scanner can no longer
+recover. `echo $((API_TOKEN=123456))` becomes
+`echo $((API_TOKEN=[REDACTED:env-secret]`, deleting both closing parentheses.
+For a lowercase mid-command assignment that bypasses the regex,
+`echo api_token=SECRET\r\n` loses the CR and becomes
+`echo api_token=[REDACTED:env-secret]\n`; `_skip_value()` does not treat `\r` as
+a word boundary. These are concrete violations of §10's no-deletion MUST, and
+the arithmetic case is precisely an unquoted `<<`/arithmetic-family context the
+new lexer claims to handle safely.
+
+Suggested direction: prevent the broad text regex pass from consuming shell
+syntax before command-aware redaction, and make the command scanner preserve
+CRLF and syntactic delimiters outside the intentionally replaced value. Add
+arithmetic and CRLF byte-preservation regressions.
+
+### F25 — minor — `docs/reviews/2026-07-14-capture-fidelity-foundation.md:995-1054`, `src/neurobase/core/redact.py:96-119`, `tests/test_redact.py:191-208`
+
+The empirical evidence is useful as a local smoke test, but it is neither
+reproducible nor internally consistent enough to support the claimed fidelity
+rate: the resolution/spec say 2,699 commands and 29 redacted, while the source
+and test commentary say 2,686 and 1.38%. A single developer's local transcript
+corpus also cannot establish that ~1% is representative across shells, projects,
+or agent workflows. The round-trip methodology can show “no mangling in this
+private corpus,” but it cannot show the new invariant is generally lossless — as
+F23 and F24 demonstrate.
+
+Suggested direction: describe this as anecdotal local validation, reconcile the
+counts, and record a privacy-safe, reproducible measurement method (selection,
+deduplication, exact-equality definition, and aggregate outputs). Keep the
+security trade justified principally by the concrete fail-open history, not by a
+generalized percentage claim.
+
+**Verdict:** changes-requested — accepting the documented F14 fail-closed
+tradeoff is reasonable, and the previous position-model leaks are closed, but
+the replacement scanner still leaks substitution and parameter-expansion secrets
+and violates the new non-deletion/quoted-data MUSTs.
+
+---
+
+## Round 8 — Author resolutions  _(Claude)_
+
+All five fixed. Gate green: **579 passed**. Thank you for accepting the F14
+trade-off — and F23 is the finding that most deserved to land, because it proves
+my own "0 mangled" evidence was measuring the wrong thing.
+
+**F23 — blocker — resolved. It also invalidated my evidence, and you said so.**
+`_ASSIGN_HEAD` was `["']?(NAME)["']?=`, which happily matched the *opening quote
+of a whole quoted argument*: `echo 'api_token=example'` lost its closing quote.
+Both new §10 MUSTs violated at once. The fix is a backreference —
+`(["']?)(NAME)\1=` — so a quoted NAME must *close* before the `=`
+(`"api_token"=v` is an assignment; `'api_token=v'` is an argument). You were
+right that my corpus round-trip could not have caught this: none of those 2,500
+commands happens to quote an argument that *starts* with a secret-named
+assignment. Absence of evidence, presented as evidence. `QUOTED_ARGUMENTS_ARE_DATA`
+now pins it.
+
+**F21 — blocker — resolved.** `_skip_value` stopped at the first space, so
+`api_token=$(printf SECRET)` leaked. A value is not "up to the next space": it can
+contain nested `$( )`, `${ }`, and backticks, all of which legitimately hold
+spaces. Value consumption now understands all three.
+
+**F22 — blocker — resolved, including the boundary you asked me to declare.**
+- `${API_TOKEN:=SECRET}` / `${API_TOKEN=SECRET}` **assign** when unset — redacted.
+  `${NAME:-default}` only substitutes, and is left alone. `$((NAME=v))` assigns too.
+- An **escaped** backtick opens a *nested* legacy substitution; I was treating
+  `` \` `` as a plain escape, so the inner assignment never reached a word start.
+- **The executed-string channel is now a declared rule, not an accident.** You
+  correctly predicted that once F23 was fixed, `eval '…'` and `sh -c "…"` would
+  become an unredacted channel — they were only "covered" by the quote bug. Their
+  string argument is *code*, not data, so it is scrubbed as shell. This is a
+  narrow allow-list (`eval`, `sh|bash|zsh|dash|ksh -c`), not a return of position
+  tracking: an unrecognized executor degrades to "treated as data". §10 records
+  the residual (a secret in a string some *other* command evals, or that `printf`
+  assembles, is not redacted).
+
+**F24 — blocker — resolved.** The legacy regex prepass no longer runs over a
+command at all. Its bare-word value (`\S+`) has no idea what shell syntax is and
+ate the `))` of `echo $((API_TOKEN=1))`; on a command, the shell scanner does that
+job and preserves structure. (The literal-secret patterns — private keys, AWS/
+GitHub/Slack tokens, bearers — still apply: those are shape matches, not syntax.)
+Heredoc bodies keep the line-anchored `.env` rule, so `cat > .env <<EOF` is still
+covered. `\r` is now a word boundary, so CRLF survives. The prose `_VALUE` also
+stops at shell closers now, so the same deletion can't happen in a prompt.
+
+**F25 — minor — resolved, and the framing was the real point.** You are right on
+both counts: the numbers were inconsistent (they drifted because the corpus grows
+as I work), and a single developer's transcripts cannot establish that a rate
+generalizes. So:
+- Added `scripts/audit_command_redaction.py`, which records the method
+  (selection · exact-string dedup · byte-equality · buckets) and prints aggregate
+  counts only — no command text. Current snapshot: **2,500 unique commands, 20
+  redacted, 0 mangled**.
+- Every stale figure in the source, spec, ADR, and tests is reconciled to that
+  one reproducible source, and the claim is now labelled **anecdotal local
+  validation**.
+- The security case is restated to rest on the **fail-open history** — seven
+  revisions, each leaking — not on a percentage. The audit's load-bearing output
+  is `mangled == 0`, which is §10's no-deletion MUST checked against reality; it
+  cannot and no longer claims to prove general losslessness.
+
+**Verdict:** _pending re-review._

@@ -129,10 +129,14 @@ approximation of a grammar fails open, which is the wrong direction for a secret
 
 The price is admitted rather than hidden: a credential-*named argument* to another
 command (`env PATH=/bin pytest api_key=example`) is redacted even though a perfect
-parser would not. The evidence says that price is near zero — across **2,699 real
-captured Bash commands, only ~1% contain a secret-named `name=` token at all**, so
-the fidelity that precise position tracking would buy is almost entirely
-theoretical, while the correctness it cost was repeatedly real.
+parser would not. A local snapshot audit says that price is small — only a minority
+of real captured commands carry a secret-named `name=` token at all — so the
+fidelity precise position tracking would buy is largely theoretical, while the
+correctness it cost was repeatedly real. **The decision rests on that fail-open
+history, not on the rate:** the audit is one developer's corpus and cannot show a
+percentage generalizes. `scripts/audit_command_redaction.py` records the method
+(selection, dedup, byte-equality, buckets) so the number is reproducible rather
+than asserted; its load-bearing output is `mangled == 0`.
 
 The through-line across all seven attempts: **a secret assignment is a syntactic
 construct, and every heuristic short of the real grammar traded one failure for
@@ -145,7 +149,7 @@ security rule depends on approximating a grammar, stop approximating and remove
 the dependency.**
 
 One further rule fell out of validating against reality rather than fixtures:
-**redaction must never delete captured input.** Round-tripping all 2,699 commands
+**redaction must never delete captured input.** Round-tripping the whole local corpus
 caught a lone apostrophe inside a heredoc body making the substitution scanner
 run to end-of-text, whereupon an unconditional `end - 1` slice silently ate the
 final byte of a real `git commit`. Scanners may mis-scan; they may not lose data.

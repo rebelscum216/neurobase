@@ -135,6 +135,33 @@ COMMAND_ONLY_LEAKS = [
     "pytest --api-key=SECRET",
     "curl --token=SECRET",
     "deploy --client-secret=SECRET",
+    # A VALUE can contain spaces without being quoted — inside a substitution or
+    # an expansion. Stopping the value scan at the first space leaked the rest.
+    "api_token=$(printf SECRET)",
+    "--token=$(printf SECRET)",
+    "api_token=`printf SECRET`",
+    # `${NAME:=v}` and `${NAME=v}` ASSIGN when NAME is unset: a secret assignment
+    # wearing an expansion's clothes.
+    "echo ${API_TOKEN:=SECRET}",
+    "echo ${API_TOKEN=SECRET}",
+    # Arithmetic assigns too — and its delimiters must survive.
+    "echo $((API_TOKEN=SECRET))",
+    # An ESCAPED backtick is how a legacy substitution nests.
+    "echo `echo \\`api_token=SECRET ./run\\``",
+    # `eval` / `sh -c` EXECUTE their string argument: it is code, not data.
+    "eval 'api_token=SECRET ./run'",
+    'sh -c "api_token=SECRET ./run"',
+    'bash -c "api_token=SECRET ./run"',
+]
+
+# A quoted argument is DATA and must survive byte for byte — *including* when its
+# content happens to start with a secret-named assignment. That case was the hole:
+# the scanner read the opening quote as a quoted NAME and ate the closing one.
+QUOTED_ARGUMENTS_ARE_DATA = [
+    "echo 'api_token=example'",
+    'python -c "api_token=example"',
+    "echo 'hello world'",
+    "echo ${API_TOKEN:-default}",  # `:-` substitutes, it does not assign
 ]
 
 # `key`/`secret`/`password` appear constantly in options that SELECT or CONFIGURE
@@ -219,9 +246,10 @@ def test_unquoted_credential_named_argument_is_redacted_by_design(command: str) 
     continuations — six revisions of exactly that leaked secrets every time.
 
     Fail-closed is the right side to err on here, and the cost is tiny: the
-    command's SHAPE survives (`api_key=[REDACTED:env-secret]`), and across 2,686
-    real captured commands only 1.38% contain a secret-named `name=` token at
-    all. See spec §10.
+    command's SHAPE survives (`api_key=[REDACTED:env-secret]`), and only a small
+    minority of real captured commands carry a secret-named `name=` token at all
+    (`scripts/audit_command_redaction.py`). The justification is the fail-open
+    history, not the rate. See spec §10.
     """
     out = redact_command(command)
     assert "example" not in out
@@ -233,6 +261,27 @@ def test_heredoc_bodies_are_data_not_shell(command: str) -> None:
     assert redact_command(command) == command
 
 
+@pytest.mark.parametrize("command", QUOTED_ARGUMENTS_ARE_DATA)
+def test_quoted_arguments_survive_byte_for_byte(command: str) -> None:
+    assert redact_command(command) == command
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # The `))` is structure, not part of the value. The prose regex rules have
+        # no idea what shell syntax is — their bare-word value ate both parens —
+        # so they are not run over a command at all; the shell scanner does it.
+        ("echo $((API_TOKEN=123456))", "echo $((API_TOKEN=[REDACTED:env-secret]))"),
+        # The CR is captured input, so it is a word boundary, not part of a value.
+        ("echo api_token=hunter2\r\n", "echo api_token=[REDACTED:env-secret]\r\n"),
+    ],
+)
+def test_redaction_preserves_shell_structure_and_crlf(command: str, expected: str) -> None:
+    """§10: redaction MUST NOT delete captured input."""
+    assert redact_command(command) == expected
+
+
 def test_redaction_never_deletes_captured_input() -> None:
     """The scanners are heuristics and WILL disagree with a real shell. When they
     do, the failure must be a mis-scan — never a lost character.
@@ -240,7 +289,8 @@ def test_redaction_never_deletes_captured_input() -> None:
     This exact command (a heredoc inside `$(…)`, whose body contains a lone
     apostrophe) made the substitution scanner run to end-of-text, and an
     unconditional `end - 1` slice then silently ate the command's final byte.
-    Found by round-tripping 2,699 real captured commands, not by a unit test.
+    Found by round-tripping the real captured-command corpus, not by a unit test
+    (`scripts/audit_command_redaction.py`).
     """
     command = "git commit -m \"$(cat <<'EOF'\nit can't be wrong\nEOF\n)\"\ngit log --stat"
     assert redact_command(command) == command

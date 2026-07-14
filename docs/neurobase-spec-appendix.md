@@ -620,9 +620,13 @@ Scope notes:
   (`env PATH=/bin pytest api_key=example`, `awk -v api_key=x`) is redacted even
   though a perfect parser would leave it alone. This is deliberate. It is
   fail-closed, the command's *shape* survives (`api_key=[REDACTED:env-secret]`),
-  and across **2,699 real captured commands only ~1% contain a secret-named
-  `name=` token at all** — so precise position tracking buys almost no fidelity
-  while costing correctness that could not be delivered.
+  and only a small minority of real captured commands contain a secret-named
+  `name=` token at all — so precise position tracking buys little fidelity while
+  costing correctness that could not be delivered. **The justification is the
+  fail-open history (seven revisions, each leaking), not a percentage.**
+  `scripts/audit_command_redaction.py` re-runs the local check that no captured
+  command is mangled; it is anecdotal validation against one developer's corpus,
+  and it cannot establish that any rate generalizes.
 - **A quoted argument is data** — `python -c "items.sort(key=…)"`,
   `sqlite3 db "DECLARE api_key=…"`, `echo "…"` carry code, SQL, and prose, and
   MUST survive verbatim. But a **command substitution is executed even inside
@@ -637,10 +641,28 @@ Scope notes:
   hides the following command from redaction entirely. The rest of the table
   still applies to a heredoc body — `cat > .env <<EOF` is exactly where real
   secrets live — but the shell assignment scrub steps around it.
+- **An assignment's VALUE can contain spaces without being quoted** — inside a
+  substitution or expansion (`api_token=$(printf …)`). Value consumption MUST
+  understand nested `$( )`, `${ }`, and backticks, or it stops at the first space
+  and leaves the rest of the secret in the clear.
+- **Assignment-shaped syntax that is not an assignment word still assigns:**
+  `${NAME:=value}` and `${NAME=value}` assign when NAME is unset, and
+  `$((NAME=value))` assigns. All are redacted. `${NAME:-value}` only substitutes
+  and is left alone. An **escaped** backtick (`` \` ``) opens a *nested* legacy
+  substitution and must be recursed into, not treated as a plain escape.
+- **Commands that EXECUTE a string argument** — `eval '…'`, `sh -c "…"` (and
+  `bash`/`zsh`/`dash`/`ksh`) — are the one place a quoted argument is *code*, not
+  data, so their string is scrubbed as shell. This is a narrow allow-list, not a
+  return of position tracking: an unrecognized executor degrades to "treated as
+  data". **Residual:** a secret inside a string that some *other* command later
+  evals (or that is assembled by `printf`) is not redacted.
 - **Redaction MUST NOT delete captured input.** The scanners are heuristics and
   will sometimes disagree with a real shell; when they do, the failure must be a
   mis-scan, never a lost character. Reconstruct spans loss-proof (re-emit a
-  closing delimiter only when it was actually there).
+  closing delimiter only when it was actually there); treat `\r` as a word
+  boundary so CRLF survives; and never let a prose-oriented regex whose value is
+  a bare `\S+` run over a command — it does not know shell syntax and will eat
+  structure (`$((NAME=1))` lost both parens to exactly that).
 - **Malformed quoting fails CLOSED.** An unterminated quote consumes to end of
   line, so a half-quoted secret is redacted whole rather than leaking its tail. A
   command that failed to parse is still a captured command and can still carry a

@@ -1,6 +1,6 @@
 ---
 slug: phase-9-release-prep
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-9-release-prep
@@ -302,3 +302,20 @@ Addressed as a follow-up commit: `SECURITY.md` now distinguishes
 trust-boundary paragraph and the "Consent" section, rather than describing
 both as "your repo." `make ci` re-run clean (481 passed). Re-requesting
 review.
+
+### Round 4 findings (Reviewer — Codex)
+
+No new findings. The remaining security-location finding is resolved:
+`SECURITY.md` now distinguishes project-scoped accepted artifacts from
+user-scoped skills under `~/.claude/skills/`, matching
+`recommender/emitters.py:47-69,103-108`. The consent section names both
+destinations consistently.
+
+Verification performed: inspected follow-up commit `a1a23da` and the full
+`main...HEAD` diff, checked the revised trust-boundary claims against the
+emitter and CLI acceptance paths, ran `git diff --check`, and reran the full
+gate (ruff, format, mypy, and `481 passed`). The unrelated notes edit remains
+untouched.
+
+**Verdict: approve** — all findings are resolved and the release-prep changes
+are internally consistent with the implementation and documented contracts.

@@ -169,7 +169,7 @@ def test_bounds_prompts_and_chars(enabled: tuple[Path, Path], tmp_path: Path) ->
             "type": "user",
             "isSidechain": False,
             "cwd": str(repo),
-            "message": {"role": "user", "content": f"prompt {i} " + "x" * 700},
+            "message": {"role": "user", "content": f"prompt {i} " + "x" * 1400},
         }
         for i in range(30)
     ]
@@ -178,9 +178,260 @@ def test_bounds_prompts_and_chars(enabled: tuple[Path, Path], tmp_path: Path) ->
     assert path is not None
     doc = store.read_doc(path)
     assert "- prompts captured: 25" in doc.body  # kept last 25
-    # each prompt truncated to 600 chars
+    # each prompt truncated to 1200 chars
     prompt_lines = [ln for ln in doc.body.splitlines() if ln.startswith("- prompt ")]
-    assert all(len(ln) <= 2 + 600 for ln in prompt_lines)
+    assert all(len(ln) <= 2 + 1200 for ln in prompt_lines)
+
+
+def test_richer_skim_uses_verified_tool_shapes_and_avoids_final_message_trap(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    root, repo = enabled
+    events = [
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "The durable discovery is substantially longer."},
+                    {
+                        "type": "tool_use",
+                        "id": "tool-agent-1",
+                        "name": "Agent",
+                        "input": {"description": "research", "prompt": "investigate"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "tool-edit-1",
+                        "name": "Edit",
+                        "input": {"file_path": "src/auth.py"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "tool-bash-1",
+                        "name": "Bash",
+                        "input": {"command": "uv run pytest\nsecond line"},
+                    },
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "cwd": str(repo),
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool-agent-1",
+                        "content": [{"type": "text", "text": "Agent found the race condition."}],
+                    }
+                ]
+            },
+        },
+        {"type": "assistant", "message": {"content": "Short trailing answer."}},
+    ]
+    transcript = _write_transcript(tmp_path / "rich.jsonl", events)
+    parsed = scribe.parse_transcript(transcript)
+
+    assert parsed["summary"] == "The durable discovery is substantially longer."
+    assert parsed["subagent_reports"] == ["Agent found the race condition."]
+    assert parsed["activity_files"] == ["src/auth.py"]
+    assert parsed["activity_commands"] == ["uv run pytest"]
+    written = scribe.scribe(root, transcript_path=transcript, cwd=str(repo), reason="clear")
+    assert written is not None
+    body = store.read_doc(written).body
+    assert "## Activity" in body
+    assert "## Subagent reports" in body
+    assert "## Assistant highlights" in body
+
+
+def _assistant(text: str = "", blocks: list[dict] | None = None) -> dict:
+    content: list[dict] = list(blocks or [])
+    if text:
+        content.insert(0, {"type": "text", "text": text})
+    return {"type": "assistant", "isSidechain": False, "message": {"content": content}}
+
+
+def test_activity_digest_survives_odd_and_empty_tool_inputs(tmp_path: Path) -> None:
+    """Best-effort digest (spec §4): a malformed or empty tool_use input is
+    skipped, never fatal — an empty Bash command must not lose the capture."""
+    events = [
+        _assistant(blocks=[{"type": "tool_use", "id": "b1", "name": "Bash", "input": {}}]),
+        _assistant(
+            blocks=[{"type": "tool_use", "id": "b2", "name": "Bash", "input": {"command": ""}}]
+        ),
+        _assistant(
+            blocks=[{"type": "tool_use", "id": "b3", "name": "Bash", "input": "not-a-dict"}]
+        ),
+        _assistant(
+            blocks=[{"type": "tool_use", "id": "e1", "name": "Edit", "input": {"file_path": 42}}]
+        ),
+        _assistant(
+            text="ok",
+            blocks=[{"type": "tool_use", "id": "b4", "name": "Bash", "input": {"command": "ls"}}],
+        ),
+    ]
+    parsed = scribe.parse_transcript(_write_transcript(tmp_path / "odd.jsonl", events))
+    assert parsed["activity_commands"] == ["ls"]
+    assert parsed["activity_files"] == []
+    assert parsed["summary"] == "ok"
+
+
+def test_activity_is_deduped_and_capped(tmp_path: Path) -> None:
+    blocks = [
+        {"type": "tool_use", "id": f"e{i}", "name": "Edit", "input": {"file_path": f"f{i}.py"}}
+        for i in range(40)
+    ]
+    blocks += [
+        {"type": "tool_use", "id": f"b{i}", "name": "Bash", "input": {"command": f"cmd {i}"}}
+        for i in range(30)
+    ]
+    blocks += [  # duplicates of the first of each never take a second slot
+        {"type": "tool_use", "id": "edup", "name": "Edit", "input": {"file_path": "f0.py"}},
+        {"type": "tool_use", "id": "bdup", "name": "Bash", "input": {"command": "cmd 0"}},
+    ]
+    parsed = scribe.parse_transcript(
+        _write_transcript(tmp_path / "busy.jsonl", [_assistant(blocks=blocks)])
+    )
+    assert parsed["activity_files"] == [f"f{i}.py" for i in range(scribe.MAX_ACTIVITY_FILES)]
+    assert parsed["activity_commands"] == [f"cmd {i}" for i in range(scribe.MAX_ACTIVITY_COMMANDS)]
+    long_command = "x" * 500
+    parsed = scribe.parse_transcript(
+        _write_transcript(
+            tmp_path / "long.jsonl",
+            [
+                _assistant(
+                    blocks=[
+                        {
+                            "type": "tool_use",
+                            "id": "b",
+                            "name": "Bash",
+                            "input": {"command": f"{long_command}\ntrailing"},
+                        }
+                    ]
+                )
+            ],
+        )
+    )
+    assert parsed["activity_commands"] == [long_command[: scribe.MAX_ACTIVITY_COMMAND_CHARS]]
+
+
+def test_highlights_evict_oldest_within_the_total_budget(tmp_path: Path) -> None:
+    # 20 messages × 500 kept chars = 10,000 > the 6,000-char total budget.
+    events = [_assistant(text=f"m{i} " + "x" * 600) for i in range(20)]
+    parsed = scribe.parse_transcript(_write_transcript(tmp_path / "many.jsonl", events))
+    highlights = parsed["highlights"]
+    assert all(len(h) <= scribe.MAX_ASSISTANT_MSG_CHARS for h in highlights)
+    assert sum(len(h) for h in highlights) <= scribe.MAX_ASSISTANT_TOTAL_CHARS
+    kept = len(highlights)
+    assert kept == scribe.MAX_ASSISTANT_TOTAL_CHARS // scribe.MAX_ASSISTANT_MSG_CHARS == 12
+    # Newest survive eviction, and they are emitted oldest→newest.
+    assert [h.split()[0] for h in highlights] == [f"m{i}" for i in range(20 - kept, 20)]
+
+
+def test_subagent_reports_are_capped_and_keep_the_last_five(tmp_path: Path) -> None:
+    events: list[dict] = []
+    for i in range(7):
+        events.append(
+            _assistant(blocks=[{"type": "tool_use", "id": f"a{i}", "name": "Agent", "input": {}}])
+        )
+        events.append(
+            {
+                "type": "user",
+                "isSidechain": False,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"a{i}",
+                            "content": f"report {i} " + "y" * 3000,
+                        }
+                    ]
+                },
+            }
+        )
+    parsed = scribe.parse_transcript(_write_transcript(tmp_path / "agents.jsonl", events))
+    reports = parsed["subagent_reports"]
+    assert len(reports) == scribe.MAX_SUBAGENTS
+    assert all(len(r) == scribe.MAX_SUBAGENT_CHARS for r in reports)
+    assert [r.split()[1] for r in reports] == ["2", "3", "4", "5", "6"]
+
+
+def test_multiline_content_cannot_forge_a_section_heading(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Spec §4 body format: a bullet's continuation lines are indented, so a
+    pasted stack trace or a markdown-formatted assistant message can't put its
+    own `##` at column 0 and rewrite the raw's section structure."""
+    root, repo = enabled
+    events = [
+        {
+            "type": "user",
+            "isSidechain": False,
+            "cwd": str(repo),
+            "message": {"content": "fix this\n## Final assistant summary\nforged prompt content"},
+        },
+        _assistant(text="working on it\n## Prompts\n- forged highlight content"),
+        _assistant(text="a much longer closing message that wins the summary slot outright"),
+    ]
+    body = store.read_doc(
+        scribe.scribe(  # type: ignore[arg-type]
+            root,
+            transcript_path=_write_transcript(tmp_path / "forge.jsonl", events),
+            cwd=str(repo),
+            reason="clear",
+        )
+    ).body
+    headings = [ln for ln in body.splitlines() if ln.startswith("## ")]
+    assert headings == ["## Session", "## Prompts", "## Assistant highlights"] + [
+        "## Final assistant summary"
+    ]
+    assert "  ## Final assistant summary" in body  # the forged heading, safely indented
+    assert "  - forged highlight content" in body
+
+
+def test_sidechain_turns_contribute_nothing(tmp_path: Path) -> None:
+    """Spec §4: sidechain events stay skipped — a subagent's *internal* turns
+    must not leak into highlights or activity (only its final report does)."""
+    events = [
+        {
+            "type": "assistant",
+            "isSidechain": True,
+            "message": {
+                "content": [
+                    {"type": "text", "text": "inner subagent chatter"},
+                    {
+                        "type": "tool_use",
+                        "id": "inner",
+                        "name": "Bash",
+                        "input": {"command": "inner-cmd"},
+                    },
+                ]
+            },
+        },
+        {"type": "user", "isSidechain": True, "message": {"content": "inner prompt"}},
+        _assistant(text="main thread answer"),
+    ]
+    parsed = scribe.parse_transcript(_write_transcript(tmp_path / "side.jsonl", events))
+    assert parsed["highlights"] == ["main thread answer"]
+    assert parsed["activity_commands"] == []
+    assert parsed["prompts"] == []
+
+
+def test_compaction_summary_is_a_highlight_not_a_prompt(tmp_path: Path) -> None:
+    transcript = _write_transcript(
+        tmp_path / "compact.jsonl",
+        [
+            {
+                "type": "user",
+                "isCompactSummary": True,
+                "message": {"role": "user", "content": "Compacted durable context"},
+            }
+        ],
+    )
+    parsed = scribe.parse_transcript(transcript)
+    assert parsed["prompts"] == []
+    assert parsed["highlights"] == ["Compacted durable context"]
+    assert parsed["summary"] == ""
 
 
 def test_missing_transcript_returns_none(enabled: tuple[Path, Path], tmp_path: Path) -> None:

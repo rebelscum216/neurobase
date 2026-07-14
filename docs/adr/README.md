@@ -42,6 +42,8 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0008](0008-phase-7-mcp-server.md) | Phase 7 MCP server — shape + decisions (D-a…D-e, user-directed pin, SDK pin) | Accepted | Phase 7 MCP server |
 | [0010](0010-proposal-draft-boundary.md) | Proposal bodies use a managed artifact-draft region | Accepted | Phase 8 Workstream F/G |
 | [0011](0011-survival-installed-hash.md) | Ledger `accepted` events carry an `installed_hash` for survival's modified-detection | Accepted | Phase 8 Workstream H |
+| [0012](0012-curator-plan-payload-batching.md) | Curator plan payloads use byte-budgeted sequential batches | Accepted | S-cf4 / D22 |
+| [0013](0013-capture-fidelity-event-shapes.md) | Live capture event shapes for richer deterministic skims | Accepted | S-cf1 / S-cf2 / S-cf3 |
 
 All four Phase 0 spikes (S1, S2, S5, S6) are now closed. ADR-0004 was caught
 and reversed by Codex's own review of this repo's relay process — see

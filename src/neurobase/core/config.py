@@ -29,6 +29,9 @@ class BrainConfig:
 class CurateConfig:
     stale_hours: int = 12
     tombstone_grace_days: int = 14
+    # Final serialized plan request budget, including PLAN_SYSTEM and framing.
+    # Bytes (not characters): CLI backends pass the prompt as one argv entry.
+    plan_payload_max_bytes: int = 262_144
 
 
 @dataclass

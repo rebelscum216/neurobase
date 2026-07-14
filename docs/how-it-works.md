@@ -117,6 +117,7 @@ Module map — where each responsibility lives and the contract it implements:
 | `curator/engine.py` | The fold: plan → apply → consume → prune → synthesize | §2 |
 | `adapters/claude/`, `adapters/codex/` | Per-agent scribe (capture), recall (inject), installer | §3–§5, §7 |
 | `adapters/recall_common.py` | Shared injection logic both adapters re-export | §3 |
+| `adapters/scribe_common.py` | Shared capture bounds both scribes re-export | §4–§5, §8 |
 | `mcp/server.py` | Pull-based recall + save over Model Context Protocol | §13 |
 | `recommender/` | seed → corpus → mine → rank → propose → emit → measure | §12 |
 | `cli/` | Typer command surface + the hook fast-path + orchestration | §4–§7, §12, §13 |
@@ -801,6 +802,8 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 **Module constants**
 
 - `DEFAULT_TOMBSTONE_GRACE_DAYS = 14` — matches spec §8's `TOMBSTONE_GRACE_DAYS`.
+- `DEFAULT_PLAN_PAYLOAD_MAX_BYTES = 262_144` — spec §8's `PLAN_PAYLOAD_MAX_BYTES`; the per-plan-request byte budget (ADR-0012), overridable via `[curate].plan_payload_max_bytes`.
+- `OVERSIZE_RAW_MARKER` — the `[truncated for plan payload]` suffix stamped on a raw body that had to be cut to fit its own batch.
 - `NODE_SUFFIX = "-status"` — the node name is always `<project>-status` (spec §8).
 - `CURATOR_LOG = ".curator-log.jsonl"` — per-project append-only pass log under the memory dir.
 - `PLAN_SYSTEM` / `NODE_SYSTEM` — the two hand-written system prompts satisfying spec §2.1 and §2.2 respectively. `PLAN_SYSTEM` establishes the curator's identity and goal ("small, non-redundant, current fact set — optimize for deletion and merging, not accumulation"), states the reuse-slug/supersedes/tombstone/pinned rules, and mandates a bare-JSON response of the exact `{"upserts": [...], "tombstones": [...]}` shape. `NODE_SYSTEM` mandates a single synthesized markdown node — title line plus grouped bullets, "invent nothing," markdown only.
@@ -809,21 +812,20 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 
 - `node_name(project: str) -> str` — returns `f"{project}{NODE_SUFFIX}"`, the deterministic status-node name; re-exported from `neurobase.curator`.
 
-- `curate(root: Path, project: str, brain: Brain, *, dry_run: bool = False, resynth: bool = False, tombstone_grace_days: int = DEFAULT_TOMBSTONE_GRACE_DAYS) -> dict[str, Any]` — runs one full pass of the spec §2 sequence and returns the summary dict (the function re-exported as `curate` from `neurobase.curator`, imported by the CLI as `run_curate`). Control flow:
+- `curate(root: Path, project: str, brain: Brain, *, dry_run: bool = False, resynth: bool = False, tombstone_grace_days: int = DEFAULT_TOMBSTONE_GRACE_DAYS, plan_payload_max_bytes: int = DEFAULT_PLAN_PAYLOAD_MAX_BYTES) -> dict[str, Any]` — runs one full pass of the spec §2 sequence and returns the summary dict (the function re-exported as `curate` from `neurobase.curator`, imported by the CLI as `run_curate`). Control flow:
   1. `store.ensure_tree(project, root)` — guarantees the directory tree exists before any read/write.
   2. **`--resynth` short-circuit**: if `resynth` is true, skip everything else and call `_synthesize` directly, then log and return `{"status": "resynth", "active_facts": <count>}`. This is the `neurobase curate --resynth` path from spec §2's partial-failure contract — regenerate node + index without consuming any new raw.
   3. Load unconsumed raw via `store.list_raw(root, project, unconsumed_only=True)`. **Empty ⇒ no-op**: log and return `{"status": "noop", "raw": 0, "active_facts": <count>}` — this is the idempotence guarantee of spec §2 step 1.
-  4. Load active curated facts (`store.list_curated`), compute `pinned = _pinned_slugs(curated)`, and build the plan's user payload: `{"curated_facts": [...], "raw_captures": [{"raw": <filename>, "body": ...}, ...]}` via `_facts_payload` and a literal list comprehension over `raw_docs`.
-  5. **Plan step**: call `brain.plan_json(PLAN_SYSTEM, user_payload)`. If this raises `BrainError` (unparseable/timeout/etc.), the pass **aborts**: no raws are marked consumed, nothing is written, and the function returns `{"status": "error", "raw": len(raw_docs), "error": str(exc)}` after logging. This is the unconsumed-on-parse-failure safety rule (spec §2 step 3 / decision D9) — a transient bad LLM response can never silently drop an observation, because it is retried wholesale on the next pass.
-  6. Extract `upserts = plan.get("upserts") or []` and `tombstones = plan.get("tombstones") or []`.
-  7. **`--dry-run` short-circuit**: if `dry_run` is true, return `{"status": "dry-run", "raw": len(raw_docs), "plan": plan}` immediately — *before* the pinned-slug filter, the apply pipeline, or consumption. Nothing is written to disk, and `_log_pass` is skipped on this path (it runs only on the noop/error/final/resynth return paths), so a dry run leaves absolutely no trace and every raw remains unconsumed for the real pass.
-  8. **Pinned-fact guard (decision D-b)**: `upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]` — deterministically drops any upsert targeting a pinned (user-directed) slug, regardless of what the prompt says. This is enforced in code, not just by prompt instruction, so a plan that ignores the "never touch pinned facts" prompt rule still cannot mutate one.
-  9. **Apply upserts** (step 4 of spec §2) via `_apply_upserts`, then tombstone every superseded slug that was *not itself re-upserted this pass* and is not pinned, via `_safe_soft_delete`, deduped order-preserving with `dict.fromkeys`.
-  10. **Apply explicit tombstones** (step 5): for each `{"slug", "reason"}` entry, skip if the slug is empty, was upserted this pass, or is pinned; otherwise soft-delete it and count it.
-  11. **Consume raw** (step 6): `store.mark_consumed(doc.file_path)` for every doc in `raw_docs` — unconditionally, since reaching this point means the plan parsed successfully (even if empty).
-  12. **Prune tombstones** (step 7): `store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)`.
-  13. **Synthesize** (step 8): call `_synthesize(root, project, brain)` inside a `try/except Exception`. On success, `status = "ok"`. On *any* exception — brain error, malformed sibling node breaking the index rebuild, linkify/disk error — `status = "partial"` and `synth_error = str(exc)`; this is caught deliberately broadly (`# noqa: BLE001`) per spec §2's partial-failure contract: the applied curated-fact state and raw-consumption already happened and must stand, because the node is a pure function of `curated/` and will self-heal on the next `curate` (or `--resynth`) pass.
-  14. Build and return the summary dict: `{"status", "raw", "upserts", "superseded", "tombstones", "pruned_tombstones", "active_facts"}`, plus `"error"` if synthesis failed — this exact key set matches spec §2 step 9. The summary is appended to the curator log via `_log_pass` before returning.
+  4. **Batch loop (ADR-0012 / decision D22)**, repeated until every raw is planned. Each iteration reloads active curated facts (`store.list_curated`) so a later batch sees everything earlier batches upserted, superseded, and tombstoned, then calls `_next_plan_batch` to take the next oldest-first run of raws whose *final combined request* — `combine_prompt(PLAN_SYSTEM, user_payload)`, measured in UTF-8 **bytes**, exactly what a CLI backend passes as one argv entry — fits `plan_payload_max_bytes` (default 262,144). A raw too large to fit even alone is truncated by `_truncate_raw_to_fit` and marked, never skipped. If not even a marked envelope fits (an absurdly small budget, or curated facts that already fill it), `_next_plan_batch` raises `ValueError` and the pass returns `{"status": "error", …}` with nothing consumed.
+  5. **Plan step, per batch**: call `brain.plan_json(PLAN_SYSTEM, user_payload)`. If this raises `BrainError` (unparseable/timeout/etc.), **this batch and every later batch abort**: their raws stay unconsumed, and the function returns `{"status": "error", "raw", "batches", "upserts", "superseded", "tombstones", "error"}` after logging. Any *earlier* batch that planned successfully keeps its applied facts and its consumed raws (D22) — each committed batch is a durable unit backed by a valid plan. A failure in the **first** batch is byte-for-byte the v0.1 behavior: every raw remains unconsumed (spec §2 step 3 / decision D9). A transient bad LLM response still never silently drops an observation — unplanned raws are retried wholesale on the next pass.
+  6. **`--dry-run` short-circuit**: if `dry_run` is true, the batch loop only *collects* plans — it applies nothing and consumes nothing, so every preview batch is planned against the same current facts (a dry run does not pretend to simulate model-authored mutations in memory). After the loop it returns `{"status": "dry-run", "raw", "batches"}` plus `"plan"` for the single-batch case (the v0.1 shape) or `"plans"` (the list) when the backlog needed more than one. `_log_pass` is skipped on this path, so a dry run leaves absolutely no trace.
+  7. **Pinned-fact guard (decision D-b)**: `upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]` — deterministically drops any upsert targeting a pinned (user-directed) slug, regardless of what the prompt says. This is enforced in code, not just by prompt instruction, so a plan that ignores the "never touch pinned facts" prompt rule still cannot mutate one. `pinned` is recomputed per batch from that batch's freshly loaded facts.
+  8. **Apply upserts** (step 4 of spec §2) via `_apply_upserts`, then tombstone every superseded slug that was *not itself re-upserted in this batch* and is not pinned, via `_safe_soft_delete`, deduped order-preserving with `dict.fromkeys`.
+  9. **Apply explicit tombstones** (step 5): for each `{"slug", "reason"}` entry, skip if the slug is empty, was upserted in this batch, or is pinned; otherwise soft-delete it and count it.
+  10. **Consume this batch's raw** (step 6): `store.mark_consumed(doc.file_path)` for every doc in the batch — reaching this point means *that batch's* plan parsed successfully (even if empty). Loop back to 4 with the remaining raws.
+  11. **Prune tombstones** (step 7), once after the last batch: `store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)`.
+  12. **Synthesize** (step 8), once after the last batch: call `_synthesize(root, project, brain)` inside a `try/except Exception`. On success, `status = "ok"`. On *any* exception — brain error, malformed sibling node breaking the index rebuild, linkify/disk error — `status = "partial"` and `synth_error = str(exc)`; this is caught deliberately broadly (`# noqa: BLE001`) per spec §2's partial-failure contract: the applied curated-fact state and raw-consumption already happened and must stand, because the node is a pure function of `curated/` and will self-heal on the next `curate` (or `--resynth`) pass.
+  13. Build and return the summary dict: `{"status", "raw", "batches", "upserts", "superseded", "tombstones", "pruned_tombstones", "active_facts"}`, plus `"error"` if synthesis failed — this exact key set matches spec §2 step 9. `upserts`/`superseded`/`tombstones` are summed across batches. The summary is appended to the curator log via `_log_pass` before returning.
 
 - `is_stale(root: Path, project: str, hours: int) -> bool` — decision D8's `--if-stale` gate. Scans unconsumed raw docs; for each with a `captured_at` frontmatter field, parses it as ISO-8601 (tolerating a trailing `Z` by rewriting to `+00:00`) and returns `True` as soon as one predates `now - hours*3600` seconds. Docs missing `captured_at` are skipped (not counted as stale); docs with an unparseable timestamp are also skipped (`except ValueError: continue`) rather than raising. Returns `False` if nothing unconsumed is old enough (including the case of zero unconsumed raw). The CLI (`src/neurobase/cli/__init__.py:202`) calls this only when `--if-stale` is passed and `--resynth` is not (`checking_staleness = if_stale and not resynth`), using `config.curate.stale_hours` (spec §8 default: 12h) as `hours`; if not stale it prints "Not stale — nothing to curate." and returns before `resolve_brain`, so it never constructs a `Brain` or calls `curate()`.
 
@@ -832,6 +834,14 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 **Internal helpers**
 
 - `_facts_payload(docs: list[store.Document]) -> list[dict[str, Any]]` — converts curated `Document`s into the plan/node payload shape `{"slug", "body"}` (slug is `d.get("name", d.file_path.stem)`, body is stripped), adding `"pinned": True` when the doc's `provenance` frontmatter contains `"user-directed"`. Used both for the plan's `curated_facts` and the node prompt's `active_facts`.
+
+- `_raw_payload(doc, body=None) -> dict[str, str]` / `_plan_user_payload(curated, raw_captures) -> str` — the one place a plan's user payload is serialized (`{"curated_facts": [...], "raw_captures": [{"raw": <filename>, "body": ...}, ...]}`, `ensure_ascii=False`). Keeping it in a single helper is what makes the byte budget honest: the string that is *measured* is the exact string that is *sent*.
+
+- `_plan_request_bytes(user_payload: str) -> int` — `len(combine_prompt(PLAN_SYSTEM, user_payload).encode("utf-8"))`. The budget is bytes, not characters, because the kernel's `ARG_MAX` boundary is bytes — a character count is unrelated to it once non-ASCII text or JSON escaping is in play (ADR-0012 measured the local macOS limit at 1,048,576 bytes total, with the accepting/rejecting argv boundary at 1,045,268/1,045,269). The API backend keeps system and user prompts in separate slots and has no argv limit at all, but every backend is budgeted against the *combined CLI shape* so the conservative bound holds everywhere.
+
+- `_truncate_raw_to_fit(curated, doc, max_bytes) -> dict[str, str]` — for the pathological case of one raw larger than the whole budget. Binary-searches the body's *character* prefix while measuring the *serialized byte* size at each step (the two are not proportional), and appends `OVERSIZE_RAW_MARKER` (`"[truncated for plan payload]"`) so the model — and anyone reading the payload later — can see the body was cut. Raises `ValueError` if even the marked envelope plus the fixed prompt and current facts can't fit, which `curate` turns into `status: "error"` with that raw left unconsumed. It never silently drops a session.
+
+- `_next_plan_batch(curated, remaining, max_bytes) -> tuple[list[Document], str]` — greedily accumulates raws oldest-first while the measured request stays within budget, stopping at the first raw that would overflow (that raw opens the next batch). Guarantees a non-empty batch, so the caller's loop always makes progress.
 
 - `_pinned_slugs(docs: list[store.Document]) -> set[str]` — the set of slugs whose `provenance` includes `"user-directed"` (i.e. saved via the MCP `memory_remember` tool per spec §13). This is the deterministic enforcement point for the pinned-fact invariant described above; it is *not* trust-the-prompt — `curate()` intersects every upsert/tombstone/supersession-tombstone against this set.
 
@@ -847,10 +857,10 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 
 **Invariants and gotchas worth flagging explicitly**
 
-- **Unconsumed-on-parse-failure is absolute** (spec §2 step 3 / D9): the *only* way a raw capture is marked consumed is by reaching step 6 of `curate()`, which is only reached after `brain.plan_json` returns successfully (even with an empty plan). There is no partial-consumption path.
+- **A raw is consumed only by a plan that covered it** (spec §2 step 3 / D9, refined by D22): the *only* way a raw capture is marked consumed is by being in a batch whose `brain.plan_json` returned successfully (even with an empty plan). Batching does introduce a partial-*consumption* path — batch 1 can commit while batch 2 fails — but never a partial-*planning* one: no raw is ever consumed without a valid plan that saw it. With a single batch (the overwhelmingly common case) this collapses to the v0.1 all-or-nothing rule exactly.
 - **A valid-but-empty plan is still consumed** — `upserts`/`tombstones` defaulting to `[]` via `plan.get(...) or []` means a plan of `{}` or `{"upserts": [], "tombstones": []}` proceeds through the entire apply/consume/prune/synthesize sequence normally; only a raised `BrainError` aborts.
 - **Deletion-first mandate**: the prompt (`PLAN_SYSTEM`) explicitly instructs the model to "optimize for deletion and merging, not accumulation," and the apply order enforces this structurally — an upsert's `supersedes` list drives an *automatic* tombstone of the old slug in the same pass, without a separate model round-trip.
-- **`--dry-run` never mutates**: it returns immediately after the plan call, before the pinned filter, before any `store.upsert_curated`/`soft_delete_curated`/`mark_consumed` call, and before `_log_pass`. A dry run and a real run against the same raw set will therefore produce the same plan (same unconsumed raw, same curated facts) unless the brain is non-deterministic.
+- **`--dry-run` never mutates**: each batch's plan call is followed by `continue`, before the pinned filter and before any `store.upsert_curated`/`soft_delete_curated`/`mark_consumed` call, and `_log_pass` is skipped entirely. A dry run and a real run against the same raw set produce the same *first* plan (same unconsumed raw, same curated facts) unless the brain is non-deterministic; on a multi-batch backlog the later dry-run previews will differ from what a real run would send, because a real run's batch N sees the facts batches 1…N-1 wrote and the dry run has nothing to show it. The preview is honest about what it is: N independent plans, not a simulation of the pass.
 - **`--if-stale` staleness is computed outside `curate()` entirely** — `is_stale()` is a separate, cheaper read-only scan the CLI calls first; `curate()` itself has no staleness awareness and will always attempt a pass on whatever unconsumed raw exists (or no-op if none).
 - **Pinned facts are enforced twice** — once via prompt instruction (soft guarantee) and once via the `pinned` set intersection in `curate()` (hard guarantee) at three separate points: dropping pinned upserts outright, skipping pinned slugs in the supersession-tombstone step, and skipping pinned slugs in the explicit-tombstone step. A pinned fact can still receive a linkify lineage footer (not a content edit) since linkify runs after and outside this logic.
 - **Bad model output degrades gracefully everywhere**: an invalid slug in an upsert is skipped (`_apply_upserts`); a tombstone target that doesn't exist or is malformed is a no-op (`_safe_soft_delete`); the node text is defensively de-fenced (`_strip_outer_fence`). None of these raise — only an unparseable *plan* JSON response is treated as fatal to the pass.
@@ -875,8 +885,10 @@ Implements the `SessionEnd` capture (spec §4). The module docstring states the 
 
 Module-level tuned constants (spec §8, single source of truth):
 - `MAX_PROMPTS = 25` — the last N user prompts kept.
-- `MAX_PROMPT_CHARS = 600` — per-prompt truncation.
+- `MAX_PROMPT_CHARS = 1200` — per-prompt truncation.
 - `MAX_SUMMARY_CHARS = 4000` — final-summary truncation.
+- `MAX_ASSISTANT_MSG_CHARS = 500` and
+  `MAX_ASSISTANT_TOTAL_CHARS = 6000` — bounded chronological highlights.
 - `_NOISE_PREFIXES` — a tuple of literal prefixes (`"<command-name>"`, `"<local-command-"`, `"<system-reminder>"`, `"Caveat:"`, `"[Request interrupted"`) that mark a user turn as UI/tooling noise rather than a real prompt, per spec §4.
 
 Key functions:
@@ -892,10 +904,19 @@ Key functions:
 - `parse_transcript(transcript_path: Path) -> dict[str, Any]` — the core parser. Iterates `_iter_events`, and for each event:
   - Skips it outright if `event.get("isSidechain")` is truthy (a subagent turn, spec §11.1 line 4).
   - For `type == "user"`: pulls `cwd`, `gitBranch`, `sessionId` off the event as candidate metadata (later-seen non-empty values win — `event.get("cwd") or cwd`, so blank/missing fields never clobber an already-captured value). Extracts text via `_text_from_content`; if that returns `None` (tool_result turn or unrecognized shape) the event is skipped. Otherwise the text is stripped; empty or noise-prefixed text is dropped; anything surviving is appended to `prompts`.
-  - For `type == "assistant"`: extracts text via `_assistant_text`, strips it, and if non-empty overwrites `summary` — so **the last non-empty assistant turn in the file wins** as the session summary, matching spec §4's "last non-empty wins."
-  - Returns `{"prompts": [...], "summary": str, "cwd": str, "branch": str, "session_id": str}`. Note metadata only ever comes from `user`-typed events, never assistant ones (per spec §11.1: "Metadata rides on the user events").
+  - For `type == "assistant"`: extracts visible text for highlights and summary
+    candidates; records Agent/Task ids, edit paths, and Bash command first
+    lines from verified `tool_use` blocks. Matching user `tool_result` blocks
+    supply bounded subagent reports. Compact-summary user events contribute a
+    highlight, never a typed prompt or final-assistant-summary candidate.
+  - The final summary is the longest of the last three assistant texts. The
+    returned mapping also includes bounded highlights, reports, files, and
+    commands alongside prompts and metadata.
 
-- `_assemble_body(prompts: list[str], summary: str, reason: str) -> str` — applies the bounds (`kept = prompts[-MAX_PROMPTS:]`, i.e. keep the *last* 25, then truncate each to 600 chars; summary truncated to 4000 chars) and renders the fixed Markdown template from spec §4:
+- `_assemble_body(parsed: dict[str, Any], reason: str) -> str` — applies the
+  bounds (last 25 prompts at 1200 chars; summary at 4000 chars) and renders the
+  fixed Markdown sections from spec §4, omitting empty activity, subagent, and
+  highlight sections.
   ```
   ## Session
   - ended: <reason>
@@ -904,11 +925,23 @@ Key functions:
   ## Prompts
   - <prompt>…
 
+  ## Activity
+  ### Files touched
+  - <path>…
+  ### Commands run
+  - <command>…
+
+  ## Subagent reports
+  - <report>…
+
+  ## Assistant highlights
+  - <message>…
+
   ## Final assistant summary
 
   <summary>
   ```
-  `<n>` is `len(kept)` (post-truncation prompt count), not the raw pre-slice count.
+  `<n>` is `len(kept)` (post-truncation prompt count), not the raw pre-slice count. `## Activity`, `## Subagent reports`, and `## Assistant highlights` are omitted entirely when they have nothing to say, so a plain Q&A session's raw looks exactly like it did in v0.1.
 
 - `scribe(root: Path, *, transcript_path: Path, cwd: str, reason: str, session_id: str = "") -> Path | None` — the entry point invoked by the CLI's hook dispatcher. Control flow, in order:
   1. `parsed = parse_transcript(transcript_path)`.
@@ -924,6 +957,15 @@ Key functions:
   The docstring is explicit that `scribe()` itself does not swallow exceptions internally past the two guarded points above (`OSError` in `_iter_events`, `UnsupportedSchemaError` here) — "callers should treat any exception as 'capture nothing'"; the actual blanket `except Exception` / exit-0 guarantee lives one layer up, in the CLI's `run_hook` dispatcher (see "Connections" below), not in this module.
 
   Note on `store.write_raw`: per its own docstring, a raw file is keyed by `(project, captured_at, agent, session_id)` and is rewritable by the owning scribe until the curator marks it `consumed: true`, at which point a further write raises `RawConsumedError` — `scribe()` does not catch this, so a session-end firing against an already-curated capture (same session id + timestamp bucket) would propagate that exception up to the fail-safe hook wrapper.
+
+### src/neurobase/adapters/scribe_common.py
+
+The capture-side twin of `recall_common.py`, and it exists for the same reason: spec §8's *assistant* bounds are explicitly agent-agnostic, so the code enforcing them lives in one module that both scribes import and re-export via `__all__`, rather than being written twice and drifting.
+
+- `MAX_ASSISTANT_MSG_CHARS = 500`, `MAX_ASSISTANT_TOTAL_CHARS = 6000`, `SUMMARY_CANDIDATE_WINDOW = 3` — spec §8's tuned defaults for the assistant side of a capture.
+- `bounded_highlights(messages: list[str]) -> list[str]` — builds the `## Assistant highlights` section: truncate each message to `MAX_ASSISTANT_MSG_CHARS`, walk **newest→oldest** keeping messages until the `MAX_ASSISTANT_TOTAL_CHARS` total is spent, then reverse back into chronological order. Eviction is deterministic (the same transcript always yields byte-identical highlights) and biased toward the end of the session, where the durable conclusions usually are. With the default bounds, at least 12 messages always survive.
+- `bullet(text: str) -> str` — `"- " + text.replace("\n", "\n  ")`. Renders one list item of a capture body, indenting continuation lines so a multi-line value stays *inside* its bullet. This is a safety rule, not cosmetics: prompts run to 1,200 chars and subagent reports to 1,500, so multi-line markdown is the common case, and a bare `- {text}` would put a captured `## Final assistant summary` at column 0 — session content forging the raw document's own section structure, which the curator then reads as if the scribe had written it (ADR-0013).
+- `final_summary(candidates: list[str]) -> str` — the `## Final assistant summary` slot: the **longest of the last `SUMMARY_CANDIDATE_WINDOW` (3)** non-empty assistant texts, `""` if there are none. This is the fix for the *final-message trap*: v0.1 took the last non-empty assistant message, so a three-hour debugging session that happened to end with "thanks — what's the relaunch command?" captured `bash scripts/launch.sh` as its entire assistant-side record and the real discovery never reached the curator. Restricting the window to the last 3 keeps the pick anchored to the end of the session (an early giant dump can't win); taking the longest of those 3 skips the throwaway sign-off. `max()` keeps the earlier message on a tie, so selection is deterministic.
 
 ### src/neurobase/adapters/recall_common.py
 
@@ -1018,17 +1060,20 @@ This subsystem is Neurobase's integration with the Codex CLI, mirroring the Clau
 
 Implements the Codex scribe contract (spec §5). Unlike the Claude scribe (`SessionEnd`, fires once), Codex has **no `SessionEnd`** — its hooks fire on every turn (`Stop`) — so this module is designed to be invoked repeatedly per session and converge on a single raw file via a session-keyed overwrite. Every code path is deterministic (no LLM call) and every path that can fail does so by returning `None`/writing nothing rather than raising, so a hook invocation never wedges a turn.
 
-Module constants: `MAX_PROMPTS = 25`, `MAX_PROMPT_CHARS = 600`, `MAX_SUMMARY_CHARS = 4000` (identical tuned defaults to the Claude scribe, spec §8 — agent-agnostic), and `MAX_IDE_CHARS = 800` (Codex-specific: the VS Code extension's IDE-context block, kept once as session metadata). `_IDE_CONTEXT_MARKER = "# Context from my IDE setup:"` and `_IDE_REQUEST_MARKER = "## My request for Codex:"` are the literal markers the VS Code extension wraps prompts in. `_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"` is the default rollout root (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, spec §5/§11.2).
+Module constants: `MAX_PROMPTS = 25`, `MAX_PROMPT_CHARS = 1200`, `MAX_SUMMARY_CHARS = 4000` (identical tuned defaults to the Claude scribe, spec §8 — agent-agnostic), the assistant-highlight bounds `MAX_ASSISTANT_MSG_CHARS = 500` / `MAX_ASSISTANT_TOTAL_CHARS = 6000` (re-exported from `adapters/scribe_common.py`, which both scribes share so one §8 contract can't drift into two), and `MAX_IDE_CHARS = 800` (Codex-specific: the VS Code extension's IDE-context block, kept once as session metadata). `_IDE_CONTEXT_MARKER = "# Context from my IDE setup:"` and `_IDE_REQUEST_MARKER = "## My request for Codex:"` are the literal markers the VS Code extension wraps prompts in. `_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"` is the default rollout root (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, spec §5/§11.2).
 
 - `_iter_events(rollout_path: Path) -> list[dict[str, Any]]` — reads the rollout file and parses each line as JSON, skipping blank lines and any line that fails `json.loads` or isn't a dict. An unreadable file (`OSError`) returns `[]`. Never raises.
 - `_split_ide_wrapper(message: str) -> tuple[str, str | None]` — splits a VS Code-wrapped prompt at `_IDE_REQUEST_MARKER`. If the marker isn't present, returns `(message, None)` (plain prompt, no IDE context). Otherwise returns `(prompt_after_marker, context_before_marker)`, stripping the `_IDE_CONTEXT_MARKER` prefix from the context half if present; an empty context becomes `None`.
 - `parse_rollout(rollout_path: Path) -> dict[str, Any]` — the core rollout parser. Iterates events from `_iter_events` and extracts:
   - `session_meta` events: `session_id` (from `payload.session_id` or `payload.id`), `cwd`, `started_at` (from `payload.timestamp`), and `branch` (from `payload.git.branch` if `git` is a dict).
   - `event_msg` events with `payload.type == "user_message"`: the message is split via `_split_ide_wrapper`; a non-`None` context replaces `ide_context` (**latest IDE context wins**, not the first); the prompt is stripped and, if non-empty, appended to `prompts` — **unless it equals the previous prompt** (`thread_rolled_back` re-emits the last prompt verbatim; consecutive duplicates are dropped per spec §5).
-  - `event_msg` events with `payload.type == "agent_message"`: a non-empty stripped message overwrites `summary` (**last non-empty wins**).
+  - `event_msg` events with `payload.type == "agent_message"`: collect every
+    non-empty stripped message as a bounded highlight; the longest of the last
+    three becomes the summary.
   - All other event types (`response_item`, `turn_context`, `token_count`, `task_started`, `task_complete`, etc.) are silently ignored — the function only branches on `event_msg`/`session_meta`, so the turn-completion marker from ADR-0001 (`task_complete`) plays no role in parsing; the *hook firing itself* is what triggers a scribe run, not any particular event in the file.
-  - Returns `{prompts, summary, ide_context, cwd, branch, session_id, started_at}`.
-- `_assemble_body(prompts: list[str], summary: str, ide_context: str) -> str` — renders the raw capture body: truncates each of the last `MAX_PROMPTS` prompts to `MAX_PROMPT_CHARS`, truncates `summary` to `MAX_SUMMARY_CHARS`, and truncates `ide_context` to `MAX_IDE_CHARS`. Structure: `## Session` (with `- agent: codex` and a prompt count), an optional `## Files in focus (IDE)` section (only if `ide_context` is non-empty), `## Prompts` (one bullet per kept prompt), and `## Final assistant summary`.
+  - Returns `{prompts, summary, highlights, ide_context, cwd, branch,
+    session_id, started_at}`.
+- `_assemble_body(prompts: list[str], summary: str, ide_context: str, highlights: list[str]) -> str` — renders the raw capture body: truncates each of the last `MAX_PROMPTS` prompts to `MAX_PROMPT_CHARS`, truncates `summary` to `MAX_SUMMARY_CHARS`, and truncates `ide_context` to `MAX_IDE_CHARS`. Structure, in spec §5 order: `## Session` (with `- agent: codex` and a prompt count), an optional `## Files in focus (IDE)` section (only if `ide_context` is non-empty), `## Prompts` (one bullet per kept prompt), an optional `## Assistant highlights` (one bullet per kept message), and `## Final assistant summary`. Codex has no `## Activity` or `## Subagent reports` section — ADR-0013 defers both pending a bounded format contract for `response_item` payloads.
 - `_parse_started_at(started_at: str) -> datetime` — parses the session's ISO timestamp (`Z` suffix normalized to `+00:00`) into an aware `datetime`; this **keys the per-turn overwrite** (see below). Any parse failure, or an empty string, falls back to `datetime.now(UTC)` — capture still proceeds, but that session's per-turn dedupe is lost (each turn would get a new `captured_at`, hence a new filename), which is called out explicitly as a known degradation, not a crash.
 - `_read_session_meta(rollout_path: Path) -> dict[str, Any] | None` — reads only the **first line** of the rollout and, if it parses as JSON and has `type == "session_meta"`, returns its `payload` dict. Used by `discover_rollout` for cheap cross-checking without parsing the whole file. Returns `None` on any I/O or parse failure, or if the first line isn't a `session_meta` event.
 - `discover_rollout(*, session_id: str | None = None, min_mtime: float | None = None, sessions_root: Path | None = None) -> Path | None` — finds the active rollout when the hook payload carries no path, which is the case for the `notify` fallback (spec §11.4 — its argv JSON never includes a path). Globs `**/rollout-*.jsonl` under `sessions_root` (default `_SESSIONS_ROOT`), sorted newest-mtime-first; if the root doesn't exist, or the glob/stat raises `OSError`, returns `None`. Filters to `eligible` paths with `mtime >= min_mtime` when given (a defensive floor only — a resumed session's rollout can legitimately be old). Then:
@@ -1196,7 +1241,7 @@ This pattern directly implements spec §7's installer rules: *"show exact diff +
 
 - **`_print_recommender_metrics(resolved_root: Path) -> None`** — calls `metrics.compute_metrics(resolved_root)` and prints: decided/accepted/rejected counts, precision, edited rate, reviewed-event count, a survival summary, and recurrence reduction — all through `_fmt_metric`. The survival block has a special case: if `result.survival` is empty, prints `"Survival: insufficient data"` rather than `"0 survived, 0 not survived, 0 insufficient data"`, because a zero-length dict means "no ledger-confirmed accepted proposals to measure survival from" (not applicable), not a measured all-zero result — explicitly called out in the code as a Codex round-2 review finding. When non-empty, prints aggregate counts plus one `"  {slug}: {status}"` line per slug, sorted by slug, with underscores replaced by spaces (`"not_survived"` → `"not survived"`).
 
-- **`curate(root, cwd, if_stale: bool = False, dry_run: bool = False, resynth: bool = False) -> None`** — folds unconsumed raw captures into curated facts (spec §2). Resolves config/root/cwd/project (same not-enabled-⇒-exit-1 pattern as `status`), checks schema. If `--if-stale` is set *and* `--resynth` is not, checks `is_stale(root, slug, config.curate.stale_hours)`; if not stale, echoes "Not stale — nothing to curate." and returns without calling the brain at all (this is what makes the SessionStart hook's detached `spawn_curate_if_stale` cheap on the common case). Otherwise resolves a brain backend via `resolve_brain(config)`; `None` ⇒ red error naming `resolution.reason` and pointing at `neurobase doctor`, exit 1. Calls `run_curate(root, slug, brain, dry_run=dry_run, resynth=resynth, tombstone_grace_days=config.curate.tombstone_grace_days)`. `--dry-run` prints only `summary["plan"]` as indented JSON and returns (no mutation happened inside the curator either). Otherwise prints the summary minus the `"plan"` key as compact JSON, and exits 1 if `summary["status"] == "error"`.
+- **`curate(root, cwd, if_stale: bool = False, dry_run: bool = False, resynth: bool = False) -> None`** — folds unconsumed raw captures into curated facts (spec §2). Resolves config/root/cwd/project (same not-enabled-⇒-exit-1 pattern as `status`), checks schema. If `--if-stale` is set *and* `--resynth` is not, checks `is_stale(root, slug, config.curate.stale_hours)`; if not stale, echoes "Not stale — nothing to curate." and returns without calling the brain at all (this is what makes the SessionStart hook's detached `spawn_curate_if_stale` cheap on the common case). Otherwise resolves a brain backend via `resolve_brain(config)`; `None` ⇒ red error naming `resolution.reason` and pointing at `neurobase doctor`, exit 1. Calls `run_curate(root, slug, brain, dry_run=dry_run, resynth=resynth, tombstone_grace_days=config.curate.tombstone_grace_days, plan_payload_max_bytes=config.curate.plan_payload_max_bytes)`. `--dry-run` prints the preview as indented JSON — `summary["plans"]` (the list) when the backlog needed more than one batch, else `summary["plan"]` — and returns (no mutation happened inside the curator either). Otherwise prints the summary minus the `"plan"` key as compact JSON, and exits 1 if `summary["status"] == "error"`.
 
 - **`seed(from_dir, from_claude_memory, project, all_projects, root, cwd) -> None`** — imports existing notes and/or Claude auto-memory as curated facts (spec §12.3). Validation order matters and is commented in the source:
   1. Requires at least one of `--from-dir`/`--from-claude-memory` (hard error otherwise) — "never crawls a directory the user did not name."
@@ -1736,21 +1781,29 @@ The map below is by subsystem; each file's line names the contract it pins.
   `openai-api`/unknown backends.
 
 **Curator**
-- `test_curator.py` (24) — the spec §2 loop via fake brains: plan apply
+- `test_curator.py` (30) — the spec §2 loop via fake brains: plan apply
   (add/supersede/tombstone), the hard unconsumed-on-parse-failure rule, empty
   plan still consumes, node-synthesis-failure = `partial`, `--dry-run`,
-  `--if-stale` staleness, fact-count-trend logging.
+  `--if-stale` staleness, fact-count-trend logging, and the D22 byte-budgeted
+  batching (single-batch payload byte-identical to v0.1, oldest-first batches
+  with facts reloaded between them, a failed batch leaving earlier commits
+  standing and later raws unconsumed, oversize-raw truncation, multi-batch
+  dry-run preview).
 
 **Adapters**
-- `test_claude_scribe.py` (9) — §11.1 transcript parse: sidechain/tool_result/
-  noise skipping, last-non-empty summary, §8 bounds, opt-in + empty-skip,
-  redaction before write.
+- `test_claude_scribe.py` (16) — §11.1 transcript parse: sidechain/tool_result/
+  noise skipping, §8 bounds, opt-in + empty-skip, redaction before write, and
+  the Tier-1 skim: longest-of-last-3 summary (the final-message trap), `Agent`
+  subagent-report correlation, the tool-activity digest and its best-effort
+  handling of odd/empty tool inputs, highlight eviction, compact summaries as
+  highlights.
 - `test_claude_recall.py` (8) / `test_recall_common.py` (3) — node assembly,
   6000-char cap dropping whole trailing nodes, framing header, JSON envelope,
   fail-safe emptiness.
-- `test_codex_scribe.py` (14) — §11.2 rollout parse, IDE-wrapper split,
-  consecutive-duplicate-prompt skip, the started-at-keyed overwrite, and the
-  consumed-raw retry with a fresh filename.
+- `test_codex_scribe.py` (16) — §11.2 rollout parse, IDE-wrapper split,
+  consecutive-duplicate-prompt skip, the started-at-keyed overwrite, the
+  consumed-raw retry with a fresh filename, and the shared §8 assistant bounds
+  (highlights + longest-of-last-3 summary, evicting exactly as Claude's do).
 - `test_claude_install.py` (15) / `test_codex_install.py` (25) — fenced
   ownership, idempotent merge, foreign entries preserved byte-for-byte, surgical
   removal, and (Codex) the TOML surgery that preserves comments/ordering.

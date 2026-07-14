@@ -160,6 +160,42 @@ def test_consecutive_duplicate_prompts_skipped(enabled: tuple[Path, Path], tmp_p
     assert scribe.parse_rollout(rollout)["prompts"] == ["same prompt", "different"]
 
 
+def test_highlights_and_longest_of_last_three_summary(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    _, repo = enabled
+    events = [
+        _meta(str(repo)),
+        _agent("An early message that should only remain a highlight."),
+        _agent("The durable discovery is the longest recent assistant message."),
+        _agent("Short follow-up."),
+        _agent("Tiny end."),
+    ]
+    rollout = _write_rollout(tmp_path / "rollout-1.jsonl", events)
+    parsed = scribe.parse_rollout(rollout)
+    assert parsed["summary"] == "The durable discovery is the longest recent assistant message."
+    assert parsed["highlights"] == [
+        "An early message that should only remain a highlight.",
+        "The durable discovery is the longest recent assistant message.",
+        "Short follow-up.",
+        "Tiny end.",
+    ]
+
+
+def test_highlights_share_the_agent_agnostic_budget(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Spec §8's assistant bounds are agent-agnostic: the Codex scribe evicts
+    exactly like the Claude one (both go through ``scribe_common``)."""
+    _, repo = enabled
+    events = [_meta(str(repo))] + [_agent(f"m{i} " + "x" * 600) for i in range(20)]
+    parsed = scribe.parse_rollout(_write_rollout(tmp_path / "rollout-2.jsonl", events))
+    highlights = parsed["highlights"]
+    assert all(len(h) <= scribe.MAX_ASSISTANT_MSG_CHARS for h in highlights)
+    assert sum(len(h) for h in highlights) <= scribe.MAX_ASSISTANT_TOTAL_CHARS
+    assert [h.split()[0] for h in highlights] == [f"m{i}" for i in range(8, 20)]
+
+
 def test_redaction_applied_before_write(enabled: tuple[Path, Path], tmp_path: Path) -> None:
     root, repo = enabled
     secret = "sk-ant-api03-" + "A" * 40  # noqa: S105 - test fixture, not a real key

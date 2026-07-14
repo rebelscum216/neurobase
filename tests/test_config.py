@@ -14,6 +14,7 @@ def test_missing_file_returns_all_defaults(tmp_path: Path) -> None:
     assert cfg.brain.timeout_seconds == 120
     assert cfg.curate.stale_hours == 12
     assert cfg.curate.tombstone_grace_days == 14
+    assert cfg.curate.plan_payload_max_bytes == 262_144
     assert cfg.inject.max_chars == 6000
     assert cfg.inject.sources == ["startup", "clear"]
     assert cfg.redact.extra_patterns == []
@@ -50,6 +51,7 @@ timeout_seconds = 30
 [curate]
 stale_hours = 6
 tombstone_grace_days = 7
+plan_payload_max_bytes = 123456
 
 [inject]
 max_chars = 1000
@@ -69,6 +71,7 @@ near_duplicate_threshold = 0.8
     assert cfg.brain.backend == "codex-cli"
     assert cfg.brain.timeout_seconds == 30
     assert cfg.curate.stale_hours == 6
+    assert cfg.curate.plan_payload_max_bytes == 123456
     assert cfg.inject.max_chars == 1000
     assert cfg.inject.sources == ["startup"]
     assert cfg.redact.extra_patterns == ["foo-\\d+"]

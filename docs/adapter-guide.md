@@ -42,12 +42,18 @@ A function that turns "a session/turn just ended" into **zero or one**
 - **Opt-in.** Write only if the resolved project's memory tree already
   exists (i.e., the project ran `neurobase enable`) — a scribe must never
   create a store as a side effect of a hook firing.
-- **Empty capture writes nothing.** No prompts and no summary ⇒ skip the
-  write entirely; don't write an empty raw file.
+- **Empty capture writes nothing.** No prompts, summary, highlights, activity,
+  or reports ⇒ skip the write entirely; don't write an empty raw file.
 - **Bounds.** Truncate to the shared defaults (spec §8: last 25 prompts,
-  600 chars each, 4000-char summary) unless the agent's own transcript
+  1200 chars each, 4000-char summary, 500 chars per assistant highlight and
+  6000 chars total) unless the agent's own transcript
   shape genuinely requires different numbers — if so, that's a config
-  addition, not a silent per-adapter divergence.
+  addition, not a silent per-adapter divergence. Don't reimplement the
+  assistant-side bounds: `adapters/scribe_common.py` owns
+  `bounded_highlights()` (newest-first eviction, chronological output) and
+  `final_summary()` (longest of the last 3 — *never* last-non-empty-wins, which
+  captures a throwaway sign-off as the whole session record). Import and
+  re-export them, the way both shipped scribes do.
 
 What varies per agent is entirely upstream of those rules: how you get from
 "a hook fired" to "a list of (prompt, summary, metadata) tuples." Claude

@@ -17,13 +17,30 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from neurobase.adapters.scribe_common import (
+    MAX_ASSISTANT_MSG_CHARS,
+    MAX_ASSISTANT_TOTAL_CHARS,
+    bounded_highlights,
+    bullet,
+    final_summary,
+)
 from neurobase.core import projects, store
 from neurobase.core.config import load_config
 from neurobase.core.redact import redact
 
+__all__ = [
+    "MAX_ASSISTANT_MSG_CHARS",
+    "MAX_ASSISTANT_TOTAL_CHARS",
+    "discover_rollout",
+    "parse_rollout",
+    "scribe",
+]
+
 # Tuned defaults (spec §8) — identical to the Claude scribe; §8 is agent-agnostic.
+# The assistant-highlight bounds and their eviction come from scribe_common, so
+# the two scribes cannot drift on one shared contract.
 MAX_PROMPTS = 25
-MAX_PROMPT_CHARS = 600
+MAX_PROMPT_CHARS = 1200
 MAX_SUMMARY_CHARS = 4000
 # The latest IDE context block, kept once as session metadata (spec §5).
 MAX_IDE_CHARS = 800
@@ -70,13 +87,14 @@ def _split_ide_wrapper(message: str) -> tuple[str, str | None]:
 
 
 def parse_rollout(rollout_path: Path) -> dict[str, Any]:
-    """Return ``{prompts, summary, ide_context, cwd, branch, session_id,
-    started_at}`` from a rollout. ``prompts`` are the clean typed user turns
-    (IDE wrapper stripped, consecutive duplicates dropped); ``summary`` is the
-    last non-empty agent message; ``started_at`` is the session_meta timestamp
-    (ISO string) that keys the per-turn overwrite."""
+    """Return ``{prompts, summary, highlights, ide_context, cwd, branch,
+    session_id, started_at}`` from a rollout. ``prompts`` are the clean typed
+    user turns (IDE wrapper stripped, consecutive duplicates dropped);
+    ``summary`` is the longest of the last 3 agent messages and ``highlights``
+    the bounded chronological rest (spec §5); ``started_at`` is the session_meta
+    timestamp (ISO string) that keys the per-turn overwrite."""
     prompts: list[str] = []
-    summary = ""
+    agent_messages: list[str] = []
     ide_context = ""
     cwd = ""
     branch = ""
@@ -116,10 +134,11 @@ def parse_rollout(rollout_path: Path) -> dict[str, Any]:
         elif ptype == "agent_message":
             message = payload.get("message")
             if isinstance(message, str) and message.strip():
-                summary = message.strip()  # last non-empty wins
+                agent_messages.append(message.strip())
     return {
         "prompts": prompts,
-        "summary": summary,
+        "summary": final_summary(agent_messages),
+        "highlights": bounded_highlights(agent_messages),
         "ide_context": ide_context,
         "cwd": cwd,
         "branch": branch,
@@ -128,7 +147,9 @@ def parse_rollout(rollout_path: Path) -> dict[str, Any]:
     }
 
 
-def _assemble_body(prompts: list[str], summary: str, ide_context: str) -> str:
+def _assemble_body(
+    prompts: list[str], summary: str, ide_context: str, highlights: list[str]
+) -> str:
     kept = [p[:MAX_PROMPT_CHARS] for p in prompts[-MAX_PROMPTS:]]
     summary = summary[:MAX_SUMMARY_CHARS]
     lines = [
@@ -139,7 +160,10 @@ def _assemble_body(prompts: list[str], summary: str, ide_context: str) -> str:
     if ide_context:
         lines += ["", "## Files in focus (IDE)", "", ide_context[:MAX_IDE_CHARS]]
     lines += ["", "## Prompts"]
-    lines += [f"- {p}" for p in kept]
+    lines += [bullet(p) for p in kept]
+    if highlights:
+        lines += ["", "## Assistant highlights"]
+        lines += [bullet(message) for message in highlights]
     lines += ["", "## Final assistant summary", "", summary]
     return "\n".join(lines)
 
@@ -251,7 +275,7 @@ def scribe(
     if not prompts and not summary:
         return None  # empty capture ⇒ write nothing
 
-    body = _assemble_body(prompts, summary, parsed["ide_context"])
+    body = _assemble_body(prompts, summary, parsed["ide_context"], parsed["highlights"])
     body = redact(body, load_config().redact.extra_patterns)
 
     sid = session_id or parsed["session_id"]

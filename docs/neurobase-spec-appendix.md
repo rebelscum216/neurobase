@@ -123,24 +123,30 @@ _<N> active curated facts._
 
 1. `ensure_tree`; load unconsumed raw. **None ⇒ no-op** (return
    `{"status":"noop", …}`) — idempotence.
-2. Load active curated facts. Call brain `plan_json` with the plan prompt (§2.1),
-   user payload = `{"curated_facts":[{slug,body,pinned?}…], "raw_captures":[{raw:<filename>, body}…]}`
-   — `pinned: true` is set for user-directed facts (see **Pinned facts** below).
-3. **If the response is unparseable ⇒ ABORT the pass, leave every raw
-   unconsumed, return `{"status":"error", …}`.** A transient bad LLM response
-   must never silently drop observations. (Distinguish parse-failure from a
-   valid-but-empty plan — an empty plan IS consumed.) Tolerate ```json fences.
-4. Apply upserts: skip empty slug/body; `supersedes` filtered of self;
+2. Load active curated facts. Build the oldest-first next batch whose **final
+   combined plan request** (system prompt + framing + serialized user payload)
+   is at most `PLAN_PAYLOAD_MAX_BYTES` in UTF-8 bytes. User payload remains
+   `{"curated_facts":[{slug,body,pinned?}…], "raw_captures":[{raw:<filename>, body}…]}`
+   — `pinned: true` is set for user-directed facts. A single raw too large to
+   fit is truncated with `[truncated for plan payload]`; never skip it silently.
+3. Call brain `plan_json` for that batch. **If the response is unparseable ⇒
+   ABORT that batch and every later batch, leaving their raws unconsumed.** Any
+   earlier successfully applied/consumed batches stand. A first-batch failure
+   preserves v0.1 behavior: every raw remains unconsumed. Distinguish a parse
+   failure from a valid-but-empty plan (an empty plan IS consumed). Tolerate
+   ```json fences.
+4. Apply this batch's upserts: skip empty slug/body; `supersedes` filtered of self;
    `provenance = ["raw/"+name for name in from_raw]`; bad slug ⇒ skip + warn.
    For each superseded slug: tombstone it **unless that slug was itself
-   re-upserted this pass, or is pinned**.
-5. Apply explicit tombstones (skip any slug upserted this pass **or pinned**).
-6. Mark all consumed raws `consumed: true`.
-7. `prune_tombstones(14)`.
+   re-upserted this batch, or is pinned**.
+5. Apply explicit tombstones (skip any slug upserted this batch **or pinned**).
+6. Mark this batch's raws `consumed: true`; reload active facts, then repeat
+   steps 2–6 for remaining raws so the next plan sees all prior batch changes.
+7. After the final batch, `prune_tombstones(14)`.
 8. Regenerate node: brain `text` with node prompt (§2.2) over the resulting
    active facts; write as node `<project>-status` (default node name = project
    slug + `-status`). Rebuild `index.md`. Run linkify (§6).
-9. Return summary: `{status, raw, upserts, superseded, tombstones,
+9. Return summary: `{status, raw, batches, upserts, superseded, tombstones,
    pruned_tombstones, active_facts}`.
 
 **Pinned facts (user-directed, decision D-b):** a curated fact whose
@@ -154,8 +160,11 @@ user "remember this" cannot silently vanish on a later pass. A pinned fact
 leaves the store only when the user removes it. (A linkify lineage footer, §6,
 may still be appended — that is not a content edit.)
 
-**Partial-failure contract:** only the *plan* step aborts the pass (step 3). If
-node synthesis or index rebuild fails *after* raws were consumed (steps 6→8),
+**Partial-failure contract:** only the *plan* step aborts the current and later
+batches (step 3). A first-batch failure leaves every raw unconsumed; after one
+or more successful batches, their state remains applied and their raws consumed
+while the failed/later batches remain retryable (D22). If node synthesis or
+index rebuild fails *after* raws were consumed (steps 6→8),
 keep the applied state, log, and return `{"status":"partial",…}` — the node is
 stale but self-heals on any later pass, because nodes are a pure function of
 `curated/`. `neurobase curate --resynth` regenerates node + index without new raw.
@@ -237,12 +246,22 @@ no preamble.
     `tool_result` block**. Drop noise: text starting with `<command-name>`,
     `<local-command-`, `<system-reminder>`, `Caveat:`, `[Request interrupted`.
     Collect `cwd` / `gitBranch` / `sessionId` from these events as metadata.
-  - `type=="assistant"`: joined visible `text` blocks; **last non-empty wins**
-    as the final summary (thinking/tool blocks excluded).
-- Bounds (defaults): keep last **25** prompts, each truncated **600** chars;
-  summary truncated **4000** chars.
+  - `type=="assistant"`: collect joined visible `text` blocks (thinking blocks
+    excluded). Collect unique Edit/Write/MultiEdit/NotebookEdit
+    `input.file_path` values and the first line of Bash `input.command`.
+    Correlate `Agent` or legacy `Task` tool-use ids with later tool results and
+    retain their text as subagent reports.
+  - A user event with `isCompactSummary: true` is an assistant highlight, not a
+    typed prompt.
+- Final summary = longest of the last **3** non-empty assistant texts. Keep
+  assistant highlights newest-first within a **6000**-char total, each message
+  truncated to **500** chars, then render in chronological order.
+- Bounds (defaults): keep last **25** prompts, each truncated **1200** chars;
+  summary **4000** chars; last **5** subagent reports at **1500** chars each;
+  activity at **30** files and **20** commands of **120** chars.
 - Redaction pass (D13) over the assembled body BEFORE writing.
-- Empty capture (no prompts AND no summary) ⇒ write nothing.
+- Empty capture (no prompts, summary, highlights, subagent reports, OR activity)
+  ⇒ write nothing.
 - Body format:
 ```
 ## Session
@@ -252,10 +271,27 @@ no preamble.
 ## Prompts
 - <prompt>…
 
+## Activity
+### Files touched
+- <path>…
+### Commands run
+- <command>…
+
+## Subagent reports
+- <report>…
+
+## Assistant highlights
+- <message>…
+
 ## Final assistant summary
 
 <summary>
 ```
+Sections with nothing to say are omitted entirely. Every bullet MUST indent its
+continuation lines by two spaces (`"- " + text.replace("\n", "\n  ")`): prompts,
+highlights, and subagent reports are routinely multi-line markdown, and an
+un-indented one would put its own `##` heading at column 0 — letting session
+content forge the raw document's section structure that the curator then reads.
 
 ## 5. Codex scribe contract
 
@@ -275,7 +311,8 @@ Codex has **no SessionEnd**; its hooks fire per turn. Contract:
     context (open tabs / active file) once as session metadata, ≤**800** chars,
     rendered as a `## Files in focus (IDE)` section. **Skip consecutive
     duplicate prompts** (a `thread_rolled_back` re-emits the previous one).
-  - `event_msg` with `payload.type=="agent_message"`: last non-empty = summary.
+  - `event_msg` with `payload.type=="agent_message"`: collect all non-empty
+    messages as assistant highlights; longest of the last 3 = summary.
 - Same bounds/redaction/empty-skip/exit-0/opt-in rules as §4. Body adds
   `- agent: codex` under `## Session`.
 - **Per-turn dedupe (the key trick):** pass `captured_at = session start
@@ -392,14 +429,18 @@ modification; idempotent; state "takes effect next session."
 | Constant | Default | Where |
 |---|---|---|
 | MAX_PROMPTS | 25 | scribes |
-| MAX_PROMPT_CHARS | 600 | scribes |
+| MAX_PROMPT_CHARS | 1200 | scribes |
 | MAX_SUMMARY_CHARS | 4000 | scribes |
+| MAX_ASSISTANT_MSG_CHARS / TOTAL | 500 / 6000 | scribes |
+| MAX_SUBAGENTS / MAX_SUBAGENT_CHARS | 5 / 1500 | claude scribe |
+| Activity files / commands / command chars | 30 / 20 / 120 | claude scribe |
 | MAX_IDE_CONTEXT_CHARS | 800 | codex scribe |
 | MAX_CONTEXT_CHARS (inject) | 6000 | recall |
 | TOMBSTONE_GRACE_DAYS | 14 | curator |
 | Staleness for `--if-stale` | 12h | D8 |
 | Node name | `<project>-status` | curator |
 | Brain call timeout / retries | 120s / 1 retry (timeout, 5xx, parse) | brain |
+| PLAN_PAYLOAD_MAX_BYTES | 262144 | curator (final serialized request, UTF-8 bytes) |
 | Inject on SessionStart sources | `startup, clear` | recall (§7) |
 
 ## 9. Kickoff prompt (paste as the first Claude Code message in the new repo)
@@ -436,6 +477,7 @@ timeout_seconds = 120
 [curate]
 stale_hours = 12
 tombstone_grace_days = 14
+plan_payload_max_bytes = 262144
 
 [inject]
 max_chars = 6000
@@ -513,16 +555,19 @@ Phase-1/4/5 fixture tests directly from these.
 ```jsonl
 {"type":"user","isSidechain":false,"cwd":"/Users/you/proj","gitBranch":"main","sessionId":"3fc4…","uuid":"…","parentUuid":null,"timestamp":"2026-07-07T14:00:00.000Z","message":{"role":"user","content":"Fix the login bug"}}
 {"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01…","content":[{"type":"text","text":"…"}]}]}}
-{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Done — the null check was missing in…"}]}}
+{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Done — the null check was missing in…"},{"type":"tool_use","id":"toolu_agent…","name":"Agent","input":{"description":"Research","prompt":"Investigate…","subagent_type":"Explore"}},{"type":"tool_use","id":"toolu_edit…","name":"Edit","input":{"file_path":"src/auth.py","old_string":"…","new_string":"…"}},{"type":"tool_use","id":"toolu_bash…","name":"Bash","input":{"command":"uv run pytest"}}]}}
+{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent…","content":[{"type":"text","text":"The agent found…"}]}]}}
+{"type":"user","isCompactSummary":true,"isSidechain":false,"message":{"role":"user","content":"Compacted durable context…"}}
 {"type":"user","isSidechain":true,"message":{"role":"user","content":"(subagent turn)"}}
 {"type":"user","isSidechain":false,"message":{"role":"user","content":"<command-name>/model</command-name>…"}}
 ```
 
 Parser behavior per §4: line 1 → prompt (note `content` may be a plain string
 OR a list of `{type:"text",text}` blocks — join the text blocks); line 2 →
-skipped (tool_result); line 3 → candidate final summary (join text blocks;
-last non-empty wins); line 4 → skipped (sidechain); line 5 → skipped (noise
-prefix). Other `type` values (e.g. `attachment`) exist and are ignored.
+skipped as a prompt (tool results are separately correlated to Agent/Task
+calls); line 3 → assistant highlight, final-summary candidate, and activity;
+line 4 → subagent report; line 5 → highlight, not prompt; sidechain and noise
+events are skipped. Other `type` values (e.g. `attachment`) are ignored.
 Metadata (`cwd`, `gitBranch`, `sessionId`) rides on the user events.
 
 ### 11.2 Codex rollout JSONL — structure VERIFIED live (values sanitized)

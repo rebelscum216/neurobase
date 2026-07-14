@@ -6,7 +6,9 @@ current, non-redundant fact set — optimizing for deletion and supersession.
 with a fake brain and no network.
 
 Hard rules preserved here:
-- A plan that won't parse ⇒ ABORT, leave every raw unconsumed (decision D9).
+- A first plan that won't parse ⇒ ABORT, leave every raw unconsumed (D9).
+- With D22 batching, a later failed batch and all later raws stay unconsumed;
+  earlier valid batches remain applied and consumed.
 - A *valid-but-empty* plan IS consumed (idempotence).
 - Node synthesis / index failing *after* raws were consumed ⇒ ``partial`` (the
   node is a pure function of ``curated/`` and self-heals on any later pass).
@@ -19,10 +21,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from neurobase.brain.base import Brain, BrainError
+from neurobase.brain.base import Brain, BrainError, combine_prompt
 from neurobase.core import linkify, store
 
 DEFAULT_TOMBSTONE_GRACE_DAYS = 14
+DEFAULT_PLAN_PAYLOAD_MAX_BYTES = 262_144
+OVERSIZE_RAW_MARKER = "\n\n[truncated for plan payload]"
 NODE_SUFFIX = "-status"
 CURATOR_LOG = ".curator-log.jsonl"
 
@@ -72,6 +76,86 @@ def _facts_payload(docs: list[store.Document]) -> list[dict[str, Any]]:
             entry["pinned"] = True  # spec §2: explicit user save — see PLAN_SYSTEM
         payload.append(entry)
     return payload
+
+
+def _raw_payload(doc: store.Document, body: str | None = None) -> dict[str, str]:
+    return {"raw": doc.file_path.name, "body": doc.body.strip() if body is None else body}
+
+
+def _plan_user_payload(curated: list[store.Document], raw_captures: list[dict[str, str]]) -> str:
+    """Serialize one plan payload. Kept as a single helper so byte budgeting
+    measures the exact user string passed to ``brain.plan_json``."""
+    return json.dumps(
+        {"curated_facts": _facts_payload(curated), "raw_captures": raw_captures},
+        ensure_ascii=False,
+    )
+
+
+def _plan_request_bytes(user_payload: str) -> int:
+    """Size of the final prompt used by CLI brains, in UTF-8 bytes.
+
+    API brains keep system/user separate, but using the combined CLI shape gives
+    every backend the same conservative budget and protects the argv boundary.
+    """
+    return len(combine_prompt(PLAN_SYSTEM, user_payload).encode("utf-8"))
+
+
+def _truncate_raw_to_fit(
+    curated: list[store.Document], doc: store.Document, max_bytes: int
+) -> dict[str, str]:
+    """Return a marked raw entry that fits by truncating its body.
+
+    Binary-search character boundaries while measuring serialized UTF-8 bytes;
+    character counts are not a safe proxy for argv size. Raise when curated
+    facts + envelope alone already consume the configured budget.
+    """
+    body = doc.body.strip()
+    low, high = 0, len(body)
+    best: dict[str, str] | None = None
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = _raw_payload(doc, body[:middle].rstrip() + OVERSIZE_RAW_MARKER)
+        size = _plan_request_bytes(_plan_user_payload(curated, [candidate]))
+        if size <= max_bytes:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    if best is None:
+        raise ValueError(
+            "plan payload budget is too small for the system prompt, curated facts, "
+            "and one truncated raw envelope"
+        )
+    return best
+
+
+def _next_plan_batch(
+    curated: list[store.Document],
+    remaining: list[store.Document],
+    max_bytes: int,
+) -> tuple[list[store.Document], str]:
+    """Build the next oldest-first batch within the final request-byte cap."""
+    if max_bytes <= 0:
+        raise ValueError("plan payload byte budget must be positive")
+    docs: list[store.Document] = []
+    entries: list[dict[str, str]] = []
+    for doc in remaining:
+        entry = _raw_payload(doc)
+        candidate_entries = [*entries, entry]
+        payload = _plan_user_payload(curated, candidate_entries)
+        if _plan_request_bytes(payload) <= max_bytes:
+            docs.append(doc)
+            entries = candidate_entries
+            continue
+        if docs:
+            break
+        # Never silently skip one raw larger than the cap.
+        docs.append(doc)
+        entries = [_truncate_raw_to_fit(curated, doc, max_bytes)]
+        break
+    if not docs:  # defensive: callers only invoke this with remaining raws
+        raise ValueError("cannot build an empty plan batch")
+    return docs, _plan_user_payload(curated, entries)
 
 
 def _pinned_slugs(docs: list[store.Document]) -> set[str]:
@@ -166,6 +250,7 @@ def curate(
     dry_run: bool = False,
     resynth: bool = False,
     tombstone_grace_days: int = DEFAULT_TOMBSTONE_GRACE_DAYS,
+    plan_payload_max_bytes: int = DEFAULT_PLAN_PAYLOAD_MAX_BYTES,
 ) -> dict[str, Any]:
     """Run one curate pass (spec §2). Returns the summary dict."""
     store.ensure_tree(project, root)
@@ -183,54 +268,96 @@ def curate(
         _log_pass(root, project, summary)
         return summary
 
-    curated = store.list_curated(root, project)
-    pinned = _pinned_slugs(curated)
-    user_payload = json.dumps(
-        {
-            "curated_facts": _facts_payload(curated),
-            "raw_captures": [{"raw": d.file_path.name, "body": d.body.strip()} for d in raw_docs],
-        },
-        ensure_ascii=False,
-    )
+    remaining = list(raw_docs)
+    plans: list[dict[str, Any]] = []
+    batch_count = 0
+    upsert_count = 0
+    superseded_count = 0
+    tombstone_count = 0
 
-    # Step 2/3: plan. Unparseable ⇒ abort, leave every raw unconsumed.
-    try:
-        plan = brain.plan_json(PLAN_SYSTEM, user_payload)
-    except BrainError as exc:
-        summary = {"status": "error", "raw": len(raw_docs), "error": str(exc)}
-        _log_pass(root, project, summary)
-        return summary
+    while remaining:
+        # Reload after every committed batch: later plans must see facts added,
+        # updated, superseded, or tombstoned by earlier batches.
+        curated = store.list_curated(root, project)
+        try:
+            batch_docs, user_payload = _next_plan_batch(curated, remaining, plan_payload_max_bytes)
+        except ValueError as exc:
+            summary = {
+                "status": "error",
+                "raw": len(raw_docs),
+                "batches": batch_count,
+                "error": str(exc),
+            }
+            _log_pass(root, project, summary)
+            return summary
 
-    upserts = plan.get("upserts") or []
-    tombstones = plan.get("tombstones") or []
+        # Step 2/3 per batch. A failed batch and every later batch stay
+        # unconsumed; earlier committed batches intentionally stand.
+        try:
+            plan = brain.plan_json(PLAN_SYSTEM, user_payload)
+        except BrainError as exc:
+            summary = {
+                "status": "error",
+                "raw": len(raw_docs),
+                "batches": batch_count,
+                "upserts": upsert_count,
+                "superseded": superseded_count,
+                "tombstones": tombstone_count,
+                "error": str(exc),
+            }
+            _log_pass(root, project, summary)
+            return summary
+
+        plans.append(plan)
+        batch_count += 1
+        if dry_run:
+            # A dry run never applies earlier plans, so later preview batches
+            # intentionally use the current persisted facts rather than
+            # pretending to simulate model-authored mutations.
+            remaining = remaining[len(batch_docs) :]
+            continue
+
+        upserts = plan.get("upserts") or []
+        tombstones = plan.get("tombstones") or []
+        pinned = _pinned_slugs(curated)
+
+        # D-b guard (spec §2): user-directed facts are pinned — drop any plan
+        # step that would reword, supersede, or tombstone one.
+        upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]
+
+        # Step 4: upserts + tombstone superseded (unless re-upserted / pinned).
+        upserted, superseded_slugs = _apply_upserts(root, project, upserts)
+        upsert_count += len(upserted)
+        superseded_count += sum(
+            _safe_soft_delete(root, project, slug)
+            for slug in dict.fromkeys(superseded_slugs)
+            if slug not in upserted and slug not in pinned
+        )
+
+        # Step 5: explicit tombstones (skip a slug upserted in this batch or pinned).
+        for entry in tombstones:
+            slug = str(entry.get("slug", "")).strip()
+            if not slug or slug in upserted or slug in pinned:
+                continue
+            if _safe_soft_delete(root, project, slug):
+                tombstone_count += 1
+
+        # Step 6 per batch: the plan was valid and its state is durable.
+        for doc in batch_docs:
+            store.mark_consumed(doc.file_path)
+        remaining = remaining[len(batch_docs) :]
 
     if dry_run:
-        return {"status": "dry-run", "raw": len(raw_docs), "plan": plan}
-
-    # D-b guard (spec §2): user-directed facts are pinned — drop any plan step
-    # that would reword, supersede, or tombstone one, regardless of the prompt.
-    upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]
-
-    # Step 4: upserts + tombstone superseded (unless re-upserted / pinned).
-    upserted, superseded_slugs = _apply_upserts(root, project, upserts)
-    superseded_count = sum(
-        _safe_soft_delete(root, project, slug)
-        for slug in dict.fromkeys(superseded_slugs)  # dedupe, order-preserving
-        if slug not in upserted and slug not in pinned
-    )
-
-    # Step 5: explicit tombstones (skip any slug upserted this pass or pinned).
-    tombstone_count = 0
-    for entry in tombstones:
-        slug = str(entry.get("slug", "")).strip()
-        if not slug or slug in upserted or slug in pinned:
-            continue
-        if _safe_soft_delete(root, project, slug):
-            tombstone_count += 1
-
-    # Step 6: mark all consumed raws consumed.
-    for doc in raw_docs:
-        store.mark_consumed(doc.file_path)
+        dry_summary: dict[str, Any] = {
+            "status": "dry-run",
+            "raw": len(raw_docs),
+            "batches": batch_count,
+        }
+        if len(plans) == 1:
+            dry_summary["plan"] = plans[0]  # preserve the v0.1 single-batch API
+        else:
+            dry_summary["plans"] = plans
+        return dry_summary
 
     # Step 7: prune tombstones past the grace period.
     pruned = store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)
@@ -251,7 +378,8 @@ def curate(
     summary = {
         "status": status,
         "raw": len(raw_docs),
-        "upserts": len(upserted),
+        "batches": batch_count,
+        "upserts": upsert_count,
         "superseded": superseded_count,
         "tombstones": tombstone_count,
         "pruned_tombstones": len(pruned),

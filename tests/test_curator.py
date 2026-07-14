@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,21 @@ class FakeBrain:
         if isinstance(self._node_text, Exception):
             raise self._node_text
         return self._node_text
+
+
+class SequencedBrain(FakeBrain):
+    def __init__(self, plans: list[Any], node_text: str = "# Status") -> None:
+        super().__init__(node_text=node_text)
+        self._plans = iter(plans)
+        self.plan_users: list[str] = []
+
+    def plan_json(self, system: str, user: str) -> dict:
+        self.plan_calls += 1
+        self.plan_users.append(user)
+        plan = next(self._plans)
+        if isinstance(plan, Exception):
+            raise plan
+        return plan
 
 
 @pytest.fixture
@@ -98,6 +114,141 @@ def test_plan_error_aborts_and_leaves_raw_unconsumed(root: Path) -> None:
     assert summary["status"] == "error"
     assert store.read_doc(raw)["consumed"] is False  # the hard rule (D9)
     assert brain.text_calls == 0  # no synthesis on abort
+
+
+# --- size-aware plan batching --------------------------------------------
+
+
+def _request_size_for(root: Path, raw_names: list[str]) -> int:
+    docs = {d.file_path.name: d for d in store.list_raw(root, "proj")}
+    entries = [engine._raw_payload(docs[name]) for name in raw_names]
+    payload = engine._plan_user_payload(store.list_curated(root, "proj"), entries)
+    return engine._plan_request_bytes(payload)
+
+
+def test_single_batch_payload_is_v01_byte_identical(root: Path) -> None:
+    _write_raw(root, "proj", "r1.md", "alpha")
+    _write_raw(root, "proj", "r2.md", "beta")
+    brain = SequencedBrain([{"upserts": [], "tombstones": []}])
+
+    summary = engine.curate(root, "proj", brain)
+
+    expected = json.dumps(
+        {
+            "curated_facts": [],
+            "raw_captures": [
+                {"raw": "r1.md", "body": "alpha"},
+                {"raw": "r2.md", "body": "beta"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    assert brain.plan_users == [expected]
+    assert summary["batches"] == 1
+
+
+def test_batches_oldest_first_and_reloads_facts_between_batches(root: Path) -> None:
+    first = _write_raw(root, "proj", "r1.md", "a" * 80)
+    second = _write_raw(root, "proj", "r2.md", "b" * 80)
+    one_size = _request_size_for(root, ["r1.md"])
+    two_size = _request_size_for(root, ["r1.md", "r2.md"])
+    assert one_size < two_size
+    brain = SequencedBrain(
+        [
+            {
+                "upserts": [{"slug": "from-first", "body": "new state", "from_raw": ["r1.md"]}],
+                "tombstones": [],
+            },
+            {"upserts": [], "tombstones": []},
+        ]
+    )
+
+    summary = engine.curate(root, "proj", brain, plan_payload_max_bytes=one_size)
+
+    assert summary["batches"] == 2
+    assert store.read_doc(first)["consumed"] is True
+    assert store.read_doc(second)["consumed"] is True
+    first_payload, second_payload = map(json.loads, brain.plan_users)
+    assert [r["raw"] for r in first_payload["raw_captures"]] == ["r1.md"]
+    assert [r["raw"] for r in second_payload["raw_captures"]] == ["r2.md"]
+    assert second_payload["curated_facts"] == [{"slug": "from-first", "body": "new state"}]
+    assert all(engine._plan_request_bytes(user) <= one_size for user in brain.plan_users)
+    assert brain.text_calls == 1
+
+
+def test_batch_failure_keeps_earlier_commit_and_later_raws_unconsumed(root: Path) -> None:
+    first = _write_raw(root, "proj", "r1.md", "a" * 80)
+    second = _write_raw(root, "proj", "r2.md", "b" * 80)
+    third = _write_raw(root, "proj", "r3.md", "c" * 80)
+    budget = _request_size_for(root, ["r1.md"])
+    brain = SequencedBrain(
+        [
+            {
+                "upserts": [{"slug": "landed", "body": "yes", "from_raw": ["r1.md"]}],
+                "tombstones": [],
+            },
+            BrainError("batch two failed"),
+        ]
+    )
+
+    summary = engine.curate(root, "proj", brain, plan_payload_max_bytes=budget)
+
+    assert summary["status"] == "error"
+    assert summary["batches"] == 1
+    assert store.read_doc(first)["consumed"] is True
+    assert store.read_doc(second)["consumed"] is False
+    assert store.read_doc(third)["consumed"] is False
+    assert (store.memory_dir("proj", root) / "curated" / "landed.md").exists()
+    assert brain.text_calls == 0
+
+
+def test_single_oversize_unicode_raw_is_marked_and_fits_byte_budget(root: Path) -> None:
+    raw = _write_raw(root, "proj", "r1.md", "🧠" * 500)
+    # Pick a budget that fits a marked prefix but not the full four-byte body.
+    doc = store.read_doc(raw)
+    minimum = engine._plan_request_bytes(
+        engine._plan_user_payload([], [{"raw": "r1.md", "body": engine.OVERSIZE_RAW_MARKER}])
+    )
+    budget = minimum + 100
+    brain = SequencedBrain([{"upserts": [], "tombstones": []}])
+
+    engine.curate(root, "proj", brain, plan_payload_max_bytes=budget)
+
+    rendered = brain.plan_users[0]
+    assert engine._plan_request_bytes(rendered) <= budget
+    body = json.loads(rendered)["raw_captures"][0]["body"]
+    assert body.endswith("[truncated for plan payload]")
+    assert len(body) < len(doc.body)
+
+
+def test_dry_run_previews_every_batch_and_consumes_nothing(root: Path) -> None:
+    first = _write_raw(root, "proj", "r1.md", "a" * 80)
+    second = _write_raw(root, "proj", "r2.md", "b" * 80)
+    budget = _request_size_for(root, ["r1.md"])
+    brain = SequencedBrain(
+        [
+            {"upserts": [{"slug": "one", "body": "x", "from_raw": ["r1.md"]}], "tombstones": []},
+            {"upserts": [{"slug": "two", "body": "y", "from_raw": ["r2.md"]}], "tombstones": []},
+        ]
+    )
+
+    summary = engine.curate(root, "proj", brain, dry_run=True, plan_payload_max_bytes=budget)
+
+    assert summary["status"] == "dry-run"
+    assert summary["batches"] == 2
+    assert [p["upserts"][0]["slug"] for p in summary["plans"]] == ["one", "two"]
+    assert store.read_doc(first)["consumed"] is False
+    assert store.read_doc(second)["consumed"] is False
+    assert not (store.memory_dir("proj", root) / "curated" / "one.md").exists()
+    assert brain.text_calls == 0
+    assert not (store.memory_dir("proj", root) / engine.CURATOR_LOG).exists()
+
+
+def test_budget_too_small_errors_without_consuming(root: Path) -> None:
+    raw = _write_raw(root, "proj", "r1.md", "body")
+    summary = engine.curate(root, "proj", FakeBrain(), plan_payload_max_bytes=1)
+    assert summary["status"] == "error"
+    assert store.read_doc(raw)["consumed"] is False
 
 
 # --- step 4: upserts, provenance, supersession ---------------------------

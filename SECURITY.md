@@ -5,10 +5,12 @@
 Neurobase is **local-first with zero cloud dependency and zero telemetry,
 permanently.** Everything it writes lives under your store root (default
 `~/neurobase`), your agent's own config files, or — only when you explicitly
-run `neurobase recommend accept` — a `SKILL.md`/`AGENTS.md`/`CLAUDE.md`
-artifact in the repo you accepted it into. In every case it's on disk, in
-local, inspectable files: markdown for facts/nodes/accepted artifacts, TOML
-for config/registry, and JSON/JSONL for backup manifests, the recommender
+run `neurobase recommend accept` — an accepted `SKILL.md`/`AGENTS.md`/
+`CLAUDE.md` artifact at the target you chose: `--target project` writes into
+the project's own repo, `--target user` writes to your user-scoped
+`~/.claude/skills/`, outside any repo. In every case it's on disk, in local,
+inspectable files: markdown for facts/nodes/accepted artifacts, TOML for
+config/registry, and JSON/JSONL for backup manifests, the recommender
 ledger, and agent hook configs. There is no Neurobase-run server, no
 analytics call, and no phone-home of any kind — this isn't a policy promise
 layered on top of the code, it's the absence of any network client in the
@@ -69,8 +71,9 @@ Two things worth being explicit about:
 ## Consent for anything outside Neurobase's own files
 
 Neurobase never edits your agent config (`settings.json`, `hooks.json`,
-`config.toml`) or writes an accepted recommendation into your repo without
-showing the exact diff first, asking, and backing up the original under
+`config.toml`) or writes an accepted recommendation — to a project repo or to
+your user-scoped `~/.claude/skills/` — without showing the exact diff first,
+asking, and backing up the original under
 `<store root>/backups/<timestamp>/` with a manifest. Every hook entry
 Neurobase creates is **fenced** — tagged as Neurobase-owned so `uninstall`
 can remove exactly those entries and nothing else you or another tool wrote.

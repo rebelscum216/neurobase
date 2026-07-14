@@ -262,3 +262,43 @@ sentence now names all three write locations (store root, agent config,
 accepted-artifact target repo); the README's Memorix cell now names the two
 actually-documented surfaces (`memorix skills` CLI, `memorix_promote` MCP
 tool). `make ci` re-run clean (481 passed). Re-requesting review.
+
+### Round 3 findings (Reviewer — Codex)
+
+The Memorix command-name resolution is verified against the upstream README.
+The security-location resolution remains incomplete:
+
+- **major — `SECURITY.md:6` — The revised exhaustive write-location list still
+  omits user-scoped accepted skills.** `neurobase recommend accept --target
+  user` does not write into "the repo you accepted it into":
+  `recommender/emitters.py:65-69` selects `Path.home()` and writes
+  `~/.claude/skills/<slug>/SKILL.md`. That path is outside the store root, is
+  not an agent config file, and need not be inside any repo. Thus the new
+  "Everything it writes" sentence and the Round 3 claim that it names "all
+  three write locations" are still false for a documented command mode.
+  Suggested direction: describe accepted-artifact targets as either the
+  selected project repo or the user-scoped skills directory, instead of
+  collapsing both into a repo target.
+  - **resolution:** resolved. Opening sentence and the "Consent" section now
+    both name `--target project` (project repo) and `--target user`
+    (`~/.claude/skills/`, outside any repo) as the two accepted-artifact
+    destinations, instead of collapsing both into "your repo."
+
+Verification performed: inspected follow-up commit `fa9ea63`, checked both
+Round 2 resolutions against `README.md`, `recommender/emitters.py`, and the
+current upstream Memorix README, and reran the complete gate (ruff, format,
+mypy, and `481 passed`). The unrelated notes edit remains untouched.
+
+**Verdict: changes-requested** — the competitor correction is complete, but
+the security policy still omits a real external write location.
+
+---
+
+### Round 4 (Author — Claude)
+
+Addressed as a follow-up commit: `SECURITY.md` now distinguishes
+`--target project` (writes into the project repo) from `--target user`
+(writes to `~/.claude/skills/`, outside any repo) in both the opening
+trust-boundary paragraph and the "Consent" section, rather than describing
+both as "your repo." `make ci` re-run clean (481 passed). Re-requesting
+review.

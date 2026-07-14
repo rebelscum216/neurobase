@@ -44,6 +44,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/neurobase"]
 
+# Belt-and-suspenders on top of .gitignore: the sdist must never ship a
+# machine-local dev cache, regardless of what happens to exist on the build
+# machine at package time (found by review: a real .uv-cache/ leaked into a
+# tagged build before .uv-cache/ was even in .gitignore).
+[tool.hatch.build.targets.sdist]
+exclude = [".uv-cache/"]
+
 # Dev toolchain (build-plan §9). `uv sync` installs this group by default.
 [dependency-groups]
 dev = [

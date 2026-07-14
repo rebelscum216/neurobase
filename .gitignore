@@ -24,6 +24,7 @@ venv/
 
 # --- uv ---
 # (uv.lock IS committed — do not ignore it)
+.uv-cache/
 
 # --- tooling caches ---
 .pytest_cache/

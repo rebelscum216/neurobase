@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] — 2026-07-13
+## [0.1.0] — 2026-07-14
 
 Initial public release. Built in nine phases per
 [docs/neurobase-build-plan.md](docs/neurobase-build-plan.md); see

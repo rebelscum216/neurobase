@@ -602,13 +602,41 @@ Scope notes:
   half the secret in the clear. The **name** may be quoted too (`"api_token"=v`
   is valid shell for the same assignment) and must still match.
 - **In shell, an assignment is a TOKEN IN ASSIGNMENT POSITION — not a substring.**
-  It sits before the command name (`api_token=… ./run.sh`), or anywhere in the
-  word list of an assignment builtin (`env -u OLD PATH=/bin api_token=… pytest`).
   Once the command name is seen, every later word is that command's *argument*,
   and an argument is often quoted code or prose (`python -c "items.sort(key=…)"`).
-  Redacting inside one corrupts captured content and redacts no secret. A
-  secret-*named* option (`--api-key=…`) is redacted in any position, since the
-  option name itself announces the value.
+  Redacting inside one corrupts captured content and redacts no secret. The
+  position model is therefore **per command**, and four things move it:
+  - **Separators** (`;` `&&` `||` `|` `&` newline `(` `)`) start a fresh command.
+    A secret can sit in the prefix of *any* command in a pipeline or list —
+    `echo ok; api_token=… ./run` — not only the first.
+  - **Wrappers** (`sudo`, `command`, `nohup`, `nice`, `exec`, `timeout`, …) run
+    another command, so the real command has not begun and assignment position
+    survives them (`sudo -E env api_token=… ./run`).
+  - **Assignment builtins** (`export`, `declare`, `readonly`, `typeset`, `local`)
+    take a word list that is assignments all the way down.
+  - **`env` has its own grammar** — options, option operands, and assignments,
+    and *then* a command. After that command word its arguments are ordinary
+    arguments: `env PATH=/bin pytest api_key=example` MUST NOT redact
+    `api_key=example`, while `env -u OLD api_token=… pytest` MUST redact (an
+    option operand is not a command name). A single "a builtin appeared" flag
+    gets this wrong in both directions.
+- **A heredoc body is data, not shell.** Everything between `<<EOF` and its
+  terminator is a file, script, or SQL blob the command consumes; its lines are
+  not shell words, so `key=lambda …` there is not an assignment. The rest of the
+  table still applies to it — `cat > .env <<EOF` is exactly where real secrets
+  live — but the shell assignment walker steps around it.
+- **Malformed quoting fails CLOSED.** An unterminated quote consumes to end of
+  line, so a half-quoted secret is redacted whole rather than leaking its tail. A
+  command that failed to parse is still a captured command and can still carry a
+  live credential; syntactic invalidity does not make it safe.
+- **Credential options are an ALLOW-LIST** (`--api-key`, `--token`,
+  `--client-secret`, `--password`, …), redacted in any position because the name
+  announces the value. It is deliberately *not* a `*key*`/`*secret*` pattern:
+  those words far more often describe selection or policy — `--sort-key=name`,
+  `--key=id`, `--password-policy=strict` — and mangling those destroys the
+  digest for no security gain. **Residual:** a genuinely secret value passed to
+  an unlisted option name survives. Extend the vocabulary rather than widening it
+  to a pattern.
 - Assignments need three rules, because **the signal that "this is a secret being
   set" is contextual**. Neither casing nor a keyword alone is a sufficient lever:
   - **Shell segment.** A keyword (`export`/`env`/`declare`/`typeset`/`local`) in

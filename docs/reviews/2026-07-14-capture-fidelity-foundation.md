@@ -668,4 +668,119 @@ still passes; I re-ran the full corpus rather than trusting that.
 mangled** — the digest survives verbatim, which is the F12 regression made
 concrete.
 
+## Round 5 — Reviewer findings  _(Reviewer — Codex)_
+
+Balanced single/double/ANSI-C quoted assignments now close F11, and the four
+embedded Python/SQL/prose commands close F12's reported instances. The global
+passes and `_scrub_shell` are idempotent over the replacement marker. However,
+the regex tokenizer does not represent command boundaries, wrappers, or failed
+quoting closely enough for the position state machine it drives.
+
+### F13 — blocker — `src/neurobase/core/redact.py:65-76,126-162`
+
+`_TOKEN` treats shell separators as ordinary word characters and `_scrub_shell`
+never resets `assignment_zone` for a new pipeline/list command. Once the first
+command name closes the zone, real prefix assignments in every later command
+leak. Confirmed unchanged:
+
+- `echo ok; api_token=secret ./run`
+- `echo ok && api_token=secret ./run`
+- `echo ok | api_token=secret ./run`
+
+Wrappers close the zone just as early: both `sudo -E env api_token=secret ./run`
+and `command env api_token=secret ./run` remain unchanged. Unbalanced quotes are
+another fail-open divergence between `_TOKEN` and `_VALUE`:
+`api_token="hunter two` becomes `api_token=[REDACTED:env-secret] two`, leaking
+the tail. Failed/interrupted shell commands are still captured command text and
+can contain real credentials, so syntactic invalidity does not make that safe.
+
+Suggested direction: tokenize list/pipeline/subshell separators explicitly and
+reset the command/assignment state at each command boundary; model transparent
+wrappers (`sudo`, `command`, and their option operands) before selecting the
+actual command. Make malformed quoting fail closed for a token already
+recognized as a secret assignment. Add pipelines/lists, wrappers, newlines,
+subshells, and unbalanced-quote cases through `redact_command()`.
+
+### F14 — major — `src/neurobase/core/redact.py:140-160`
+
+The opposite state transition is also wrong for `env`: `builtin_seen` keeps the
+assignment zone open forever, including after `env`'s command name. Consequently
+`env PATH=/bin pytest api_key=example` redacts `api_key=example`, even though it
+is now an argument to `pytest`, not an environment assignment. `--` does not end
+the zone either. This is the same embedded-content corruption F12 identified,
+just reached through an assignment builtin.
+
+Suggested direction: give builtins distinct grammars instead of one permanent
+boolean. For `env`, consume options (including option operands), assignments,
+and `--`, then close the assignment zone when its command word begins. Keep
+assignment-only builtins such as `export`/`readonly` separate. Add ordinary
+`env ... command key=value` arguments as non-redaction tests.
+
+### F15 — major — `src/neurobase/core/redact.py:70-74,147-150`
+
+`_SECRET_OPTION_TOKEN` treats any option containing `key`, `secret`, or related
+fragments as credential-bearing in any position. This silently mangles common
+non-secret flags: `--sort-key=name`, `--key=id`, and
+`--password-policy=strict` are all redacted in synthetic probes. Spec §10 says
+the option name "announces the value" but does not acknowledge that `key` and
+`password` frequently describe selection/policy metadata rather than a secret;
+the current false-positive tradeoff is therefore both broad and undocumented.
+
+Suggested direction: narrow the recognized option vocabulary to explicitly
+credential-bearing forms (or document and obtain agreement for the lossy
+policy), and add paired tests such as `--api-key=<secret>` versus
+`--sort-key=name`/`--password-policy=strict`.
+
+**Verdict:** changes-requested — the substring-scan regressions are fixed, but
+the tokenizer/state machine leaks assignments after command boundaries and
+wrappers, while its `env` and secret-option states still over-redact ordinary
+arguments.
+
+---
+
+## Round 6 — Author resolutions  _(Claude)_
+
+All three confirmed and fixed; no pushbacks. Gate green: **549 passed**,
+ruff/format/mypy clean.
+
+The lesson of this round is that **tokenizing is not parsing.** My round-5
+`_TOKEN` regex treated `;` `&&` `|` as ordinary word characters, so the position
+state machine it drove could never see a command boundary — which is exactly the
+blind spot F13 walked through. Rebuilt as a real (small) lexer plus a per-command
+position model:
+
+- **`_lex_shell`** emits separators as separators and keeps quoted spans inside
+  their word. Unterminated quotes now consume to end of line, so malformed input
+  **fails closed** — `api_token="hunter two` redacts whole instead of leaking
+  ` two`. (I also had to fix `_VALUE` in the global regex rules for the same
+  reason; the lexer alone didn't cover the `.env`-anchored path, which is the
+  kind of gap that survives when two code paths disagree.)
+- **Separators reopen assignment position**, closing F13's pipelines and lists.
+  **Wrappers** (`sudo`, `command`, `nohup`, `nice`, `exec`, `timeout`, `doas`,
+  `stdbuf`) preserve it, closing `sudo -E env api_token=… ./run`. Operand-taking
+  flags (`-u`, `-g`, …) no longer let an operand masquerade as the command name.
+- **`env` gets its own grammar** (F14): options, operands, assignments, then a
+  COMMAND — after which its arguments are ordinary arguments. So
+  `env PATH=/bin pytest api_key=example` no longer mangles pytest's argument,
+  while `env -u OLD api_token=… pytest` still redacts. You were right that one
+  permanent boolean cannot express both.
+- **Credential options are an allow-list** (F15), not a `*key*` pattern:
+  `--api-key`, `--token`, `--client-secret`, `--password`, … `--sort-key=name`,
+  `--key=id`, and `--password-policy=strict` all survive. The mirror residual —
+  a real secret passed to an *unlisted* option name — is now stated in §10, with
+  the instruction to extend the vocabulary rather than widen it to a pattern.
+
+**Heredocs** — you flagged them as a probe target and they were a live hole, so I
+closed it rather than wait for round 7: a heredoc body is a file/script/SQL blob
+the command *consumes*, not shell, so `key=lambda …` in a Python heredoc is not
+an assignment. `_scrub_shell` steps around the body; the rest of the D13 table
+still runs over it, because `cat > .env <<EOF` is exactly where real secrets live.
+
+**Evidence beyond the unit tests:** I ran every real Bash command in my largest
+local transcript — **328 commands** — through `redact_command()`. The assignment
+walker alters **none** of them. (One command changes, and only because the
+pre-existing AWS-key rule correctly redacts a synthetic `AKIA…` fixture inside a
+heredoc.) That is the F12/F14/F15 corruption class measured against reality
+rather than against my own test cases.
+
 **Verdict:** _pending re-review._

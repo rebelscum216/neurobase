@@ -91,10 +91,32 @@ for §4's activity digest with no keyword required, which is what lets the globa
 table stay conservative. The line-anchored rule also preserves the indent it
 consumes, so redaction cannot reflow a body's structure.
 
-The through-line across all five attempts: **a secret assignment is a syntactic
-construct, and every attempt to recognize it with a substring heuristic traded
-one failure for another.** Only parsing the structure — position, tokens, whole
-values — satisfied both directions at once.
+A sixth attempt was needed because *tokenizing* is not the same as *parsing*: a
+regex tokenizer that treats `;` `&&` `|` as ordinary word characters cannot see
+command boundaries, so the position state machine it drives never reopened
+assignment position for the second command in a pipeline (`echo ok;
+api_token=… ./run` leaked), and wrappers (`sudo -E env …`) closed it too early.
+The same state machine over-redacted in the mirror direction, because one
+"a builtin appeared" boolean cannot express that `env` takes a *command* after
+its assignments — so `env PATH=/bin pytest api_key=example` mangled pytest's own
+argument.
+
+The final model is a small shell **lexer** (separators are separators; quoted
+spans stay inside their word; an unterminated quote fails closed by consuming to
+end of line) driving a **per-command** position model: separators reopen
+assignment position, wrappers preserve it, assignment builtins hold it, and `env`
+has its own grammar that closes it at its command word. Heredoc bodies are
+stepped around entirely — they are data the command consumes, not shell. Options
+are recognized from an allow-list of credential names, never a `*key*` pattern,
+because `--sort-key`/`--key`/`--password-policy` are selection and policy flags.
+
+The through-line across all six attempts: **a secret assignment is a syntactic
+construct, and every heuristic short of parsing the structure traded one failure
+for another** — uppercase-only missed lowercase; keyword-anywhere ate prose;
+keyword-plus-one-token leaked multi-assignment commands; `\S+` values leaked
+quoted tails; substring scanning corrupted embedded code; and a tokenizer blind
+to separators leaked whole commands. Verified against 328 real captured Bash
+commands from a live transcript: none is altered by the assignment walker.
 
 D13 is also confirmed as a **whole-raw** guarantee, not body-only: scribes scrub
 the informational frontmatter they write (`cwd`, `branch`), but never

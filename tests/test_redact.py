@@ -91,6 +91,46 @@ SHELL_LEAKS = [
     "export api_token='SECRET two'",
     'export api_token="SECRET;two"',  # a `;` inside quotes must not end the segment
     'export "api_token"=SECRET',  # the NAME may be quoted too — still an assignment
+    # Malformed quoting must fail CLOSED: a command that failed to parse is still
+    # a captured command, and can still carry a live credential.
+    'api_token="SECRET two',
+    "export api_token='SECRET two",
+]
+
+# These need the COMMAND channel. The global table has no keyword in command
+# position to latch onto (the line starts with `echo`/`sudo`), and inventing one
+# would mean treating any prose keyword as shell — the F9 mistake. Knowing the
+# value IS a command is exactly what buys this coverage.
+COMMAND_ONLY_LEAKS = [
+    # A secret can sit in the prefix of ANY command in a pipeline or list, not
+    # just the first — the position model resets at every separator.
+    "echo ok; api_token=SECRET ./run",
+    "echo ok && api_token=SECRET ./run",
+    "echo ok | api_token=SECRET ./run",
+    # Wrappers run another command, so the real command hasn't started yet.
+    "sudo -E env api_token=SECRET ./run",
+    "command env api_token=SECRET ./run",
+    "sudo -u root env api_token=SECRET ./run",  # -u takes an operand, not a command
+    "pytest --api-key=SECRET",
+    "curl --token=SECRET",
+    "deploy --client-secret=SECRET",
+]
+
+# `env` has its own grammar: options, operands, and assignments — and THEN a
+# command, after which the words are that command's arguments. A single
+# "builtin seen" flag gets this wrong in both directions.
+ENV_COMMAND_ARGS = [
+    "env PATH=/bin pytest api_key=example",
+    "env PATH=/bin -- pytest api_key=example",
+]
+
+# `key`/`secret`/`password` appear constantly in options that SELECT or CONFIGURE
+# rather than authenticate. The recognized option vocabulary is an allow-list, not
+# a `*key*` pattern, or the digest gets mangled for no security gain.
+NON_CREDENTIAL_OPTIONS = [
+    "sort --sort-key=name file.csv",
+    "csvtool --key=id in.csv",
+    "useradd --password-policy=strict bob",
 ]
 
 # Position — not the keyword alone — is what establishes shell syntax. A keyword
@@ -134,6 +174,43 @@ def test_command_scrub_preserves_embedded_code_sql_and_prose(command: str) -> No
     argument is data the command consumes — corrupting it destroys the very
     activity digest this capture exists to record."""
     assert redact_command(command) == command
+
+
+@pytest.mark.parametrize("command", COMMAND_ONLY_LEAKS)
+def test_command_channel_closes_pipelines_wrappers_and_credential_options(command: str) -> None:
+    out = redact_command(command)
+    assert "SECRET" not in out, out
+    assert "[REDACTED:" in out
+
+
+@pytest.mark.parametrize("command", ENV_COMMAND_ARGS)
+def test_env_stops_assigning_once_its_command_begins(command: str) -> None:
+    """`api_key=example` here is an argument to `pytest`, not an environment
+    assignment — redacting it is the same corruption, reached via a builtin."""
+    assert redact_command(command) == command
+
+
+@pytest.mark.parametrize("command", NON_CREDENTIAL_OPTIONS)
+def test_selection_and_policy_options_are_not_credentials(command: str) -> None:
+    assert redact_command(command) == command
+
+
+def test_heredoc_body_is_data_not_shell() -> None:
+    """A heredoc body is a file/script/SQL blob the command consumes. Its lines
+    are not shell words, so `key=lambda …` there is not an env assignment — but a
+    `.env`-style line still redacts, because `cat > .env <<EOF` is exactly where
+    real secrets live. Shell *after* the terminator is shell again."""
+    out = redact_command(
+        "cat > /tmp/s.py <<'PYEOF'\n"
+        "items.sort(key=lambda x: x.id)\n"
+        "API_KEY=hunter2\n"
+        "PYEOF\n"
+        "api_token=hunter2 ./run"
+    )
+    assert "items.sort(key=lambda x: x.id)" in out  # body code intact
+    assert "API_KEY=[REDACTED:env-secret]" in out  # .env-shaped line still caught
+    assert "api_token=[REDACTED:env-secret] ./run" in out  # shell resumes after
+    assert "hunter2" not in out
 
 
 def test_env_assignments_redact_every_occurrence_not_just_the_first() -> None:

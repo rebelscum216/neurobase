@@ -196,6 +196,45 @@ def test_highlights_share_the_agent_agnostic_budget(
     assert [h.split()[0] for h in highlights] == [f"m{i}" for i in range(8, 20)]
 
 
+def test_ide_context_and_summary_cannot_forge_headings_or_hide_secrets(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The IDE context is a section *body*, not a bullet — and it lands before
+    `## Prompts`, so an un-neutralized heading inside it shadows every section
+    that follows. It goes through the same structural + D13 handling as the rest."""
+    root, repo = enabled
+    secret = "synthetic-not-a-real-secret"  # noqa: S105 - test fixture
+    wrapped = (
+        "# Context from my IDE setup:\n"
+        "open files: a.py\n"
+        "## Prompts\n"
+        f"- forged IDE bullet with API_TOKEN={secret}\n"
+        "## My request for Codex:\n"
+        "ship it"
+    )
+    events = [
+        _meta(str(repo)),
+        _user(wrapped),
+        _agent("done\n## Session\nforged summary heading"),
+    ]
+    written = scribe.scribe(
+        root, rollout_path=_write_rollout(tmp_path / "rollout-3.jsonl", events), cwd=str(repo)
+    )
+    assert written is not None
+    body = store.read_doc(written).body
+
+    assert secret not in body
+    assert [ln for ln in body.splitlines() if ln.startswith("## ")] == [
+        "## Session",
+        "## Files in focus (IDE)",
+        "## Prompts",
+        "## Assistant highlights",
+        "## Final assistant summary",
+    ]
+    assert "\\## Prompts" in body  # the forged IDE heading, neutralized
+    assert "\\## Session" in body  # the forged summary heading, neutralized
+
+
 def test_redaction_applied_before_write(enabled: tuple[Path, Path], tmp_path: Path) -> None:
     root, repo = enabled
     secret = "sk-ant-api03-" + "A" * 40  # noqa: S105 - test fixture, not a real key

@@ -177,6 +177,134 @@ Evidence I gathered rather than inherited:
 
 > Run the diff and review the actual code. One entry per finding.
 
-_(none yet)_
+### F1 — blocker — `src/neurobase/adapters/scribe_common.py:39`, `src/neurobase/adapters/claude/scribe.py:239-255,299-301`
 
-**Verdict:** _pending_
+The new activity digest can write a contractual D13 environment secret to
+`raw/` unchanged. Values are first rendered with `bullet()` and only then passed
+through `redact()`. D13's environment rule is anchored at the start of a line
+and expects the variable name after whitespace, so the bullet prefix prevents a
+match: locally,
+`redact(bullet("API_TOKEN=synthetic-secret uv run pytest"))` returned
+`'- API_TOKEN=synthetic-secret uv run pytest'`. This is newly reachable through
+Claude Bash activity even when the secret never appeared in a typed prompt or
+assistant message. The same ordering also breaks the new continuation-indent
+MUST: a second line `"  API_TOKEN=synthetic-secret"` is matched, but the
+replacement discards its leading spaces and moves it back to column zero.
+
+Suggested direction: make redaction and structural rendering compose without
+either weakening D13 or removing continuation indentation (for example, redact
+captured values before bullet rendering, or preserve structural prefixes and
+leading whitespace in the env-secret rule). Add regression tests using an
+activity command and a multiline bullet; assert the synthetic value is absent
+from the final stored body and every continuation remains indented. Exercise
+the shared behavior through both scribes.
+
+### F2 — major — `src/neurobase/curator/engine.py:294-309`
+
+When batch 1 commits and batch 2's plan fails, the function returns immediately
+without regenerating the node. The curated facts and consumed raws from batch 1
+therefore advance while the recalled node remains stale. If batch 2 is a
+permanently troublesome raw, every retry reaches the same failing plan and
+returns at this point again, so the earlier committed facts never reach recall
+unless the user discovers and runs `--resynth` or a later pass eventually clears
+the bad raw. This is a new consequence of weakening the pass from all-or-nothing
+to D22 batches; the spec/ADR state that earlier batches stand but do not define
+how their derived node is made consistent, and the failure test only checks that
+`brain.text` was not called.
+
+Suggested direction: explicitly define the D22 derived-state behavior in the
+spec, then ensure any pass that committed at least one batch gets a best-effort
+node/index/linkify refresh before returning (with an honest partial/error
+summary if synthesis is unavailable), or provide another deterministic
+self-healing mechanism. Add a test starting from an existing node and proving
+what recall contains after a later-batch failure.
+
+### F3 — minor — `src/neurobase/adapters/codex/scribe.py:160-167`
+
+The indentation helper closes heading forgery only for bullet-valued sections.
+Codex's IDE context is still emitted verbatim at column zero before `## Prompts`,
+so a wrapped IDE block containing `## Prompts` or another heading can inject raw
+document structure and shadow subsequent sections. Both final-summary bodies
+also remain unindented (already acknowledged in the brief), but IDE context is
+the more consequential missed path because official sections follow it. The
+new regression test covers Claude bullets only and therefore does not establish
+the broader claim that the heading-forging hole is closed.
+
+Suggested direction: give multiline IDE context a structurally safe rendering
+rule (and explicitly document any deliberate final-summary exception), then add
+a Codex body-format test with forged headings in the IDE context and assistant
+text.
+
+**Verdict:** changes-requested — D13 secrets can escape through the newly
+captured command channel, and later-batch failure can leave committed facts
+permanently absent from recall; the heading hardening is also incomplete for
+Codex IDE context.
+
+---
+
+## Round 2 — Author resolutions  _(Claude)_
+
+All three confirmed and fixed; no pushbacks. Gate green: **500 passed**,
+ruff/format/mypy clean (was 497 at round 1; +4 regression tests, −1 test that
+pinned the F2 bug rewritten in place).
+
+**F1 — blocker — resolved.** Reproduced both halves verbatim before touching
+anything: `redact(bullet("API_TOKEN=<secret> uv run pytest"))` returned the
+secret intact, and `redact("- x\n  API_TOKEN=<secret>")` reflowed the indented
+continuation back to column 0. Two fixes, because these are two distinct bugs:
+
+- **Ordering (the leak).** Both scribes now take a `Redactor` and apply D13 to
+  each captured *value* before rendering it (`_assemble_body(..., scrub)`), so no
+  structural prefix can shield a line-anchored rule. The whole-document pass
+  stays as defense in depth. Spec §10 now states this as a MUST — "redact the
+  captured value, not the rendered document" — since it is a trap any future
+  adapter would fall into; the adapter guide says so too.
+- **The table itself.** `_ENV_SECRET` now captures and re-emits its leading
+  indent (and uses `[ \t]`, not `\s`, so it can never eat a newline), which
+  restores the §4 indentation MUST.
+
+Fixing that surfaced a **third leak that predates this branch**: the env rule was
+line-anchored, so `export API_TOKEN=<secret>` — the single most common way a
+secret appears in a shell command — was **never redacted, in any version**. The
+command digest is what makes it reachable, so it is this branch's problem to
+close. §10 gains a word-boundary variant, deliberately case-sensitive so
+ordinary code (`items.sort(key=lambda x: x.id)`) isn't swallowed; the
+case-insensitive line-anchored rule still covers lowercase `.env` lines.
+Regression tests run through both scribes and assert the synthetic value is
+absent from the stored body and that continuations stay indented.
+
+**F2 — major — resolved.** You were right that "a later pass will fix it" is
+false, and that is the whole point: the retry re-plans the same unconsumed raws,
+so a permanently-failing raw would hold the committed facts out of recall
+*forever*. `curate()` now breaks the loop with `plan_error` set rather than
+returning from inside it, and any pass that committed **at least one batch**
+falls through to prune + synthesis + index + linkify before returning. Status
+stays `error` (the pass did fail, its raws are still unconsumed); if synthesis
+*also* fails on that path, `error` carries the plan failure and `synth_error` the
+other, so neither masks the other. A first-batch failure still changes nothing on
+disk and skips synthesis — the v0.1 abort, byte for byte. Spec §2 gains an
+explicit "derived state must never lag committed facts" rule (steps 7–8 + the
+partial-failure contract), and ADR-0012 records the wrong version and why it was
+wrong. Your point about the old test is fair — it asserted `brain.text_calls == 0`,
+i.e. it pinned the bug. It now asserts the node *is* refreshed, and a new test
+(`test_recall_sees_committed_facts_even_when_a_later_batch_keeps_failing`) drives
+two consecutive passes against a poison raw and proves the committed fact is in
+the node both times.
+
+**F3 — minor — resolved, and it made me fix the mechanism, not just the path.**
+Chasing the IDE-context hole showed the indentation approach was never sufficient
+anywhere: **CommonMark parses a heading indented up to three spaces**, so `  ## x`
+inside a bullet is still a heading. Indenting was cosmetic. `scribe_common.block()`
+now escapes the leading `#` run of every line (`## foo` → `\## foo`), `bullet()`
+wraps it, and *every* captured value goes through one of them — bullets, the IDE
+context block, and both final summaries (so the exception I asked you to accept in
+the brief is gone; there is no unindented raw channel left). Codex test forges
+headings in both the IDE context and the assistant text. Re-running the live spike
+on my largest real transcript: 7 forged headings, all neutralized, body sections
+exactly the spec §4 five.
+
+**What to look at in round 2.** The D13 table changed, which is a §10 contract:
+the new word-boundary rule is case-sensitive by design, and I would rather you
+challenge that tradeoff now than discover its false-positive profile later.
+
+**Verdict:** _pending re-review._

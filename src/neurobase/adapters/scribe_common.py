@@ -9,6 +9,20 @@ tuned constants.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
+
+# A D13 redaction pass bound to the caller's config (`[redact].extra_patterns`).
+# Scribes hand one to their body renderer so every captured value is scrubbed
+# before any markdown prefix can shield it from a line-anchored rule.
+Redactor = Callable[[str], str]
+
+# A `#` run opening any line of captured content. Session text is untrusted:
+# a prompt, an assistant message, or an IDE context block can contain its own
+# markdown headings, and rendered as-is they become *the raw document's own*
+# sections — content forging the structure the curator then reads.
+_LEADING_HEADING = re.compile(r"^([ \t]*)(#+)", re.MULTILINE)
+
 # Tuned defaults (spec §8).
 MAX_ASSISTANT_MSG_CHARS = 500
 MAX_ASSISTANT_TOTAL_CHARS = 6000
@@ -31,17 +45,29 @@ def bounded_highlights(messages: list[str]) -> list[str]:
     return list(reversed(kept))
 
 
+def block(text: str) -> str:
+    """Make one captured value safe to place in a capture body (spec §4).
+
+    Escapes the leading ``#`` of every line, so captured content can never
+    forge one of the body's own ``##`` sections. Indentation alone does not
+    close this: CommonMark still reads a heading indented up to three spaces.
+    """
+    return _LEADING_HEADING.sub(r"\1\\\2", text)
+
+
 def bullet(text: str) -> str:
     """Render one list item of a capture body (spec §4 body format).
 
-    Continuation lines are indented so a multi-line value stays *inside* its
-    bullet. Without this, a pasted stack trace or a markdown-formatted assistant
-    message puts its own ``## heading`` at column 0 — session content would
-    forge the raw document's section structure, and the curator reads that
-    structure. Bounds make this the common case, not an edge one: prompts run to
-    1,200 chars and subagent reports to 1,500.
+    ``block()`` for heading safety, then indent continuation lines so a
+    multi-line value stays *inside* its bullet. Bounds make multi-line content
+    the common case, not an edge one: prompts run to 1,200 chars and subagent
+    reports to 1,500.
+
+    Callers MUST redact (D13) the value *before* rendering it — a structural
+    prefix like ``"- "`` shifts the text off column 0 and shields it from the
+    line-anchored rules in the D13 table.
     """
-    return "- " + text.replace("\n", "\n  ")
+    return "- " + block(text).replace("\n", "\n  ")
 
 
 def final_summary(candidates: list[str]) -> str:

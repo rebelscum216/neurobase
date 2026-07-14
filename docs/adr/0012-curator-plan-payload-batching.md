@@ -30,6 +30,14 @@ applied and consumed before the next; active facts are then reloaded so later
 batches see all earlier upserts, supersession, and tombstones. A failed batch
 and every later batch remain unconsumed, while earlier committed batches stand.
 Node synthesis, pruning, indexing, and linkification run once after all batches.
+
+**Derived state never lags committed facts.** Those once-per-pass steps run
+whenever at least one batch committed — *including when a later batch failed and
+the pass returns an error*. Skipping them on the error path was the first
+version of this change and it was wrong: the node is what recall injects, and a
+raw that fails the plan step *permanently* is re-planned by every retry, so the
+committed facts would never reach recall at all. The pass still reports `error`;
+the store is simply left self-consistent.
 A single raw larger than the budget is deterministically truncated and marked;
 it is never skipped silently. If the fixed prompt, current facts, and a marked
 raw envelope cannot fit, curation returns an error without consuming that raw.

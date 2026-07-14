@@ -382,11 +382,77 @@ def test_multiline_content_cannot_forge_a_section_heading(
         )
     ).body
     headings = [ln for ln in body.splitlines() if ln.startswith("## ")]
-    assert headings == ["## Session", "## Prompts", "## Assistant highlights"] + [
-        "## Final assistant summary"
+    assert headings == [
+        "## Session",
+        "## Prompts",
+        "## Assistant highlights",
+        "## Final assistant summary",
     ]
-    assert "  ## Final assistant summary" in body  # the forged heading, safely indented
+    # The forged headings survive as *text* — escaped, and indented inside their
+    # bullet. Indentation alone would not be enough: CommonMark still parses a
+    # heading indented up to three spaces.
+    assert "  \\## Final assistant summary" in body
+    assert "  \\## Prompts" in body
     assert "  - forged highlight content" in body
+
+
+def test_secrets_are_redacted_in_every_captured_channel(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """D13 runs on each captured *value*, before markdown rendering. Rendering
+    first would shift the text off column 0 behind a `- ` bullet and shield it
+    from the table's line-anchored env rule — and the command digest is exactly
+    where `API_TOKEN=…` lives."""
+    root, repo = enabled
+    secret = "synthetic-not-a-real-secret"  # noqa: S105 - test fixture
+    events = [
+        {
+            "type": "user",
+            "isSidechain": False,
+            "cwd": str(repo),
+            "message": {"content": f"deploy it\nAPI_TOKEN={secret}"},
+        },
+        _assistant(
+            text=f"I ran it with API_TOKEN={secret}",
+            blocks=[
+                {
+                    "type": "tool_use",
+                    "id": "b1",
+                    "name": "Bash",
+                    "input": {"command": f"export DEPLOY_TOKEN={secret} && ./deploy.sh"},
+                },
+                {"type": "tool_use", "id": "a1", "name": "Agent", "input": {}},
+            ],
+        ),
+        {
+            "type": "user",
+            "isSidechain": False,
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "a1",
+                        "content": f"the agent found SECRET_KEY={secret}",
+                    }
+                ]
+            },
+        },
+    ]
+    body = store.read_doc(
+        scribe.scribe(  # type: ignore[arg-type]
+            root,
+            transcript_path=_write_transcript(tmp_path / "secrets.jsonl", events),
+            cwd=str(repo),
+            reason="clear",
+        )
+    ).body
+
+    assert secret not in body
+    # prompt, command, subagent report, and the assistant text in BOTH the
+    # highlights and the final-summary slot.
+    assert body.count("[REDACTED:env-secret]") == 5
+    # Redaction must not reflow structure: the prompt's second line stays indented.
+    assert "\n  API_TOKEN=[REDACTED:env-secret]" in body
 
 
 def test_sidechain_turns_contribute_nothing(tmp_path: Path) -> None:

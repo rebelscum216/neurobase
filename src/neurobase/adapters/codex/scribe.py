@@ -20,6 +20,8 @@ from typing import Any
 from neurobase.adapters.scribe_common import (
     MAX_ASSISTANT_MSG_CHARS,
     MAX_ASSISTANT_TOTAL_CHARS,
+    Redactor,
+    block,
     bounded_highlights,
     bullet,
     final_summary,
@@ -148,23 +150,27 @@ def parse_rollout(rollout_path: Path) -> dict[str, Any]:
 
 
 def _assemble_body(
-    prompts: list[str], summary: str, ide_context: str, highlights: list[str]
+    prompts: list[str], summary: str, ide_context: str, highlights: list[str], scrub: Redactor
 ) -> str:
-    kept = [p[:MAX_PROMPT_CHARS] for p in prompts[-MAX_PROMPTS:]]
-    summary = summary[:MAX_SUMMARY_CHARS]
+    """Render the spec §5 body. As in §4, ``scrub`` (D13) runs on every captured
+    value *before* rendering, and every value goes through the structural
+    helpers — including the IDE context, which is a section body rather than a
+    bullet but is just as capable of forging a heading."""
+    kept = [scrub(p[:MAX_PROMPT_CHARS]) for p in prompts[-MAX_PROMPTS:]]
     lines = [
         "## Session",
         "- agent: codex",
         f"- prompts captured: {len(kept)}",
     ]
     if ide_context:
-        lines += ["", "## Files in focus (IDE)", "", ide_context[:MAX_IDE_CHARS]]
+        ide = block(scrub(ide_context[:MAX_IDE_CHARS]))
+        lines += ["", "## Files in focus (IDE)", "", ide]
     lines += ["", "## Prompts"]
     lines += [bullet(p) for p in kept]
     if highlights:
         lines += ["", "## Assistant highlights"]
-        lines += [bullet(message) for message in highlights]
-    lines += ["", "## Final assistant summary", "", summary]
+        lines += [bullet(scrub(message)) for message in highlights]
+    lines += ["", "## Final assistant summary", "", block(scrub(summary[:MAX_SUMMARY_CHARS]))]
     return "\n".join(lines)
 
 
@@ -275,8 +281,15 @@ def scribe(
     if not prompts and not summary:
         return None  # empty capture ⇒ write nothing
 
-    body = _assemble_body(prompts, summary, parsed["ide_context"], parsed["highlights"])
-    body = redact(body, load_config().redact.extra_patterns)
+    extra_patterns = load_config().redact.extra_patterns
+    body = _assemble_body(
+        prompts,
+        summary,
+        parsed["ide_context"],
+        parsed["highlights"],
+        lambda text: redact(text, extra_patterns),
+    )
+    body = redact(body, extra_patterns)  # defense in depth over the whole document
 
     sid = session_id or parsed["session_id"]
     started = _parse_started_at(parsed["started_at"])

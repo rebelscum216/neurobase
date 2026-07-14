@@ -16,6 +16,8 @@ from typing import Any
 from neurobase.adapters.scribe_common import (
     MAX_ASSISTANT_MSG_CHARS,
     MAX_ASSISTANT_TOTAL_CHARS,
+    Redactor,
+    block,
     bounded_highlights,
     bullet,
     final_summary,
@@ -223,12 +225,12 @@ def parse_transcript(transcript_path: Path) -> dict[str, Any]:
     }
 
 
-def _assemble_body(parsed: dict[str, Any], reason: str) -> str:
-    prompts: list[str] = parsed["prompts"]
-    summary: str = parsed["summary"]
-    kept = prompts[-MAX_PROMPTS:]
-    kept = [p[:MAX_PROMPT_CHARS] for p in kept]
-    summary = summary[:MAX_SUMMARY_CHARS]
+def _assemble_body(parsed: dict[str, Any], reason: str, scrub: Redactor) -> str:
+    """Render the spec §4 body. ``scrub`` (D13 redaction) runs on every captured
+    value *before* it is rendered: a structural prefix like ``"- "`` would shift
+    the text off column 0 and shield it from the table's line-anchored rules."""
+    kept = [scrub(p[:MAX_PROMPT_CHARS]) for p in parsed["prompts"][-MAX_PROMPTS:]]
+    summary = scrub(parsed["summary"][:MAX_SUMMARY_CHARS])
     lines = [
         "## Session",
         f"- ended: {reason}",
@@ -242,18 +244,18 @@ def _assemble_body(parsed: dict[str, Any], reason: str) -> str:
     if files or commands:
         lines.extend(["", "## Activity"])
         if files:
-            lines.extend(["", "### Files touched", *[bullet(path) for path in files]])
+            lines.extend(["", "### Files touched", *[bullet(scrub(path)) for path in files]])
         if commands:
-            lines.extend(["", "### Commands run", *[bullet(cmd) for cmd in commands]])
+            lines.extend(["", "### Commands run", *[bullet(scrub(cmd)) for cmd in commands]])
     reports: list[str] = parsed["subagent_reports"]
     if reports:
         lines.extend(["", "## Subagent reports"])
-        lines.extend(bullet(report) for report in reports)
+        lines.extend(bullet(scrub(report)) for report in reports)
     highlights: list[str] = parsed["highlights"]
     if highlights:
         lines.extend(["", "## Assistant highlights"])
-        lines.extend(bullet(highlight) for highlight in highlights)
-    lines.extend(["", "## Final assistant summary", "", summary])
+        lines.extend(bullet(scrub(highlight)) for highlight in highlights)
+    lines.extend(["", "## Final assistant summary", "", block(summary)])
     return "\n".join(lines)
 
 
@@ -296,9 +298,9 @@ def scribe(
     ):
         return None  # empty capture ⇒ write nothing
 
-    body = _assemble_body(parsed, reason)
     extra_patterns = load_config().redact.extra_patterns
-    body = redact(body, extra_patterns)
+    body = _assemble_body(parsed, reason, lambda text: redact(text, extra_patterns))
+    body = redact(body, extra_patterns)  # defense in depth over the whole document
 
     sid = session_id or parsed["session_id"]
     return store.write_raw(

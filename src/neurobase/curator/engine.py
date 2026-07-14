@@ -8,7 +8,9 @@ with a fake brain and no network.
 Hard rules preserved here:
 - A first plan that won't parse ⇒ ABORT, leave every raw unconsumed (D9).
 - With D22 batching, a later failed batch and all later raws stay unconsumed;
-  earlier valid batches remain applied and consumed.
+  earlier valid batches remain applied and consumed — and because they are
+  applied, the pass still prunes and re-synthesizes before returning its error,
+  so the node recall injects never lags the facts that did commit.
 - A *valid-but-empty* plan IS consumed (idempotence).
 - Node synthesis / index failing *after* raws were consumed ⇒ ``partial`` (the
   node is a pure function of ``curated/`` and self-heals on any later pass).
@@ -274,6 +276,7 @@ def curate(
     upsert_count = 0
     superseded_count = 0
     tombstone_count = 0
+    plan_error: str | None = None
 
     while remaining:
         # Reload after every committed batch: later plans must see facts added,
@@ -282,31 +285,16 @@ def curate(
         try:
             batch_docs, user_payload = _next_plan_batch(curated, remaining, plan_payload_max_bytes)
         except ValueError as exc:
-            summary = {
-                "status": "error",
-                "raw": len(raw_docs),
-                "batches": batch_count,
-                "error": str(exc),
-            }
-            _log_pass(root, project, summary)
-            return summary
+            plan_error = str(exc)
+            break
 
         # Step 2/3 per batch. A failed batch and every later batch stay
         # unconsumed; earlier committed batches intentionally stand.
         try:
             plan = brain.plan_json(PLAN_SYSTEM, user_payload)
         except BrainError as exc:
-            summary = {
-                "status": "error",
-                "raw": len(raw_docs),
-                "batches": batch_count,
-                "upserts": upsert_count,
-                "superseded": superseded_count,
-                "tombstones": tombstone_count,
-                "error": str(exc),
-            }
-            _log_pass(root, project, summary)
-            return summary
+            plan_error = str(exc)
+            break
 
         plans.append(plan)
         batch_count += 1
@@ -348,6 +336,15 @@ def curate(
         remaining = remaining[len(batch_docs) :]
 
     if dry_run:
+        if plan_error is not None:  # nothing was applied; report the failure
+            summary = {
+                "status": "error",
+                "raw": len(raw_docs),
+                "batches": batch_count,
+                "error": plan_error,
+            }
+            _log_pass(root, project, summary)
+            return summary
         dry_summary: dict[str, Any] = {
             "status": "dry-run",
             "raw": len(raw_docs),
@@ -359,21 +356,37 @@ def curate(
             dry_summary["plans"] = plans
         return dry_summary
 
-    # Step 7: prune tombstones past the grace period.
+    if plan_error is not None and batch_count == 0:
+        # Nothing was applied: the v0.1 abort, byte for byte (D9). No derived
+        # state changed, so there is nothing to refresh.
+        summary = {"status": "error", "raw": len(raw_docs), "batches": 0, "error": plan_error}
+        _log_pass(root, project, summary)
+        return summary
+
+    # Steps 7/8 run whenever at least one batch committed — including when a
+    # LATER batch failed. Derived state must never lag committed facts: the node
+    # is what recall injects, so skipping synthesis here would hide every fact
+    # the successful batches wrote until some future pass happened to succeed —
+    # and a permanently-failing raw would make that "never" (D22).
     pruned = store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)
 
-    # Step 8: node synthesis + index + linkify. Per spec §2's partial-failure
-    # contract, ANY failure here — brain error, a malformed sibling node
-    # tripping the index rebuild, a linkify/disk error — is `partial`, not a
-    # crash: raws are already consumed and the applied state stands, and the
-    # node self-heals on any later pass (it's a pure function of curated/).
-    status = "ok"
+    # Per spec §2's partial-failure contract, ANY failure here — brain error, a
+    # malformed sibling node tripping the index rebuild, a linkify/disk error —
+    # is `partial`, not a crash: raws are already consumed and the applied state
+    # stands, and the node self-heals on any later pass (it's a pure function of
+    # curated/).
     synth_error: str | None = None
     try:
         _synthesize(root, project, brain)
     except Exception as exc:  # noqa: BLE001 - spec §2: keep applied state, log, return partial
-        status = "partial"
         synth_error = str(exc)
+
+    if plan_error is not None:
+        status = "error"  # the pass failed; the committed batches still stand
+    elif synth_error is not None:
+        status = "partial"
+    else:
+        status = "ok"
 
     summary = {
         "status": status,
@@ -385,8 +398,10 @@ def curate(
         "pruned_tombstones": len(pruned),
         "active_facts": len(store.list_curated(root, project)),
     }
+    if plan_error is not None:
+        summary["error"] = plan_error
     if synth_error is not None:
-        summary["error"] = synth_error
+        summary["synth_error" if plan_error is not None else "error"] = synth_error
     _log_pass(root, project, summary)
     return summary
 

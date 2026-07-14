@@ -37,8 +37,18 @@ A function that turns "a session/turn just ended" into **zero or one**
   teardown. Write your scribe function as plain, testable code that can
   raise on bad input; put no exit-0/exception-swallowing logic inside it —
   that belongs solely at the hook boundary in `cli/`.
-- **Redact before writing** (`core/redact.py:redact`, spec §10/D13) — no
-  exceptions, no "redact later."
+- **Redact each captured value before you *render* it** (`core/redact.py:redact`,
+  spec §10/D13) — no exceptions, no "redact later." Redacting the finished body
+  instead is not equivalent and is not sufficient: D13's env rules are
+  line-anchored, so a `"- "` bullet prefix shifts the text off column 0 and
+  shields the secret. Pass a `Redactor` into your body renderer, the way both
+  shipped scribes do, and run the table over the whole document afterwards only
+  as defense in depth.
+- **Captured content is untrusted markdown.** Put every captured value through
+  `scribe_common.block()` (or `bullet()`, which wraps it) so a heading inside a
+  prompt or an assistant message can't forge one of your body's own `##`
+  sections — the curator reads that structure. Indenting is not enough on its
+  own; CommonMark still parses a heading indented up to three spaces.
 - **Opt-in.** Write only if the resolved project's memory tree already
   exists (i.e., the project ran `neurobase enable`) — a scribe must never
   create a store as a side effect of a hook firing.

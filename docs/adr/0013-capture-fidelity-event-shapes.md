@@ -34,16 +34,33 @@ now. Codex activity extraction remains a follow-up because parsing command and
 patch strings safely needs a separate bounded format contract; Codex subagent
 reports remain deferred.
 
-The richer skim also forces one body-format rule (spec §4): **every bullet
-indents its continuation lines.** Prompts (now 1,200 chars), highlights, and
-subagent reports (1,500 chars) are routinely multi-line markdown. Rendered as a
-bare `- {text}`, the second line of a pasted stack trace or a markdown-formatted
-assistant message lands at column 0 — so a `## Final assistant summary` inside
-captured content becomes a real heading in the raw document, and the curator
-reads that structure as if the scribe had written it. A live spike against the
-largest local transcript reproduced exactly this: seven forged `##` sections in
-one 20 KB raw. The two-space continuation indent keeps every value inside its
-own list item.
+The richer skim also forces two rules about how captured content reaches the
+body, because **captured content is untrusted markdown** and the curator reads
+the body's structure. Prompts (now 1,200 chars), highlights, and subagent
+reports (1,500 chars) are routinely multi-line markdown; a live spike against
+the largest local transcript produced a 20 KB raw carrying **seven forged `##`
+sections**, including a content-supplied `## Final assistant summary`.
+
+1. **Escape a leading `#` run on every line, then indent bullet continuations**
+   (spec §4). Indentation alone is insufficient — CommonMark parses a heading
+   indented up to three spaces — so escaping is the load-bearing half. This
+   applies to section bodies too, not just bullets: §5's IDE context block is
+   the sharpest case, since it precedes `## Prompts` and a heading forged there
+   shadows every section after it.
+2. **Redact each captured value *before* rendering it, not the finished
+   document** (spec §10). D13's env rule is line-anchored, so a `"- "` bullet
+   prefix shifts the text off column 0 and shields it: `bullet()` then
+   `redact()` left `- API_TOKEN=<secret> uv run pytest` in `raw/` **unredacted**.
+   The command digest introduced here is precisely the channel where that shape
+   lives, which made a latent D13 gap newly exploitable.
+
+Fixing (2) surfaced a second gap in the D13 table itself, independent of this
+branch: the env rule only ever matched a *line-initial* assignment, so
+`export API_TOKEN=<secret>` — the single most common way a secret appears in a
+shell command — was never redacted at all. §10 gains a case-sensitive
+word-boundary variant to cover it, kept case-sensitive so ordinary code
+(`sort(key=…)`) is not swallowed. The line-anchored rule also now preserves the
+indent it consumes, so redaction cannot reflow a body's structure.
 
 ## Consequences
 

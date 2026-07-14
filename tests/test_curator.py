@@ -199,7 +199,14 @@ def test_batch_failure_keeps_earlier_commit_and_later_raws_unconsumed(root: Path
     assert store.read_doc(second)["consumed"] is False
     assert store.read_doc(third)["consumed"] is False
     assert (store.memory_dir("proj", root) / "curated" / "landed.md").exists()
-    assert brain.text_calls == 0
+    # The pass failed, but batch 1's facts are committed — so the derived node
+    # MUST be refreshed anyway, or recall would never see them: retrying only
+    # re-hits the same failing batch, so "a later pass will fix it" is false.
+    assert brain.text_calls == 1
+    node = store.memory_dir("proj", root) / "nodes" / "proj-status.md"
+    assert node.exists()
+    assert summary["upserts"] == 1
+    assert summary["active_facts"] == 1
 
 
 def test_single_oversize_unicode_raw_is_marked_and_fits_byte_budget(root: Path) -> None:
@@ -219,6 +226,33 @@ def test_single_oversize_unicode_raw_is_marked_and_fits_byte_budget(root: Path) 
     body = json.loads(rendered)["raw_captures"][0]["body"]
     assert body.endswith("[truncated for plan payload]")
     assert len(body) < len(doc.body)
+
+
+def test_recall_sees_committed_facts_even_when_a_later_batch_keeps_failing(root: Path) -> None:
+    """A permanently-failing raw must not hold committed facts out of recall
+    forever. Two passes both fail on batch 2; the node still carries batch 1."""
+    _write_raw(root, "proj", "r1.md", "a" * 80)
+    _write_raw(root, "proj", "r2.md", "b" * 80)
+    budget = _request_size_for(root, ["r1.md"])
+    brain = SequencedBrain(
+        [
+            {"upserts": [{"slug": "landed", "body": "durable", "from_raw": ["r1.md"]}]},
+            BrainError("poison raw"),
+            BrainError("poison raw"),  # the retry hits the same wall
+        ],
+        node_text="# Status\n\nlanded: durable",
+    )
+
+    first_pass = engine.curate(root, "proj", brain, plan_payload_max_bytes=budget)
+    node = store.memory_dir("proj", root) / "nodes" / "proj-status.md"
+    assert first_pass["status"] == "error"
+    assert "landed" in node.read_text(encoding="utf-8")
+
+    # Second pass: only the poison raw is left, nothing commits, node untouched.
+    second_pass = engine.curate(root, "proj", brain, plan_payload_max_bytes=budget)
+    assert second_pass["status"] == "error"
+    assert second_pass["batches"] == 0
+    assert "landed" in node.read_text(encoding="utf-8")
 
 
 def test_dry_run_previews_every_batch_and_consumes_nothing(root: Path) -> None:

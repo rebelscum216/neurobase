@@ -142,10 +142,13 @@ _<N> active curated facts._
 5. Apply explicit tombstones (skip any slug upserted this batch **or pinned**).
 6. Mark this batch's raws `consumed: true`; reload active facts, then repeat
    steps 2–6 for remaining raws so the next plan sees all prior batch changes.
-7. After the final batch, `prune_tombstones(14)`.
+7. After the last batch, `prune_tombstones(14)`. This runs whenever **at least
+   one batch committed** — including when a *later* batch then failed.
 8. Regenerate node: brain `text` with node prompt (§2.2) over the resulting
    active facts; write as node `<project>-status` (default node name = project
-   slug + `-status`). Rebuild `index.md`. Run linkify (§6).
+   slug + `-status`). Rebuild `index.md`. Run linkify (§6). Like step 7, this
+   runs whenever at least one batch committed, **even if the pass is about to
+   return an error** — see the derived-state rule below.
 9. Return summary: `{status, raw, batches, upserts, superseded, tombstones,
    pruned_tombstones, active_facts}`.
 
@@ -161,13 +164,26 @@ leaves the store only when the user removes it. (A linkify lineage footer, §6,
 may still be appended — that is not a content edit.)
 
 **Partial-failure contract:** only the *plan* step aborts the current and later
-batches (step 3). A first-batch failure leaves every raw unconsumed; after one
-or more successful batches, their state remains applied and their raws consumed
-while the failed/later batches remain retryable (D22). If node synthesis or
-index rebuild fails *after* raws were consumed (steps 6→8),
-keep the applied state, log, and return `{"status":"partial",…}` — the node is
-stale but self-heals on any later pass, because nodes are a pure function of
-`curated/`. `neurobase curate --resynth` regenerates node + index without new raw.
+batches (step 3). A first-batch failure leaves every raw unconsumed and changes
+nothing on disk — the v0.1 abort exactly. After one or more successful batches,
+their state remains applied and their raws consumed while the failed/later
+batches remain retryable (D22). If node synthesis or index rebuild fails *after*
+raws were consumed (steps 6→8), keep the applied state, log, and return
+`{"status":"partial",…}` — the node is stale but self-heals on any later pass,
+because nodes are a pure function of `curated/`. `neurobase curate --resynth`
+regenerates node + index without new raw.
+
+**Derived state must never lag committed facts (D22).** A pass that committed at
+least one batch MUST still run steps 7–8 before returning, *including when a
+later batch failed and the pass returns `{"status":"error",…}`*. The node is
+what recall injects; skipping synthesis on the error path would hide every fact
+the successful batches wrote. "A later pass will fix it" is **false** here: the
+retry re-plans the same unconsumed raws, so a raw that fails permanently (one
+that reliably breaks the plan step) would keep the committed facts out of recall
+forever. Status stays `error` — the pass *did* fail and its raws are still
+unconsumed — but the store is left self-consistent. If synthesis itself also
+fails on this path, report it alongside (`synth_error`) rather than masking the
+plan failure.
 
 **Pass log:** append each pass's summary dict as one line to
 `<memory>/.curator-log.jsonl` — this is what `status` reads to show the
@@ -287,11 +303,25 @@ no preamble.
 
 <summary>
 ```
-Sections with nothing to say are omitted entirely. Every bullet MUST indent its
-continuation lines by two spaces (`"- " + text.replace("\n", "\n  ")`): prompts,
-highlights, and subagent reports are routinely multi-line markdown, and an
-un-indented one would put its own `##` heading at column 0 — letting session
-content forge the raw document's section structure that the curator then reads.
+Sections with nothing to say are omitted entirely.
+
+**Captured content is untrusted markdown.** A prompt, an assistant message, an
+IDE context block, or a subagent report can contain its own headings, and the
+curator reads this document's structure. So every captured value MUST be
+rendered through both of these before it lands in the body:
+
+1. **Escape a leading `#` run on every line** (`## foo` → `\## foo`). Indenting
+   is *not* sufficient: CommonMark still parses a heading indented up to three
+   spaces.
+2. **Indent continuation lines by two spaces** for bullet-valued sections
+   (`"- " + escaped.replace("\n", "\n  ")`), so a multi-line value stays inside
+   its own list item.
+
+This applies to the section *bodies* too — §5's `## Files in focus (IDE)` and
+the `## Final assistant summary` — not only to bullets. The IDE block is the
+sharpest case: it precedes `## Prompts`, so a heading forged there shadows every
+section after it. The bounds make multi-line content the common case, not an
+edge one (prompts 1,200 chars; subagent reports 1,500).
 
 ## 5. Codex scribe contract
 
@@ -531,11 +561,31 @@ first modification of any agent config file in a given init run.
 | `\bxox[baprs]-[A-Za-z0-9-]{10,}\b` | `[REDACTED:slack-token]` |
 | `\bghp_[A-Za-z0-9]{36}\b` and `\bgithub_pat_[A-Za-z0-9_]{20,}\b` | `[REDACTED:github-token]` |
 | `Bearer\s+[A-Za-z0-9._~+/=-]{20,}` | `Bearer [REDACTED:bearer]` |
-| (multiline, case-insensitive) `^\s*([A-Z0-9_]*(?:KEY\|TOKEN\|SECRET\|PASSWORD\|PASSWD\|CREDENTIAL)[A-Z0-9_]*)\s*=\s*\S+` | keep the name, value → `[REDACTED:env-secret]` |
+| (multiline, case-insensitive) `^([ \t]*)(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the **indent** and the name, value → `[REDACTED:env-secret]` |
+| `(?<![A-Za-z0-9_])(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the name, value → `[REDACTED:env-secret]` |
 
-Scope note: the env rule intentionally matches only secret-ish variable names —
-a pasted `PATH=/usr/bin` survives. The `[REDACTED:<type>]` vocabulary above is
-closed; `extra_patterns` additions use `[REDACTED:custom]`.
+where `<SECRET_NAME>` is `[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*`.
+
+Scope notes:
+
+- The env rules intentionally match only secret-ish variable names — a pasted
+  `PATH=/usr/bin` survives. The `[REDACTED:<type>]` vocabulary above is closed;
+  `extra_patterns` additions use `[REDACTED:custom]`.
+- The **first** rule is line-anchored and case-insensitive: `.env`-style lines.
+  It MUST capture and re-emit the leading indent — a scribe body's structural
+  indentation (§4) has to survive redaction, and `[ \t]` (not `\s`) keeps the
+  rule from ever swallowing a newline.
+- The **second** rule matches the same assignment *anywhere in a line* —
+  `export API_TOKEN=…`, `API_TOKEN=… cmd`. §4's command digest made this shape
+  reachable (a shell command is exactly where it lives) and the line-anchored
+  rule alone misses it. It is **case-sensitive** so ordinary code
+  (`sort(key=…)`) is not swallowed; the case-insensitive rule above still
+  covers lowercase `.env` lines.
+- **Redact the captured value, not the rendered document.** A scribe MUST apply
+  the table to each captured value *before* rendering it into the body: a
+  structural prefix like `"- "` shifts text off column 0 and shields it from
+  every line-anchored rule above. Running the table over the finished document
+  as well is fine as defense in depth, but it is not sufficient on its own.
 
 ### Seeder mapping (Claude auto-memory → curated facts)
 An auto-memory dir is `MEMORY.md` (an index — skip it) plus topic `*.md` files

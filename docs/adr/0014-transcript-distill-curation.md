@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-07-15
-- **Resolves:** S-cf5; D15, D16 (capture-fidelity Part II, plan §A2/§A3/§A5)
+- **Resolves:** S-cf5; D15, D16, D17 (capture-fidelity Part II, plan §A2/§A3/§A5)
 - **Supersedes:** none
 
 ## Context
@@ -69,20 +69,56 @@ moved path silently degrades to the skim — a wrong path is never an error.
 `[curate].distill != "off"`):** render the transcript to compact text (prompts,
 all assistant texts, `tool_use` one-liners, `tool_result` bodies truncated to
 2 000 chars each; sidechains **included** — subagent context is cheap here),
-chunk at `distill_chunk_chars` (200 000), and call `brain.text(DISTILL_SYSTEM,
-chunk)` per chunk, capped at `MAX_DISTILL_CHUNKS = 5` (drop middle chunks first,
-noting the drop in the digest header); `> 1` chunk ⇒ a final merge call. The
-digest **replaces the raw's body** in that batch's `raw_captures` entry — same
-`raw` filename key, so `from_raw` provenance is unchanged — and passes through
-`redact()` before it is cached or enters any payload. Batching, byte budget, and
-D9 per-batch abort semantics are exactly ADR-0012's; distill only changes what
-sits in each entry's body.
+**`redact()` the rendered text (D17, below) before it is chunked or sent**, chunk
+at `distill_chunk_chars` (200 000), and call `brain.text(DISTILL_SYSTEM, chunk)`
+per chunk, capped at `MAX_DISTILL_CHUNKS = 5` (drop middle chunks first, noting
+the drop in the digest header); `> 1` chunk ⇒ a final merge call. The digest
+**replaces the raw's body** in that batch's `raw_captures` entry — same `raw`
+filename key, so `from_raw` provenance is unchanged — and passes through
+`redact()` again (defense in depth) before it is cached or enters any payload.
+Batching, byte budget, and D9 per-batch abort semantics are exactly ADR-0012's;
+distill only changes what sits in each entry's body.
 
-**Digest cache.** Digests are written to `raw/.digests/<raw-filename>` so a
-failed or aborted pass never re-distills. `list_raw` globs `raw/*.md`
-non-recursively, so the sidecar directory is invisible to it and to the store
-contract; the cache is derived state, safe to delete. It is a sidecar, not a
+**D17 — Redact the transcript before it leaves for the brain, not just the
+digest** _(added in review — closes a real gap the plan's §6 trust note missed)._
+Raw skim bodies are already `redact()`-ed at capture, so today's plan call only
+ever sends redacted text to the brain. Rendering a transcript straight into
+`brain.text()` would send **unredacted** `tool_result` bodies — exactly where
+tokens, env vars, and connection strings live — to the configured brain. The
+plan justified this as "the same logged-in CLI that produced the session," but
+that assumption does not hold: neurobase is cross-agent, so a **Codex** session's
+transcript can be distilled by a `claude`/`anthropic-api` brain (or vice-versa),
+and the API backend is a different credential/endpoint than the CLI that made the
+session. So the transcript render is redacted before every distill/merge call,
+holding the store's existing "only redacted text leaves" guarantee. Redaction is
+best-effort (regex table, D13) — the same level the store already ships — and the
+digest is redacted a second time, so the render-side pass is defense forward, not
+the only line. Sending unredacted transcripts is **not** offered even as an
+opt-in here; if a future need arises it gets its own ADR + SECURITY treatment.
+
+**Digest cache (content-addressed).** Digests are written to
+`raw/.digests/<raw-filename>` so a failed or aborted pass never re-distills. But
+the filename alone is **not** a safe key: a raw is rewritable by its owning
+scribe until `consumed: true`, and the Codex scribe deliberately *overwrites one
+raw per session in place* every turn (last-turn-wins,
+`codex/scribe.py`, `captured_at = session start`). So a distill that succeeds and
+caches, in a pass that then aborts before consuming that raw, would leave a stale
+digest under a filename a later, longer turn reuses — and the next pass would
+fold the old digest and silently drop the newer session
+_(finding — closes a real stale-cache hole)._
+
+The cache entry therefore carries a **`source_fingerprint`** of the exact distill
+input — the raw body's content hash **and** the transcript's fingerprint (path +
+size + mtime, or a content hash). On read, the fingerprint is recomputed and must
+match; a mismatch or a missing fingerprint is a cache **miss** ⇒ re-distill. This
+invalidates on both a rewritten raw body and a grown/replaced transcript.
+`list_raw` globs `raw/*.md` non-recursively, so the sidecar directory stays
+invisible to it and to the store contract; the cache is derived state, safe to
+delete (a purge just costs one re-distill). It is a sidecar, not a
 raw-frontmatter edit, so the owning-scribe mutability rule stays clean.
+**Dry-run never writes the cache** (it applies nothing and must not persist
+derived state); a dry run may read a valid cached digest but a miss simply
+re-distills for the preview.
 
 **D16 — Distill failure degrades, never aborts.** Any distill failure — missing
 or unreadable transcript, brain error, timeout, **or an output that fails
@@ -101,10 +137,11 @@ these):
 2. **Untrusted-data fence (F2).** The rendered transcript is wrapped in an
    explicit delimiter and the system text states that everything inside is a
    transcript to summarize — never instructions to follow — including any text
-   that reads as a system prompt, a role assignment, or a request. This is not a
-   new trust boundary (the plan step already ingests raw bodies; the transcript
-   flows only to the user's own configured brain, D9 unchanged) but the fence is
-   load-bearing when neurobase distills its own sessions.
+   that reads as a system prompt, a role assignment, or a request. The fence is
+   load-bearing when neurobase distills its own sessions (whose text embeds the
+   curator/distill prompts verbatim). Note the brain that reads the transcript is
+   still whatever backend the user configured — per D17 the render is redacted
+   first, so what crosses is redacted transcript text, not raw tool output.
 3. **Output-shape validation (F3).** A digest that lacks the expected structure
    (the required headings) or that reads as a refusal/question is treated as a
    distill failure and triggers the D16 skim fallback. Validation is a shape
@@ -131,16 +168,20 @@ parked pending its own ADR (plan Phase D).
   bound the rate-limit exposure (plan §F).
 - The store stays small and redacted: only bounded, redacted digests can reach
   the plan payload or the cache; the transcript itself never lands anywhere in
-  the store. The planted-secret guarantee (a fake secret in a tool result never
-  appears in `raw/.digests/` or `curated/`) is a Phase C **Done-when** test.
+  the store, and per D17 only redacted transcript text is ever sent to the brain.
+  The planted-secret guarantee now has two Phase C **Done-when** tests: a fake
+  secret in a tool result never appears in `raw/.digests/` or `curated/`, **and**
+  never appears in the text handed to the (fake) brain's distill/merge calls.
 - v1 raws (no new keys) and `distill = "off"` both behave exactly as today —
   the skim body is the payload. Tier-2 is purely additive over ADR-0012.
 - **Spec appendix** must gain: §1 the two optional raw keys + the `.digests/`
-  sidecar exclusion; §2 the distill step in the curate sequence and the D16
+  sidecar exclusion + the content-addressed cache fingerprint; §2 the distill
+  step in the curate sequence, the D17 redact-before-brain rule, and the D16
   failure policy; §8 the new defaults; §10 the `[curate]` config keys. **This
   ADR is the proposal; that appendix is the law** — fold these in when
-  implementing. SECURITY.md gains the note that the transcript flows only to the
-  user's own brain and digests are redacted.
+  implementing. SECURITY.md gains the note that **only redacted** transcript text
+  is sent to the user's configured brain (D17), the transcript itself never lands
+  in the store, and digests are redacted.
 
 ## Alternatives considered
 
@@ -157,3 +198,13 @@ parked pending its own ADR (plan Phase D).
 - **Bump `STORE_SCHEMA_VERSION` for the new keys** — unnecessary: additive
   optional frontmatter is forward/backward compatible; a bump would trip the
   D11 guard for no gain.
+- **Send the transcript to the brain unredacted** (as the plan's §6 note
+  implied, or as an opt-in) — rejected (D17): raw skim bodies are already
+  redacted before they reach the brain today, and neurobase is cross-agent, so a
+  Codex session's transcript could be sent to a `claude`/API brain — a different
+  credential and endpoint than the CLI that produced it. Unredacted sending would
+  regress the store's "only redacted text leaves" guarantee for no functional
+  gain (a digest should never need secrets). Not even offered as opt-in here.
+- **Key the digest cache by raw filename only** (first draft) — rejected: the
+  Codex scribe overwrites a raw in place each turn, so a filename can map to
+  different bodies over time; a fingerprinted, content-addressed cache is the fix.

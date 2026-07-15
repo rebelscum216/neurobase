@@ -88,4 +88,55 @@ python3 scratchpad/scf4_argv_probe.py
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _pending._
+- **major** — `docs/adr/0014-transcript-distill-curation.md:68` — The distill
+  contract sends the rendered transcript chunks to `brain.text(...)` before any
+  D13 redaction is specified, and only redacts the resulting digest before cache
+  or plan-payload use. That means a planted secret in a tool result would still
+  be sent to the configured brain under the default `distill = "auto"` path,
+  even though today's curator only sends already-redacted raw bodies. The later
+  "does not appear in raw/.digests/ or curated/" test would not catch that
+  exposure. Suggested direction: either require `redact()` on the rendered
+  transcript/chunks before every distill/merge brain call, or make the ADR and
+  config default explicitly opt-in for sending unredacted transcripts to the
+  user's brain.
+  - **resolution:** _resolved (round 1)._ Confirmed real and worse than stated:
+    neurobase is cross-agent, so a Codex session's transcript could be sent to a
+    `claude`/`anthropic-api` brain — a different credential/endpoint than the CLI
+    that produced it, so the plan's "same logged-in CLI" rationale doesn't hold.
+    Added **D17**: the rendered transcript is `redact()`-ed before it is chunked
+    or sent, on every distill/merge call (digest still redacted again, defense in
+    depth). Unredacted sending is not offered even as opt-in (own ADR if ever).
+    The planted-secret Done-when test now also asserts the secret never reaches
+    the (fake) brain's distill/merge input. ADR §Decision (D17), §Consequences,
+    §Alternatives updated.
+
+- **major** — `docs/adr/0014-transcript-distill-curation.md:81` — The proposed
+  cache key is only `raw/.digests/<raw-filename>`, but raw files are still
+  rewritable by the owning scribe until `consumed: true` (the Codex
+  last-turn-wins overwrite trick depends on that). If a distill succeeds and
+  writes a cache, then the pass aborts before consuming the raw, a later turn can
+  overwrite the same raw filename while the stale digest remains. The next
+  curate pass would fold the old digest and silently lose the later session
+  content. Suggested direction: make cache validity depend on the raw/transcript
+  content being distilled (for example a digest metadata file with raw body and
+  transcript fingerprint, or a hash-named cache entry), and specify dry-run/cache
+  behavior accordingly.
+  - **resolution:** _resolved (round 1)._ Confirmed against `codex/scribe.py`
+    (`captured_at = session start` ⇒ stable filename, in-place per-turn
+    overwrite). The cache is now **content-addressed**: each entry carries a
+    `source_fingerprint` of the raw body content hash **and** the transcript
+    fingerprint (path + size + mtime, or content hash); read recomputes and must
+    match, else it is a miss ⇒ re-distill. This invalidates on both a rewritten
+    raw body and a grown/replaced transcript. Dry-run never writes the cache (may
+    read a valid one; a miss just re-distills for the preview). ADR §Decision
+    (Digest cache) + §Alternatives updated.
+
+## Round-1 resolution summary  _(Author — Claude)_
+
+Both `major` findings confirmed real and **resolved** in a follow-up commit (no
+amend/rebase of the reviewed commits). Changes are ADR-only (still docs, no
+source): added D17 (redact-before-brain) and made the digest cache
+content-addressed; updated Consequences, Alternatives, and the spec-appendix fold
+list. Re-arming for round 2.
+
+**Verdict:** changes-requested — _round 1; addressed, re-submitted._

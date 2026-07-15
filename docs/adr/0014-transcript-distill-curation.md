@@ -1,6 +1,6 @@
 # ADR-0014: Transcript-distill curation (Tier-2 capture fidelity)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-15
 - **Resolves:** S-cf5; D15, D16, D17 (capture-fidelity Part II, plan §A2/§A3/§A5)
 - **Supersedes:** none

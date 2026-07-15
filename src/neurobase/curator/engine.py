@@ -25,9 +25,12 @@ from typing import Any
 
 from neurobase.brain.base import Brain, BrainError, combine_prompt
 from neurobase.core import linkify, store
+from neurobase.curator import distill as distill_mod
 
 DEFAULT_TOMBSTONE_GRACE_DAYS = 14
 DEFAULT_PLAN_PAYLOAD_MAX_BYTES = 262_144
+DEFAULT_DISTILL = "auto"
+DEFAULT_DISTILL_CHUNK_CHARS = distill_mod.DISTILL_CHUNK_CHARS
 OVERSIZE_RAW_MARKER = "\n\n[truncated for plan payload]"
 NODE_SUFFIX = "-status"
 CURATOR_LOG = ".curator-log.jsonl"
@@ -253,6 +256,9 @@ def curate(
     resynth: bool = False,
     tombstone_grace_days: int = DEFAULT_TOMBSTONE_GRACE_DAYS,
     plan_payload_max_bytes: int = DEFAULT_PLAN_PAYLOAD_MAX_BYTES,
+    distill: str = DEFAULT_DISTILL,
+    distill_chunk_chars: int = DEFAULT_DISTILL_CHUNK_CHARS,
+    redact_patterns: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one curate pass (spec §2). Returns the summary dict."""
     store.ensure_tree(project, root)
@@ -269,6 +275,20 @@ def curate(
         summary = {"status": "noop", "raw": 0, "active_facts": active}
         _log_pass(root, project, summary)
         return summary
+
+    # Step 1 (spec §2.0): distill each raw's transcript into a richer body for
+    # this pass, degrading to the skim on any failure (D16 — never aborts). The
+    # cache is derived state; a dry run reads it but never writes it.
+    raw_docs, distill_counts = distill_mod.distill_docs(
+        root,
+        project,
+        raw_docs,
+        brain,
+        mode=distill,
+        chunk_chars=distill_chunk_chars,
+        extra_patterns=redact_patterns,
+        write_cache=not dry_run,
+    )
 
     remaining = list(raw_docs)
     plans: list[dict[str, Any]] = []
@@ -341,6 +361,7 @@ def curate(
                 "status": "error",
                 "raw": len(raw_docs),
                 "batches": batch_count,
+                **distill_counts,
                 "error": plan_error,
             }
             _log_pass(root, project, summary)
@@ -349,6 +370,7 @@ def curate(
             "status": "dry-run",
             "raw": len(raw_docs),
             "batches": batch_count,
+            **distill_counts,
         }
         if len(plans) == 1:
             dry_summary["plan"] = plans[0]  # preserve the v0.1 single-batch API
@@ -360,7 +382,13 @@ def curate(
         # Nothing was applied: the v0.1 abort, state for state (D9). No derived
         # state changed, so there is nothing to refresh. (The summary itself is
         # not byte-identical to v0.1's — it carries the new `batches: 0`.)
-        summary = {"status": "error", "raw": len(raw_docs), "batches": 0, "error": plan_error}
+        summary = {
+            "status": "error",
+            "raw": len(raw_docs),
+            "batches": 0,
+            **distill_counts,
+            "error": plan_error,
+        }
         _log_pass(root, project, summary)
         return summary
 
@@ -393,6 +421,7 @@ def curate(
         "status": status,
         "raw": len(raw_docs),
         "batches": batch_count,
+        **distill_counts,
         "upserts": upsert_count,
         "superseded": superseded_count,
         "tombstones": tombstone_count,

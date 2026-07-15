@@ -32,6 +32,10 @@ class CurateConfig:
     # Final serialized plan request budget, including PLAN_SYSTEM and framing.
     # Bytes (not characters): CLI backends pass the prompt as one argv entry.
     plan_payload_max_bytes: int = 262_144
+    # Tier-2 transcript distill (spec §2.0, ADR-0014). `auto` distills a raw
+    # when its transcript_path resolves; `off` disables it (skim only).
+    distill: str = "auto"
+    distill_chunk_chars: int = 200_000
 
 
 @dataclass

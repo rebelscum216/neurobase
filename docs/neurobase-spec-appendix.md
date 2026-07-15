@@ -227,6 +227,13 @@ has an LLM and no latency budget. It layers **above** §2 batching — byte budg
 and the D22 abort semantics are unchanged; distill only changes what body sits in
 a raw's `raw_captures` entry.
 
+**Per-agent renderers.** The render (step 1 below) is agent-specific and only a
+**live-verified** renderer ships (house rule §11). Claude's transcript render is
+verified (S-cf5). Codex's `response_item` render is **deferred** — the same
+S-cf3 deferral ADR-0013 records for Codex activity/subagent parsing — so a Codex
+raw degrades to its skim (a D16 fallback, not an error) until a verified Codex
+renderer lands. An agent with no renderer never reaches the brain.
+
 Per raw:
 
 1. **Render** the transcript to compact text: prompts, *all* assistant texts,

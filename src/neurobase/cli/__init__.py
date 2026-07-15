@@ -220,6 +220,9 @@ def curate(
         resynth=resynth,
         tombstone_grace_days=config.curate.tombstone_grace_days,
         plan_payload_max_bytes=config.curate.plan_payload_max_bytes,
+        distill=config.curate.distill,
+        distill_chunk_chars=config.curate.distill_chunk_chars,
+        redact_patterns=tuple(config.redact.extra_patterns),
     )
 
     if dry_run:

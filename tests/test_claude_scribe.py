@@ -93,6 +93,20 @@ def test_writes_raw_with_body_format(enabled: tuple[Path, Path], tmp_path: Path)
     assert "tool_result" not in doc.body
 
 
+def test_writes_transcript_path_and_capture_version(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """ADR-0014 (D15): the scribe records its own transcript_path (absolute,
+    exactly what it read) so the curator's distill step can resolve it later."""
+    root, repo = enabled
+    t = _write_transcript(tmp_path / "t.jsonl", FIXTURE_EVENTS)
+    path = scribe.scribe(root, transcript_path=t, cwd=str(repo), reason="clear", session_id="s1")
+    assert path is not None
+    doc = store.read_doc(path)
+    assert doc["transcript_path"] == str(t)
+    assert doc["capture_version"] == 2
+
+
 def test_content_as_text_block_list_joined(enabled: tuple[Path, Path], tmp_path: Path) -> None:
     root, repo = enabled
     events = [

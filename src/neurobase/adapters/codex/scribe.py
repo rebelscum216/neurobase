@@ -298,6 +298,7 @@ def scribe(
     # it would break dedupe. It is agent-generated, never user-authored text.
     sid = session_id or parsed["session_id"]
     started = _parse_started_at(parsed["started_at"])
+    transcript = scrub(str(rollout_path))
     try:
         return store.write_raw(
             root,
@@ -308,6 +309,7 @@ def scribe(
             branch=scrub(parsed["branch"]),
             captured_at=started,
             body=body,
+            transcript_path=transcript,
         )
     except store.RawConsumedError:
         # The session's raw was already folded mid-session; write a fresh
@@ -321,4 +323,5 @@ def scribe(
             branch=scrub(parsed["branch"]),
             captured_at=datetime.now(UTC),
             body=body,
+            transcript_path=transcript,
         )

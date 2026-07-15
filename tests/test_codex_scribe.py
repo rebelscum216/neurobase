@@ -92,6 +92,40 @@ def test_scribe_writes_raw_with_agent_codex(enabled: tuple[Path, Path], tmp_path
     assert written.name.startswith("2026-07-05T23-21-06Z_codex_")
 
 
+def test_scribe_writes_transcript_path_and_capture_version(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """ADR-0014 (D15): the scribe records the rollout path it read so the
+    curator's distill step can resolve it later."""
+    root, repo = enabled
+    rollout = _write_rollout(tmp_path / "rollout-1.jsonl", _fixture_events(str(repo)))
+    written = scribe.scribe(root, rollout_path=rollout)
+    assert written is not None
+    doc = store.read_doc(written)
+    assert doc["transcript_path"] == str(rollout)
+    assert doc["capture_version"] == 2
+
+
+def test_scribe_retry_path_still_sets_transcript_path(
+    enabled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The RawConsumedError retry (fresh captured_at, spec §1 mutability rule)
+    must not drop transcript_path along the way."""
+    root, repo = enabled
+    rollout = _write_rollout(tmp_path / "rollout-1.jsonl", _fixture_events(str(repo)))
+    first = scribe.scribe(root, rollout_path=rollout)
+    assert first is not None
+    store.mark_consumed(first)
+
+    rollout2 = _write_rollout(tmp_path / "rollout-2.jsonl", _fixture_events(str(repo)))
+    second = scribe.scribe(root, rollout_path=rollout2)
+    assert second is not None
+    assert second != first
+    doc = store.read_doc(second)
+    assert doc["transcript_path"] == str(rollout2)
+    assert doc["capture_version"] == 2
+
+
 def test_per_turn_overwrite_one_raw_last_turn_wins(
     enabled: tuple[Path, Path], tmp_path: Path
 ) -> None:

@@ -327,4 +327,5 @@ def scribe(
         branch=scrub(parsed["branch"]),
         captured_at=datetime.now(UTC),
         body=body,
+        transcript_path=scrub(str(transcript_path)),
     )

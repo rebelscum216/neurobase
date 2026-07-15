@@ -190,6 +190,65 @@ def test_mark_consumed_preserves_other_fields_and_body(root: Path) -> None:
     assert doc.body == "body text"
 
 
+def test_write_raw_omits_transcript_keys_when_not_given(root: Path) -> None:
+    """v1 raw: no transcript_path passed ⇒ neither key is written (ADR-0014,
+    D15 additive/optional)."""
+    store.ensure_tree("proj", root)
+    path = store.write_raw(
+        root,
+        "proj",
+        agent="claude",
+        session_id="s1",
+        cwd="/x",
+        branch="main",
+        captured_at=_captured_at(),
+        body="body text",
+    )
+    doc = store.read_doc(path)
+    assert "transcript_path" not in doc.frontmatter
+    assert "capture_version" not in doc.frontmatter
+
+
+def test_write_raw_sets_transcript_path_and_capture_version(root: Path) -> None:
+    store.ensure_tree("proj", root)
+    path = store.write_raw(
+        root,
+        "proj",
+        agent="claude",
+        session_id="s1",
+        cwd="/x",
+        branch="main",
+        captured_at=_captured_at(),
+        body="body text",
+        transcript_path="/abs/path/to/session.jsonl",
+    )
+    doc = store.read_doc(path)
+    assert doc["transcript_path"] == "/abs/path/to/session.jsonl"
+    assert doc["capture_version"] == 2
+
+
+def test_transcript_path_survives_mark_consumed(root: Path) -> None:
+    """ADR-0014: the optional keys ride the consumed:true rewrite unchanged —
+    mark_consumed preserves all frontmatter except the one flag."""
+    store.ensure_tree("proj", root)
+    path = store.write_raw(
+        root,
+        "proj",
+        agent="claude",
+        session_id="s1",
+        cwd="/x",
+        branch="main",
+        captured_at=_captured_at(),
+        body="body text",
+        transcript_path="/abs/path/to/session.jsonl",
+    )
+    store.mark_consumed(path)
+    doc = store.read_doc(path)
+    assert doc["consumed"] is True
+    assert doc["transcript_path"] == "/abs/path/to/session.jsonl"
+    assert doc["capture_version"] == 2
+
+
 def test_list_raw_unconsumed_only_excludes_consumed(root: Path) -> None:
     store.ensure_tree("proj", root)
     path = store.write_raw(

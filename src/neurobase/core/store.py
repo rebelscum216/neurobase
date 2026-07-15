@@ -194,6 +194,7 @@ def write_raw(
     branch: str,
     captured_at: datetime,
     body: str,
+    transcript_path: str | None = None,
 ) -> Path:
     """Write (or session-keyed-overwrite) a raw capture (spec §1/§5).
 
@@ -201,6 +202,11 @@ def write_raw(
     true`` — from then on, raises ``RawConsumedError`` so the caller can
     retry with a fresh ``captured_at`` (a new filename), per the mutability
     rule.
+
+    ``transcript_path`` is optional (ADR-0014, D15): when given, the raw is
+    written as ``capture_version: 2`` so the curator's distill step (spec
+    §2.0) can resolve the transcript later. Omitted ⇒ a v1 raw; every reader
+    must tolerate the absence of both keys.
     """
     path = raw_path(root, project, captured_at, agent, session_id)
     if path.exists() and read_doc(path).get("consumed"):
@@ -213,6 +219,9 @@ def write_raw(
         "captured_at": captured_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "consumed": False,
     }
+    if transcript_path is not None:
+        frontmatter["transcript_path"] = transcript_path
+        frontmatter["capture_version"] = 2
     write_doc(path, frontmatter, body)
     return path
 

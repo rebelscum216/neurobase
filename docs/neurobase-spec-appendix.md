@@ -62,13 +62,31 @@ cwd: <string>
 branch: <string>         # git branch, may be ""
 captured_at: <ISO8601>   # caller may pass explicitly (see §5 Codex)
 consumed: false
+transcript_path: <abs>   # OPTIONAL (capture_version ≥ 2) — Claude hook
+                         #   transcript_path / Codex rollout path; for §2 distill
+capture_version: 2       # OPTIONAL — absent ⇒ a v1 raw
 ```
 
 Rules:
 - Immutable EXCEPT flipping `consumed: true` (the only permitted mutation;
   rewrite preserving all other frontmatter + body).
+- `transcript_path` / `capture_version` are **additive and optional** (ADR-0014,
+  D15): absent ⇒ a v1 raw, and every reader MUST tolerate absence. They ride the
+  `consumed: true` flip unchanged (that rewrite preserves all other frontmatter),
+  so **no `STORE_SCHEMA_VERSION` bump** — old binaries ignore unknown keys. The
+  path is stored absolute; §2's distill resolves it best-effort and a
+  missing/unreadable/moved path is never an error (it degrades to the skim body).
 - `list_raw(project, unconsumed_only=True)` returns oldest-first; unparseable
-  files are skipped, never fatal.
+  files are skipped, never fatal. It globs `raw/*.md` **non-recursively**, so the
+  `raw/.digests/` distill cache (below, §2) is invisible to it and to the store
+  contract.
+- **`raw/.digests/` — distill cache (derived state, ADR-0014).** Optional sidecar
+  written by §2's distill step; safe to delete (a purge costs one re-distill).
+  Entries are **content-addressed**: each carries a `source_fingerprint` over the
+  raw body content hash **and** the transcript fingerprint (path + size + mtime,
+  or content hash), so a rewritten raw body (the §5 Codex per-turn overwrite) or a
+  grown/replaced transcript invalidates it. Not a raw-frontmatter edit, so the
+  owning-scribe mutability rule stays clean. Dry-run never writes it.
 - An explicit `captured_at` drives the filename timestamp — this is load-bearing
   for the Codex per-turn overwrite trick (§5).
 - **Mutability rule (reconciles "append-only" with §5):** a raw file is
@@ -122,13 +140,17 @@ _<N> active curated facts._
 `curate(project)` sequence — each step MUST hold:
 
 1. `ensure_tree`; load unconsumed raw. **None ⇒ no-op** (return
-   `{"status":"noop", …}`) — idempotence.
+   `{"status":"noop", …}`) — idempotence. Then run the **distill** step
+   (Tier-2, below) per unconsumed raw: it replaces a raw's *body* with a richer
+   digest for the rest of this pass, or leaves the skim body on any failure.
 2. Load active curated facts. Build the oldest-first next batch whose **final
    combined plan request** (system prompt + framing + serialized user payload)
    is at most `PLAN_PAYLOAD_MAX_BYTES` in UTF-8 bytes. User payload remains
    `{"curated_facts":[{slug,body,pinned?}…], "raw_captures":[{raw:<filename>, body}…]}`
-   — `pinned: true` is set for user-directed facts. A single raw too large to
-   fit is truncated with `[truncated for plan payload]`; never skip it silently.
+   — `pinned: true` is set for user-directed facts; each `body` is the raw's
+   **distilled digest** when the distill step produced one, else its skim body.
+   A single raw too large to fit is truncated with `[truncated for plan payload]`;
+   never skip it silently.
 3. Call brain `plan_json` for that batch. **If the response is unparseable ⇒
    ABORT that batch and every later batch, leaving their raws unconsumed.** Any
    earlier successfully applied/consumed batches stand. A first-batch failure
@@ -192,7 +214,69 @@ plan failure.
 active-fact-count trend (the bloat alarm).
 
 Both brain calls MUST be injectable (module-level indirection) so the whole
-apply pipeline is testable with fakes, no network.
+apply pipeline is testable with fakes, no network. **The distill brain call
+(below) MUST go through the same injection point** so its fallback matrix and the
+redaction/planted-secret tests run networkless.
+
+### 2.0 Distill — Tier-2 capture fidelity (ADR-0014, D15/D16/D17)
+
+Runs in step 1, per unconsumed raw, **only** when the raw has a resolvable
+`transcript_path` (§1) and `[curate].distill != "off"`. Capture stays a
+deterministic no-LLM skim (§4/§5); distill moves extraction to the curator, which
+has an LLM and no latency budget. It layers **above** §2 batching — byte budget
+and the D22 abort semantics are unchanged; distill only changes what body sits in
+a raw's `raw_captures` entry.
+
+Per raw:
+
+1. **Render** the transcript to compact text: prompts, *all* assistant texts,
+   `tool_use` one-liners, `tool_result` bodies truncated to `DISTILL_RESULT_TRUNC`
+   (2 000) chars each; **sidechains included** (subagent context is cheap here).
+2. **Redact per value, before rendering it (D17).** Each extracted value is
+   scrubbed *before* it is labelled/truncated into the render — `redact()` for
+   prompts / assistant text / `tool_result` bodies, `redact_command()` for the
+   Bash `tool_use` one-liners — mirroring §4's `scrub`/`scrub_command` split.
+   Whole-render `redact()` and the digest pass (step 6) are defense in depth only.
+   This is load-bearing: D13's env rule is line-anchored (§10), so redacting a
+   *rendered* line whose secret has been shifted off column 0 by a label/prefix
+   would leak it — the same shape §4 fixes for the skim.
+3. **Chunk** at `DISTILL_CHUNK_CHARS` (200 000), cap `MAX_DISTILL_CHUNKS` (5),
+   dropping middle chunks first and noting the drop in the digest header.
+4. `brain.text(DISTILL_SYSTEM, chunk)` per chunk; `> 1` chunk ⇒ a final merge
+   call over the per-chunk digests.
+5. **Validate the output (D16).** A digest lacking the required structure (its
+   headings) or reading as a refusal/question is a distill *failure* → fall back
+   to the skim (below). Validation is a shape check, not a quality judgment.
+6. **Bound the digest.** Hard-truncate to `DIGEST_MAX_CHARS` (6 000) with a
+   `[digest truncated]` marker — enforced in code, not trusted to the model — then
+   `redact()` the digest. The result **replaces the raw's body** in this pass's
+   `raw_captures` entry (same `raw` filename key, so `from_raw` provenance is
+   unchanged), and is written to the `raw/.digests/` cache (§1) keyed by the
+   `source_fingerprint`.
+
+**D16 — degrade, never abort.** Any distill failure — missing/unreadable
+transcript, brain error, timeout, or a step-5 validation failure — falls back to
+that raw's skim body and the pass continues. **Only** the plan step (step 3)
+aborts a batch (D9 / D22, unchanged). Log per-raw outcomes in the pass summary
+(`distilled: n, fallback: m`).
+
+**Trust boundary (D17).** Raw skim bodies are already redacted at capture, so the
+plan call only ever sends redacted text to the brain; the distill render must
+hold the same guarantee because neurobase is cross-agent (a Codex session's
+transcript may be distilled by a `claude`/`anthropic-api` brain — a different
+credential/endpoint than the CLI that produced it). Only redacted transcript text
+is ever sent; the transcript itself never lands in the store. Sending unredacted
+transcripts is out of scope here (would need its own ADR + SECURITY treatment).
+
+`DISTILL_SYSTEM` requirements (write your own text meeting these, §2.1-style):
+extract **decisions** (with the why), **discoveries/gotchas** (with the why),
+**state changes** (files/branches/PRs/deploys, with identifiers), and
+**unresolved** threads; markdown only, no invention, no session narration; it is
+*input to the plan step*, not a user-facing summary. Wrap the rendered transcript
+in an explicit data fence stating everything inside is a transcript to
+summarize — never instructions to follow — since transcript text (especially
+neurobase's own sessions, which embed the curator/distill prompts verbatim) will
+try to hijack the role (S-cf5).
 
 ### 2.1 Plan prompt — requirements (write your own text meeting these)
 
@@ -481,6 +565,10 @@ modification; idempotent; state "takes effect next session."
 | Node name | `<project>-status` | curator |
 | Brain call timeout / retries | 120s / 1 retry (timeout, 5xx, parse) | brain |
 | PLAN_PAYLOAD_MAX_BYTES | 262144 | curator (final serialized request, UTF-8 bytes) |
+| distill | `auto` | curator (§2.0; `auto` = distill when `transcript_path` resolves, else `off`) |
+| DISTILL_CHUNK_CHARS / MAX_DISTILL_CHUNKS | 200000 / 5 | curator (§2.0 distill) |
+| DIGEST_MAX_CHARS | 6000 | curator (§2.0 distill; enforced in code) |
+| DISTILL_RESULT_TRUNC | 2000 | curator (§2.0 tool_result truncation in render) |
 | Inject on SessionStart sources | `startup, clear` | recall (§7) |
 
 ## 9. Kickoff prompt (paste as the first Claude Code message in the new repo)
@@ -518,6 +606,8 @@ timeout_seconds = 120
 stale_hours = 12
 tombstone_grace_days = 14
 plan_payload_max_bytes = 262144
+distill = "auto"                 # auto | off  (§2.0; auto = distill when transcript_path resolves)
+distill_chunk_chars = 200000
 
 [inject]
 max_chars = 6000

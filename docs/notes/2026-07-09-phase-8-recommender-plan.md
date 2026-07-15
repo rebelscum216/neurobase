@@ -3,6 +3,25 @@
 _2026-07-09 — working plan for build-plan Phase 8. This is a plan, not a
 contract. The contract lands in `docs/neurobase-spec-appendix.md` before code._
 
+> **STATUS (2026-07-12): Phase 8 complete.** Workstreams A–D merged earlier
+> (#5, #6, #7, #9). E+F+G landed together as one branch/PR (ranker, proposal
+> store, `recommend` CLI, emitters — `main`@`1b00b44`) after a 5-round
+> Claude↔Codex relay (13 findings, all resolved; see
+> `docs/reviews/2026-07-10-phase-8-workstream-efg-recommender.md`). H
+> (metrics) landed separately (`main`@`be21e2f`) after a 3-round relay (3
+> findings, all resolved; see
+> `docs/reviews/2026-07-10-phase-8-workstream-h-metrics.md`) — notably
+> hardened `decided`/`precision`/`edited_rate` to require the ledger, not a
+> proposal file's own `status` field, to confirm a decision (ADR-0011 also
+> added, documenting the new `installed_hash` ledger field survival needs).
+> Every "Done when" bullet below was then verified **live** against this
+> repo's real dogfood store (`~/neurobase`), using a scripted fake `Brain`
+> for mining (no LLM backend was configured in that session's shell) feeding
+> genuinely-evidenced candidates from the real corpus — see the "Done when"
+> section for the checked-off results. No further Phase 8 work is planned;
+> `wip-vscode-extension-docs` (pulled out of the E/F/G branch, unrelated) is
+> the only loose thread left from that arc.
+
 ## Goal
 
 Turn Neurobase's cross-agent memory corpus into human-reviewed proposals for
@@ -286,14 +305,35 @@ Keep Phase 8 out of one mega-review:
 
 ## Done when
 
-- Seeded corpus yields at least 3 sensible proposals on this machine.
-- At least 1 proposal is worth accepting.
-- Accept produces a valid SKILL.md that Claude Code loads.
-- Edit records an `edited` ledger event and preserves the user's revised draft.
-- Reject suppresses similar candidates on the next run.
-- Ledger metrics render without crashing and show meaningful reviewed counts.
-- `recommendations_list` over MCP shows proposal summaries.
-- `make ci` / `uv run python scripts/ci.py` is green locally and in CI.
+All verified live on 2026-07-12 against the real dogfood store (`~/neurobase`),
+mining via a scripted fake `Brain` whose candidates were hand-authored from
+genuine corpus patterns (real curated facts + raw captures, real evidence
+refs) rather than a live LLM call:
+
+- [x] Seeded corpus yields at least 3 sensible proposals on this machine. —
+  3 candidates, each backed by real multi-session/multi-agent evidence,
+  cleared the ranker's threshold gate and were written as real proposals.
+- [x] At least 1 proposal is worth accepting.
+- [x] Accept produces a valid SKILL.md that Claude Code loads. — confirmed:
+  the installed skill appeared in that same session's own available-skills
+  list. (The demo skill was later deliberately removed — it duplicated the
+  repo's existing `xcode-review` skill almost entirely — but the accept path
+  itself, including the live load, was genuinely exercised and verified.)
+- [x] Edit records an `edited` ledger event and preserves the user's revised
+  draft. — one event; only the managed draft region changed, review prose
+  untouched.
+- [x] Reject suppresses similar candidates on the next run. — confirmed at
+  both layers: the rejected snippet reached the miner's prompt, and the
+  ranker's own independent near-dup re-check separately declined a fresh
+  near-duplicate candidate.
+- [x] Ledger metrics render without crashing and show meaningful reviewed
+  counts. — `status --recommender` on the real store: correct decided/
+  precision/edited_rate/reviewed_events/survival, no crash.
+- [x] `recommendations_list` over MCP shows proposal summaries. — called live
+  over the connected MCP server; returned all 3 proposals with correct
+  status/type/target.
+- [x] `make ci` / `uv run python scripts/ci.py` is green locally and in CI. —
+  green on `main` after both the E+F+G and H merges, all matrix jobs.
 
 ## Out of scope for Phase 8
 

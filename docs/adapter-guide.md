@@ -37,17 +37,37 @@ A function that turns "a session/turn just ended" into **zero or one**
   teardown. Write your scribe function as plain, testable code that can
   raise on bad input; put no exit-0/exception-swallowing logic inside it —
   that belongs solely at the hook boundary in `cli/`.
-- **Redact before writing** (`core/redact.py:redact`, spec §10/D13) — no
-  exceptions, no "redact later."
+- **Redact each captured value before you *render* it** (`core/redact.py:redact`,
+  spec §10/D13) — no exceptions, no "redact later." Redacting the finished body
+  instead is not equivalent and is not sufficient: D13's env rules are
+  line-anchored, so a `"- "` bullet prefix shifts the text off column 0 and
+  shields the secret. Pass a `Redactor` into your body renderer, the way both
+  shipped scribes do, and run the table over the whole document afterwards only
+  as defense in depth.
+- **Captured content is untrusted markdown.** Put every captured value through
+  `scribe_common.block()` (or `bullet()`, which wraps it) so a heading inside a
+  prompt or an assistant message can't forge one of your body's own `##`
+  sections — the curator reads that structure. Indenting is not enough on its
+  own; CommonMark still parses a heading indented up to three spaces. Note
+  "every value" means *every* value: the section bodies, and anything the hook
+  payload hands you (Claude's `reason` is captured input too). The one that bit
+  us twice was assuming a value was structurally inert because it "looked like"
+  a fixed string.
 - **Opt-in.** Write only if the resolved project's memory tree already
   exists (i.e., the project ran `neurobase enable`) — a scribe must never
   create a store as a side effect of a hook firing.
-- **Empty capture writes nothing.** No prompts and no summary ⇒ skip the
-  write entirely; don't write an empty raw file.
+- **Empty capture writes nothing.** No prompts, summary, highlights, activity,
+  or reports ⇒ skip the write entirely; don't write an empty raw file.
 - **Bounds.** Truncate to the shared defaults (spec §8: last 25 prompts,
-  600 chars each, 4000-char summary) unless the agent's own transcript
+  1200 chars each, 4000-char summary, 500 chars per assistant highlight and
+  6000 chars total) unless the agent's own transcript
   shape genuinely requires different numbers — if so, that's a config
-  addition, not a silent per-adapter divergence.
+  addition, not a silent per-adapter divergence. Don't reimplement the
+  assistant-side bounds: `adapters/scribe_common.py` owns
+  `bounded_highlights()` (newest-first eviction, chronological output) and
+  `final_summary()` (longest of the last 3 — *never* last-non-empty-wins, which
+  captures a throwaway sign-off as the whole session record). Import and
+  re-export them, the way both shipped scribes do.
 
 What varies per agent is entirely upstream of those rules: how you get from
 "a hook fired" to "a list of (prompt, summary, metadata) tuples." Claude

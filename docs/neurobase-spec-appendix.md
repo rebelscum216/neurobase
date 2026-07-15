@@ -123,24 +123,33 @@ _<N> active curated facts._
 
 1. `ensure_tree`; load unconsumed raw. **None ⇒ no-op** (return
    `{"status":"noop", …}`) — idempotence.
-2. Load active curated facts. Call brain `plan_json` with the plan prompt (§2.1),
-   user payload = `{"curated_facts":[{slug,body,pinned?}…], "raw_captures":[{raw:<filename>, body}…]}`
-   — `pinned: true` is set for user-directed facts (see **Pinned facts** below).
-3. **If the response is unparseable ⇒ ABORT the pass, leave every raw
-   unconsumed, return `{"status":"error", …}`.** A transient bad LLM response
-   must never silently drop observations. (Distinguish parse-failure from a
-   valid-but-empty plan — an empty plan IS consumed.) Tolerate ```json fences.
-4. Apply upserts: skip empty slug/body; `supersedes` filtered of self;
+2. Load active curated facts. Build the oldest-first next batch whose **final
+   combined plan request** (system prompt + framing + serialized user payload)
+   is at most `PLAN_PAYLOAD_MAX_BYTES` in UTF-8 bytes. User payload remains
+   `{"curated_facts":[{slug,body,pinned?}…], "raw_captures":[{raw:<filename>, body}…]}`
+   — `pinned: true` is set for user-directed facts. A single raw too large to
+   fit is truncated with `[truncated for plan payload]`; never skip it silently.
+3. Call brain `plan_json` for that batch. **If the response is unparseable ⇒
+   ABORT that batch and every later batch, leaving their raws unconsumed.** Any
+   earlier successfully applied/consumed batches stand. A first-batch failure
+   preserves v0.1 behavior: every raw remains unconsumed. Distinguish a parse
+   failure from a valid-but-empty plan (an empty plan IS consumed). Tolerate
+   ```json fences.
+4. Apply this batch's upserts: skip empty slug/body; `supersedes` filtered of self;
    `provenance = ["raw/"+name for name in from_raw]`; bad slug ⇒ skip + warn.
    For each superseded slug: tombstone it **unless that slug was itself
-   re-upserted this pass, or is pinned**.
-5. Apply explicit tombstones (skip any slug upserted this pass **or pinned**).
-6. Mark all consumed raws `consumed: true`.
-7. `prune_tombstones(14)`.
+   re-upserted this batch, or is pinned**.
+5. Apply explicit tombstones (skip any slug upserted this batch **or pinned**).
+6. Mark this batch's raws `consumed: true`; reload active facts, then repeat
+   steps 2–6 for remaining raws so the next plan sees all prior batch changes.
+7. After the last batch, `prune_tombstones(14)`. This runs whenever **at least
+   one batch committed** — including when a *later* batch then failed.
 8. Regenerate node: brain `text` with node prompt (§2.2) over the resulting
    active facts; write as node `<project>-status` (default node name = project
-   slug + `-status`). Rebuild `index.md`. Run linkify (§6).
-9. Return summary: `{status, raw, upserts, superseded, tombstones,
+   slug + `-status`). Rebuild `index.md`. Run linkify (§6). Like step 7, this
+   runs whenever at least one batch committed, **even if the pass is about to
+   return an error** — see the derived-state rule below.
+9. Return summary: `{status, raw, batches, upserts, superseded, tombstones,
    pruned_tombstones, active_facts}`.
 
 **Pinned facts (user-directed, decision D-b):** a curated fact whose
@@ -154,11 +163,29 @@ user "remember this" cannot silently vanish on a later pass. A pinned fact
 leaves the store only when the user removes it. (A linkify lineage footer, §6,
 may still be appended — that is not a content edit.)
 
-**Partial-failure contract:** only the *plan* step aborts the pass (step 3). If
-node synthesis or index rebuild fails *after* raws were consumed (steps 6→8),
-keep the applied state, log, and return `{"status":"partial",…}` — the node is
-stale but self-heals on any later pass, because nodes are a pure function of
-`curated/`. `neurobase curate --resynth` regenerates node + index without new raw.
+**Partial-failure contract:** only the *plan* step aborts the current and later
+batches (step 3). A first-batch failure leaves every raw unconsumed and changes
+nothing on disk — **state-equivalent** to the v0.1 abort (the returned summary
+itself is not identical: it carries the new `batches` key, like every other
+path). After one or more successful batches,
+their state remains applied and their raws consumed while the failed/later
+batches remain retryable (D22). If node synthesis or index rebuild fails *after*
+raws were consumed (steps 6→8), keep the applied state, log, and return
+`{"status":"partial",…}` — the node is stale but self-heals on any later pass,
+because nodes are a pure function of `curated/`. `neurobase curate --resynth`
+regenerates node + index without new raw.
+
+**Derived state must never lag committed facts (D22).** A pass that committed at
+least one batch MUST still run steps 7–8 before returning, *including when a
+later batch failed and the pass returns `{"status":"error",…}`*. The node is
+what recall injects; skipping synthesis on the error path would hide every fact
+the successful batches wrote. "A later pass will fix it" is **false** here: the
+retry re-plans the same unconsumed raws, so a raw that fails permanently (one
+that reliably breaks the plan step) would keep the committed facts out of recall
+forever. Status stays `error` — the pass *did* fail and its raws are still
+unconsumed — but the store is left self-consistent. If synthesis itself also
+fails on this path, report it alongside (`synth_error`) rather than masking the
+plan failure.
 
 **Pass log:** append each pass's summary dict as one line to
 `<memory>/.curator-log.jsonl` — this is what `status` reads to show the
@@ -237,12 +264,22 @@ no preamble.
     `tool_result` block**. Drop noise: text starting with `<command-name>`,
     `<local-command-`, `<system-reminder>`, `Caveat:`, `[Request interrupted`.
     Collect `cwd` / `gitBranch` / `sessionId` from these events as metadata.
-  - `type=="assistant"`: joined visible `text` blocks; **last non-empty wins**
-    as the final summary (thinking/tool blocks excluded).
-- Bounds (defaults): keep last **25** prompts, each truncated **600** chars;
-  summary truncated **4000** chars.
+  - `type=="assistant"`: collect joined visible `text` blocks (thinking blocks
+    excluded). Collect unique Edit/Write/MultiEdit/NotebookEdit
+    `input.file_path` values and the first line of Bash `input.command`.
+    Correlate `Agent` or legacy `Task` tool-use ids with later tool results and
+    retain their text as subagent reports.
+  - A user event with `isCompactSummary: true` is an assistant highlight, not a
+    typed prompt.
+- Final summary = longest of the last **3** non-empty assistant texts. Keep
+  assistant highlights newest-first within a **6000**-char total, each message
+  truncated to **500** chars, then render in chronological order.
+- Bounds (defaults): keep last **25** prompts, each truncated **1200** chars;
+  summary **4000** chars; last **5** subagent reports at **1500** chars each;
+  activity at **30** files and **20** commands of **120** chars.
 - Redaction pass (D13) over the assembled body BEFORE writing.
-- Empty capture (no prompts AND no summary) ⇒ write nothing.
+- Empty capture (no prompts, summary, highlights, subagent reports, OR activity)
+  ⇒ write nothing.
 - Body format:
 ```
 ## Session
@@ -252,10 +289,49 @@ no preamble.
 ## Prompts
 - <prompt>…
 
+## Activity
+### Files touched
+- <path>…
+### Commands run
+- <command>…
+
+## Subagent reports
+- <report>…
+
+## Assistant highlights
+- <message>…
+
 ## Final assistant summary
 
 <summary>
 ```
+Sections with nothing to say are omitted entirely.
+
+**Captured content is untrusted markdown.** A prompt, an assistant message, an
+IDE context block, or a subagent report can contain its own headings, and the
+curator reads this document's structure. So every captured value MUST be
+rendered through both of these before it lands in the body:
+
+1. **Escape both CommonMark heading syntaxes.** ATX — a leading `#` run on any
+   line (`## foo` → `\## foo`). *And* Setext — a line of only `=` or `-`, which
+   underlines the line above it and promotes **that** line to a heading
+   retroactively (`\===`, `\---`). Escaping only ATX leaves the hole open, and
+   Setext is the easier one to miss because nothing about the promoted line
+   looks like a heading. Escaping the underline also defuses the same line read
+   as a thematic break. Indenting is *not* sufficient for either: CommonMark
+   still parses a heading indented up to three spaces.
+2. **Indent continuation lines by two spaces** for bullet-valued sections
+   (`"- " + escaped.replace("\n", "\n  ")`), so a multi-line value stays inside
+   its own list item.
+
+This applies to **every** value that comes from outside the scribe — not only
+the bullets. That includes the section *bodies* (§5's `## Files in focus (IDE)`
+and the `## Final assistant summary`) and the hook-supplied `reason`, which is
+captured input like any other and MUST NOT be interpolated raw into the
+`## Session` block. The IDE block is the sharpest case: it precedes `## Prompts`,
+so a heading forged there shadows every section after it. The bounds make
+multi-line content the common case, not an edge one (prompts 1,200 chars;
+subagent reports 1,500).
 
 ## 5. Codex scribe contract
 
@@ -275,7 +351,8 @@ Codex has **no SessionEnd**; its hooks fire per turn. Contract:
     context (open tabs / active file) once as session metadata, ≤**800** chars,
     rendered as a `## Files in focus (IDE)` section. **Skip consecutive
     duplicate prompts** (a `thread_rolled_back` re-emits the previous one).
-  - `event_msg` with `payload.type=="agent_message"`: last non-empty = summary.
+  - `event_msg` with `payload.type=="agent_message"`: collect all non-empty
+    messages as assistant highlights; longest of the last 3 = summary.
 - Same bounds/redaction/empty-skip/exit-0/opt-in rules as §4. Body adds
   `- agent: codex` under `## Session`.
 - **Per-turn dedupe (the key trick):** pass `captured_at = session start
@@ -392,14 +469,18 @@ modification; idempotent; state "takes effect next session."
 | Constant | Default | Where |
 |---|---|---|
 | MAX_PROMPTS | 25 | scribes |
-| MAX_PROMPT_CHARS | 600 | scribes |
+| MAX_PROMPT_CHARS | 1200 | scribes |
 | MAX_SUMMARY_CHARS | 4000 | scribes |
+| MAX_ASSISTANT_MSG_CHARS / TOTAL | 500 / 6000 | scribes |
+| MAX_SUBAGENTS / MAX_SUBAGENT_CHARS | 5 / 1500 | claude scribe |
+| Activity files / commands / command chars | 30 / 20 / 120 | claude scribe |
 | MAX_IDE_CONTEXT_CHARS | 800 | codex scribe |
 | MAX_CONTEXT_CHARS (inject) | 6000 | recall |
 | TOMBSTONE_GRACE_DAYS | 14 | curator |
 | Staleness for `--if-stale` | 12h | D8 |
 | Node name | `<project>-status` | curator |
 | Brain call timeout / retries | 120s / 1 retry (timeout, 5xx, parse) | brain |
+| PLAN_PAYLOAD_MAX_BYTES | 262144 | curator (final serialized request, UTF-8 bytes) |
 | Inject on SessionStart sources | `startup, clear` | recall (§7) |
 
 ## 9. Kickoff prompt (paste as the first Claude Code message in the new repo)
@@ -436,6 +517,7 @@ timeout_seconds = 120
 [curate]
 stale_hours = 12
 tombstone_grace_days = 14
+plan_payload_max_bytes = 262144
 
 [inject]
 max_chars = 6000
@@ -489,11 +571,188 @@ first modification of any agent config file in a given init run.
 | `\bxox[baprs]-[A-Za-z0-9-]{10,}\b` | `[REDACTED:slack-token]` |
 | `\bghp_[A-Za-z0-9]{36}\b` and `\bgithub_pat_[A-Za-z0-9_]{20,}\b` | `[REDACTED:github-token]` |
 | `Bearer\s+[A-Za-z0-9._~+/=-]{20,}` | `Bearer [REDACTED:bearer]` |
-| (multiline, case-insensitive) `^\s*([A-Z0-9_]*(?:KEY\|TOKEN\|SECRET\|PASSWORD\|PASSWD\|CREDENTIAL)[A-Z0-9_]*)\s*=\s*\S+` | keep the name, value → `[REDACTED:env-secret]` |
+| **shell segment** (multiline, case-insensitive) `(?:^\|(?<=[;&\|(` + "`" + `]))([ \t]*(?:export\|env\|declare\|typeset\|local)\b[^\n;&\|` + "`" + `]*)` | within the matched segment, **every** `(<SECRET_NAME>)[ \t]*=[ \t]*\S+` (case-insensitive) → keep the name, value → `[REDACTED:env-secret]` |
+| (multiline, case-insensitive) `^([ \t]*)(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the **indent** and the name, value → `[REDACTED:env-secret]` |
+| (case-**sensitive**) `(?<![A-Za-z0-9_])(<SECRET_NAME>)[ \t]*=[ \t]*\S+` | keep the name, value → `[REDACTED:env-secret]` |
 
-Scope note: the env rule intentionally matches only secret-ish variable names —
-a pasted `PATH=/usr/bin` survives. The `[REDACTED:<type>]` vocabulary above is
-closed; `extra_patterns` additions use `[REDACTED:custom]`.
+where `<SECRET_NAME>` is `[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*`.
+
+**`redact_command(text)`** — a stricter pass for a value **known to be a shell
+command** (§4's tool-activity digest captured `input.command` verbatim). It
+applies the table above, then scrubs assignments **structurally, by walking the
+command's tokens** — no keyword required, since the channel already proves it is
+shell. So `api_token=… ./run.sh` and `pytest --api-key=…` both go.
+
+A command is **not** free of prose or code, and assuming otherwise is a bug:
+`python -c "…"`, `sqlite3 db "…"`, and `echo "…"` carry source, SQL, and prose as
+**quoted arguments**. Those are data the command consumes and MUST survive
+verbatim — scanning them for `key=` substrings destroys the captured activity
+without redacting any secret. Hence the structural rule below. Scribes MUST use
+`redact_command` for the command digest, and MUST NOT use it for anything else.
+
+Scope notes:
+
+- The env rules intentionally match only secret-ish variable names — a pasted
+  `PATH=/usr/bin` survives. The `[REDACTED:<type>]` vocabulary above is closed;
+  `extra_patterns` additions use `[REDACTED:custom]`.
+- **An assignment's VALUE is a whole shell word, never `\S+`.** It may be
+  single-, double-, or ANSI-C-quoted, and a quoted value contains spaces —
+  which is exactly what passwords and tokens look like. Matching `\S+` turns
+  `api_token="hunter two"` into `api_token=[REDACTED:env-secret] two"`, leaking
+  half the secret in the clear. The **name** may be quoted too (`"api_token"=v`
+  is valid shell for the same assignment) and must still match.
+- **Do NOT model shell command position.** The obvious rule — "an assignment only
+  counts before the command name" — requires the whole POSIX command grammar:
+  pipelines and lists, transparent wrappers (`sudo`, `nice`, `timeout`) and their
+  long-option operands, redirections (`2>&1`), `env`'s own grammar, command
+  substitutions, `\`-newline continuations. Six successive implementations of it
+  each shipped a **secret leak**, because an approximation of that grammar fails
+  *open*. The rule is therefore position-free and fail-closed:
+
+  > In **unquoted** shell text, redact the value of every secret-named assignment,
+  > wherever it appears. Never touch a **quoted** argument — except to recurse
+  > into command substitutions, which the shell executes. **Heredoc bodies** are
+  > data.
+
+  This needs only what a lexer gets right — quoting, substitution, heredocs — and
+  none of the command grammar.
+- **The accepted cost:** a credential-*named* argument to some other command
+  (`env PATH=/bin pytest api_key=example`, `awk -v api_key=x`) is redacted even
+  though a perfect parser would leave it alone. This is deliberate. It is
+  fail-closed, the command's *shape* survives (`api_key=[REDACTED:env-secret]`),
+  and only a small minority of real captured commands contain a secret-named
+  `name=` token at all — so precise position tracking buys little fidelity while
+  costing correctness that could not be delivered. **The justification is the
+  fail-open history (seven revisions, each leaking), not a percentage.**
+  `scripts/audit_command_redaction.py` re-runs the local check that no captured
+  command is mangled; it is anecdotal validation against one developer's corpus,
+  and it cannot establish that any rate generalizes.
+- **A quoted argument is data** — `python -c "items.sort(key=…)"`,
+  `sqlite3 db "DECLARE api_key=…"`, `echo "…"` carry code, SQL, and prose, and
+  MUST survive verbatim. But a **command substitution is executed even inside
+  double quotes**: `echo "$(api_token=… ./run)"` and its backtick form MUST be
+  scrubbed recursively, or a secret hides one quote deep.
+- **A heredoc body is data, not shell.** Everything between `<<EOF` and its
+  terminator is a file, script, or SQL blob the command consumes; its lines are
+  not shell words, so `key=lambda …` there is not an assignment. All heredocs a
+  line declares are consumed **in order**, and the terminator must match
+  **exactly** (`<<-` strips leading TABS only, never spaces). A `<<` inside a
+  *quoted* argument is a bit-shift or prose, never a heredoc — treating it as one
+  hides the following command from redaction entirely. The rest of the table
+  still applies to a heredoc body — `cat > .env <<EOF` and `cat > deploy.sh <<EOF`
+  are exactly where real secrets live, so a body gets the same **gated** assignment
+  pass as prose (keyword-in-command-position / line-anchored / case-sensitive),
+  which catches `export API_TOKEN=…` and `env api_token=…` without treating body
+  source as shell. What a body does *not* get is the position-free command scrub.
+- **An assignment's VALUE can contain spaces without being quoted** — inside a
+  substitution or expansion (`api_token=$(printf …)`). Value consumption MUST
+  understand nested `$( )`, `${ }`, and backticks, or it stops at the first space
+  and leaves the rest of the secret in the clear.
+- **Assignment-shaped syntax that is not an assignment word still assigns:**
+  `${NAME:=value}` and `${NAME=value}` assign when NAME is unset, and
+  `$((NAME=value))` assigns. All are redacted. `${NAME:-value}` only substitutes
+  and is left alone. An **escaped** backtick (`` \` ``) opens a *nested* legacy
+  substitution and must be recursed into, not treated as a plain escape.
+- **An assignment NAME may be assembled from quoted and unquoted fragments** —
+  the shell concatenates them before the `=`, so `api_token=`, `"api_token"=`,
+  `api_"token"=` and `api_$'token'=` are all the same assignment and all MUST be
+  caught. The rule that separates these from a wholly quoted *argument*
+  (`'api_token=v'`, which MUST survive verbatim) is where the `=` lies: an
+  assignment's `=` is at the **top level**, outside every quote.
+  The shell also *expands* those fragments, so comparing their **raw text** to the
+  secret-name pattern is not enough: ANSI-C escapes MUST be decoded
+  (`api_$'to\x6ben'` is `api_token`), and a fragment containing a substitution or
+  variable (`api_"to$(printf ken)"`) makes the name **unknowable** — that MUST
+  fail **closed** and redact the value. ANSI-C escapes that produce NUL MUST
+  follow the shell's effective name (`$'api_token\0'`, `$'api_token\x0'`, and
+  `$'api_token\c@'` reach `export` as `api_token`) or fail closed; a decoded NUL
+  must not turn a secret name into an apparent non-secret. Non-NUL control
+  escapes do not fail closed solely because they are controls: `$'api_token\cA'`
+  is not the secret name `api_token`.
+- **A quoted argument is ALWAYS data — there is no executor exception.**
+  `eval '…'` and `sh -c "…"` do execute their string, and two attempts to detect
+  that both **leaked and mangled**: keying on any `sh`/`bash` token destroyed
+  `echo sh -c '…'` (which executes nothing), and keying on command position still
+  missed `env sh -c '…'` and `command sh -c '…'` while over-arming `sh -- -c '…'`
+  (after `--`, `-c` is the command *name*). Recognizing an executor is the POSIX
+  command grammar again, and the claim that such a gate "can only under-arm" was
+  false. **Declared residual:** a secret inside a string executed by `eval`/`sh -c`
+  is not redacted in the command channel. It is bounded and tested
+  (`test_executed_string_residual_is_known_and_bounded`); the prose rules still
+  see the text, so `.env`-shaped and uppercase inline forms in it are still caught.
+- **An assignment VALUE is a RUN of adjacent fragments**, quoted or bare — the
+  shell concatenates them into one word (`api_token="a b"tail` is a single value).
+  Matching one balanced fragment and stopping both leaks the rest of the secret
+  and leaves the marker abutting text, which the next pass then swallows.
+- **Redaction MUST be idempotent.** It is applied more than once to the same text
+  — each captured value, then the whole assembled document as defense in depth —
+  so a second pass MUST be a no-op. `[REDACTED:…]` contains no word-break
+  character, so a value scanner that does not recognize the marker will read
+  `[REDACTED:env-secret]export …` as one bare token and eat the following word.
+  An already-redacted value matches only when the marker is the **complete** value
+  (a marker *prefix* is not: `api_token=[REDACTED:env-secret]SECRET` must redact
+  the suffix, or a marker pasted into captured text becomes an escape hatch for
+  the secret beside it). This invariant includes configured `extra_patterns`:
+  existing markers are opaque, the built-in table and composed custom patterns
+  MUST reach one combined fixed point in one call, and zero-width matches are
+  ignored because they contain no captured text to redact.
+- **Redaction MUST NOT delete captured input.** The scanners are heuristics and
+  will sometimes disagree with a real shell; when they do, the failure must be a
+  mis-scan, never a lost character. Reconstruct spans loss-proof (re-emit a
+  closing delimiter only when it was actually there); treat `\r` as a word
+  boundary so CRLF survives; and never let a prose-oriented regex whose value is
+  a bare `\S+` run over a command — it does not know shell syntax and will eat
+  structure (`$((NAME=1))` lost both parens to exactly that).
+- **Malformed quoting fails CLOSED.** An unterminated quote consumes to end of
+  line, so a half-quoted secret is redacted whole rather than leaking its tail. A
+  command that failed to parse is still a captured command and can still carry a
+  live credential; syntactic invalidity does not make it safe.
+- **Credential options are an ALLOW-LIST** (`--api-key`, `--token`,
+  `--client-secret`, `--password`, …), redacted in any position because the name
+  announces the value. It is deliberately *not* a `*key*`/`*secret*` pattern:
+  those words far more often describe selection or policy — `--sort-key=name`,
+  `--key=id`, `--password-policy=strict` — and mangling those destroys the
+  digest for no security gain. **Residual:** a genuinely secret value passed to
+  an unlisted option name survives. Extend the vocabulary rather than widening it
+  to a pattern.
+- Assignments need three rules, because **the signal that "this is a secret being
+  set" is contextual**. Neither casing nor a keyword alone is a sufficient lever:
+  - **Shell segment.** A keyword (`export`/`env`/`declare`/`typeset`/`local`) in
+    **command position** — opening a line, or after a shell separator
+    (`;` `&&` `||` `|` `(` `` ` ``) — through the end of that segment. *Position*
+    is what establishes shell syntax; a bare keyword does not, or prose ("we
+    export api_token=x in the docs") and SQL ("SQL DECLARE api_key=v") would be
+    mangled as if they were commands, destroying exactly the technical content
+    §4's richer skim exists to keep. Inside a matched segment the rule is
+    **case-insensitive** and applies to **every** assignment, not just the first
+    one after the keyword: real commands carry option operands and several
+    assignments (`env -u OLD PATH=/bin api_token=… pytest`), and scrubbing only
+    the first token leaves the rest exposed. `setenv` is deliberately *not* a
+    keyword here — its syntax is `setenv NAME value`, with no `=`.
+  - **Line-anchored** (`.env`-style lines), case-insensitive. It MUST capture
+    and re-emit the leading indent — a scribe body's structural indentation (§4)
+    has to survive redaction — and use `[ \t]` (not `\s`) so it can never
+    swallow a newline.
+  - **Bare inline** (`API_TOKEN=… cmd`, `foo && API_TOKEN=…`), where nothing
+    disambiguates and the *name's shape* is the only signal. This one is
+    **case-sensitive**: lowercase would make ordinary keyword arguments
+    (`sort(key=…)`, `groupby(key=col, secret=False)`) collateral.
+- **Known residual:** a lowercase secret-named assignment embedded *mid-sentence
+  in prose* — "…and then I ran export api_token=abc123" — is **not** redacted.
+  Catching it means treating any keyword anywhere as shell, which is the
+  over-broad rule this design deliberately rejects. D13 is a best-effort regex
+  table (SECURITY.md says so); silently gutting captured prose was judged the
+  worse failure. Commands themselves are fully covered via `redact_command`.
+- **Scope: D13 is a whole-raw guarantee, not body-only.** Scribes MUST also
+  scrub the informational frontmatter they write (`cwd`, `branch`). They MUST
+  NOT scrub `session_id`: it keys the raw filename and the §5 per-turn overwrite,
+  so rewriting it would break dedupe — and it is agent-generated, never
+  user-authored text.
+- **Redact the captured value, not the rendered document.** A scribe MUST apply
+  the table to each captured value *before* rendering it into the body: a
+  structural prefix like `"- "` shifts text off column 0 and shields it from
+  every line-anchored rule above. Running the table over the finished document
+  as well is fine as defense in depth, but it is not sufficient on its own.
 
 ### Seeder mapping (Claude auto-memory → curated facts)
 An auto-memory dir is `MEMORY.md` (an index — skip it) plus topic `*.md` files
@@ -513,16 +772,19 @@ Phase-1/4/5 fixture tests directly from these.
 ```jsonl
 {"type":"user","isSidechain":false,"cwd":"/Users/you/proj","gitBranch":"main","sessionId":"3fc4…","uuid":"…","parentUuid":null,"timestamp":"2026-07-07T14:00:00.000Z","message":{"role":"user","content":"Fix the login bug"}}
 {"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01…","content":[{"type":"text","text":"…"}]}]}}
-{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Done — the null check was missing in…"}]}}
+{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Done — the null check was missing in…"},{"type":"tool_use","id":"toolu_agent…","name":"Agent","input":{"description":"Research","prompt":"Investigate…","subagent_type":"Explore"}},{"type":"tool_use","id":"toolu_edit…","name":"Edit","input":{"file_path":"src/auth.py","old_string":"…","new_string":"…"}},{"type":"tool_use","id":"toolu_bash…","name":"Bash","input":{"command":"uv run pytest"}}]}}
+{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent…","content":[{"type":"text","text":"The agent found…"}]}]}}
+{"type":"user","isCompactSummary":true,"isSidechain":false,"message":{"role":"user","content":"Compacted durable context…"}}
 {"type":"user","isSidechain":true,"message":{"role":"user","content":"(subagent turn)"}}
 {"type":"user","isSidechain":false,"message":{"role":"user","content":"<command-name>/model</command-name>…"}}
 ```
 
 Parser behavior per §4: line 1 → prompt (note `content` may be a plain string
 OR a list of `{type:"text",text}` blocks — join the text blocks); line 2 →
-skipped (tool_result); line 3 → candidate final summary (join text blocks;
-last non-empty wins); line 4 → skipped (sidechain); line 5 → skipped (noise
-prefix). Other `type` values (e.g. `attachment`) exist and are ignored.
+skipped as a prompt (tool results are separately correlated to Agent/Task
+calls); line 3 → assistant highlight, final-summary candidate, and activity;
+line 4 → subagent report; line 5 → highlight, not prompt; sidechain and noise
+events are skipped. Other `type` values (e.g. `attachment`) are ignored.
 Metadata (`cwd`, `gitBranch`, `sessionId`) rides on the user events.
 
 ### 11.2 Codex rollout JSONL — structure VERIFIED live (values sanitized)

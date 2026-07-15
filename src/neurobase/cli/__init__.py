@@ -219,10 +219,12 @@ def curate(
         dry_run=dry_run,
         resynth=resynth,
         tombstone_grace_days=config.curate.tombstone_grace_days,
+        plan_payload_max_bytes=config.curate.plan_payload_max_bytes,
     )
 
     if dry_run:
-        typer.echo(json.dumps(summary.get("plan", {}), indent=2, ensure_ascii=False))
+        preview = summary.get("plans", summary.get("plan", {}))
+        typer.echo(json.dumps(preview, indent=2, ensure_ascii=False))
         return
     typer.echo(json.dumps({k: v for k, v in summary.items() if k != "plan"}, ensure_ascii=False))
     if summary.get("status") == "error":

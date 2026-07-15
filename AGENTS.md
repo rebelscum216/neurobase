@@ -1,5 +1,8 @@
 # AGENTS.md — operating guide for Neurobase
 
+> **Start here:** read [PICKUP.md](PICKUP.md) first — the live "where we left
+> off" note. This file is the stable map.
+
 > This is the entry point for any coding agent (or human) working in this repo.
 > Read it first. It is intentionally short and high-signal; it points to the
 > authoritative documents rather than duplicating them.

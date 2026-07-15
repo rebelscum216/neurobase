@@ -117,6 +117,7 @@ Module map — where each responsibility lives and the contract it implements:
 | `curator/engine.py` | The fold: plan → apply → consume → prune → synthesize | §2 |
 | `adapters/claude/`, `adapters/codex/` | Per-agent scribe (capture), recall (inject), installer | §3–§5, §7 |
 | `adapters/recall_common.py` | Shared injection logic both adapters re-export | §3 |
+| `adapters/scribe_common.py` | Shared capture bounds both scribes re-export | §4–§5, §8 |
 | `mcp/server.py` | Pull-based recall + save over Model Context Protocol | §13 |
 | `recommender/` | seed → corpus → mine → rank → propose → emit → measure | §12 |
 | `cli/` | Typer command surface + the hook fast-path + orchestration | §4–§7, §12, §13 |
@@ -520,7 +521,7 @@ This subsystem is four small, independent utility modules under `src/neurobase/c
 
 ### `core/redact.py`
 
-Purpose: apply the closed, contractual redaction table from spec §10 (decision D13) to any text before it touches `raw/`. Runs at scribe level — both `adapters/claude/scribe.py` and `adapters/codex/scribe.py` call it on the assembled session body immediately before writing the raw capture, and the MCP `memory_remember` handler (`mcp/server.py`) calls it on user-supplied text before persisting. It is also reused defensively in the recommender (`recommender/seed.py`, `recommender/proposals.py`, `recommender/emitters.py`) wherever previously-unredacted text (seeded auto-memory, proposal bodies, emitted skill/rule drafts) might still carry a secret.
+Purpose: apply the closed, contractual redaction table from spec §10 (decision D13) to any text before it touches `raw/`. Runs at scribe level — both `adapters/claude/scribe.py` and `adapters/codex/scribe.py` call it **on every captured value before that value is rendered into the body**, and then once more over the assembled document as defense in depth. That ordering is a spec §10 MUST, not a stylistic choice: the table's env rules are line-anchored, so rendering first would hide a secret behind a `"- "` bullet prefix — `bullet()` then `redact()` demonstrably left `- API_TOKEN=<secret> uv run pytest` in `raw/` unredacted (ADR-0013). The MCP `memory_remember` handler (`mcp/server.py`) calls it on user-supplied text before persisting. It is also reused defensively in the recommender (`recommender/seed.py`, `recommender/proposals.py`, `recommender/emitters.py`) wherever previously-unredacted text (seeded auto-memory, proposal bodies, emitted skill/rule drafts) might still carry a secret.
 
 Module-level pattern table (order matters — see inline comment: private keys span multiple lines and must be consumed before any single-line rule could partially match inside one):
 
@@ -530,14 +531,42 @@ Module-level pattern table (order matters — see inline comment: private keys s
 - `_SLACK_TOKEN` → `\bxox[baprs]-[A-Za-z0-9-]{10,}\b` → `[REDACTED:slack-token]`
 - `_GITHUB_TOKEN` → `\bghp_[A-Za-z0-9]{36}\b` or `\bgithub_pat_[A-Za-z0-9_]{20,}\b` → `[REDACTED:github-token]`
 - `_BEARER` → `Bearer\s+[A-Za-z0-9._~+/=-]{20,}` → `Bearer [REDACTED:bearer]` (keeps the `Bearer` prefix, redacts only the token)
-- `_ENV_SECRET` → multiline, case-insensitive `^\s*([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)\s*=\s*\S+` → keeps the captured variable name, replaces only the value with `[REDACTED:env-secret]` via `\1=[REDACTED:env-secret]`
+- `_SECRET_NAME` → `[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*` — the shared secret-ish variable-name fragment the env rules below build on.
+- `_VALUE` → `(?:"(?:\\.|[^"])*"|'[^']*'|\$'(?:\\.|[^'])*'|\S+)` — a complete shell value: single-, double-, or ANSI-C-quoted, or a bare run. **Not `\S+`**, which was the original and is a leak: `api_token="hunter two"` matched only `"hunter` and left ` two"` sitting in the store in the clear. Quoted values with spaces are precisely what passwords and tokens look like. The assignment rules also accept a quoted *name* (`"api_token"=v` is valid shell for the same assignment).
+- `_ENV_SECRET` → multiline, case-insensitive `^([ \t]*)(<SECRET_NAME>)[ \t]*=[ \t]*\S+` → keeps the captured variable name **and its leading indent**, replacing only the value (`\1\2=[REDACTED:env-secret]`). The indent capture matters: a scribe body indents a bullet's continuation lines, and the previous `^\s*` form consumed that indent and dropped it — redaction was reflowing an indented line back to column 0 and undoing the §4 structural rule. `[ \t]` rather than `\s` so the rule can never swallow a newline.
+- `_SHELL_SEGMENT` → multiline, case-insensitive `(?:^|(?<=[;&|(`+"`"+`]))([ \t]*(?:export|env|declare|typeset|local)\b[^\n;&|`+"`"+`]*)` → a shell keyword in **command position** (opening a line, or after a separator), matched through the end of that segment. Every secret-named assignment *inside the matched segment* is then redacted case-insensitively via `_scrub_assignments`. Two things are load-bearing here, and getting either wrong is a real bug we shipped and had to fix: **(a) position, not the keyword, is what proves shell syntax** — a rule keyed on the bare keyword redacts prose (`we export api_token=example in docs`) and SQL (`SQL DECLARE api_key=value`), gutting the technical content the richer skim exists to preserve; **(b) the whole segment, not the first assignment after the keyword** — real commands carry option operands and multiple assignments (`env -u OLD PATH=/bin api_token=… pytest`), and scrubbing only the first token silently leaves the rest exposed. `setenv` is deliberately absent from the keyword list: its syntax is `setenv NAME value`, with no `=`, so it could never match an assignment rule anyway.
+- `_INLINE_ENV_SECRET` → `(?<![A-Za-z0-9_])(<SECRET_NAME>)[ \t]*=[ \t]*\S+` → a **bare** inline assignment with nothing to disambiguate it: `API_TOKEN=… cmd`, `make && API_TOKEN=…`. Here the *name's shape* is the only signal that this is a secret rather than a keyword argument, so this rule is deliberately **case-sensitive**: a case-insensitive version would swallow `items.sort(key=lambda x: x.id)` and `df.groupby(key=col, secret=False)`.
+
+**`_scrub_shell(text)`** — the shell scrubber, used by both the `_SHELL_SEGMENT` rule and `redact_command`. **It deliberately does not model command position.** The obvious rule — "an assignment only counts before the command name" — needs the whole POSIX command grammar (pipelines, wrappers and their long-option operands, redirections, `env`'s grammar, substitutions, `\`-newline continuations), and six successive implementations of it each shipped a *secret leak*, because an approximation of that grammar fails **open**. What replaced it:
+
+> In **unquoted** shell text, redact the value of every secret-named assignment, wherever it appears. Never touch a **quoted** argument — except to recurse into command substitutions, which the shell executes. **Heredoc bodies** are data.
+
+That needs only the three things a lexer gets right, and `_scrub_shell` walks the text once tracking exactly those:
+- **Single quotes** are inert; **double quotes** are inert *except* for `$(…)` and backticks, which the shell still executes inside them — `_scrub_double_quoted` recurses into those and nothing else, so `python -c "items.sort(key=lambda x: x.id)"` survives verbatim while `echo "$(api_token=… ./run)"` cannot hide a secret one quote deep.
+- **Heredoc bodies** (`_copy_heredoc_body`) are copied verbatim: they are a file, a script, SQL. All heredocs a line declares are queued and consumed *in order*, and the terminator must match **exactly** (`<<-` strips leading TABS only, per POSIX). `_HEREDOC_OP` is matched only in *unquoted* text — a `<<` inside a quoted argument is a bit-shift, and promoting it to a heredoc hid the entire next command from redaction.
+- **Backslash escapes**, including `\<newline>` continuations, keep a value glued to its assignment across physical lines.
+- Everything else is unquoted shell: a secret-named assignment at a word boundary (`_ASSIGN_HEAD`, name may itself be quoted) or a credential option (`_OPTION_HEAD` + an allow-list) has its whole value consumed by `_skip_value` and replaced.
+
+**Idempotence is a contract, not a nicety.** `redact` runs more than once over the same text — the scribe scrubs each captured value, then the whole assembled document as defense in depth. `[REDACTED:env-secret]` contains no word-break character, so a value scanner that doesn't recognize the marker reads `[REDACTED:env-secret]export …` as a single bare token and replaces it, **silently eating the following word**. So a marker is matched as a value — but only when it is the *complete* value: a marker *prefix* (`api_token=[REDACTED:env-secret]SECRET`) must still redact the suffix, or a marker pasted into captured text becomes an escape hatch for the secret beside it. Configured `extra_patterns` obey the same rule: existing markers are opaque, nonempty custom matches and built-in redactions run to one combined fixed point, and zero-width matches are ignored because they contain no captured text. Both marker/value bugs were real, and the first was caught by the idempotence check in `scripts/audit_command_redaction.py` — the one real property that script can test without an oracle.
+
+**A value is a RUN of fragments** (`_VALUE_FRAGMENT`+), because the shell concatenates adjacent quoted and bare fragments into one word: `api_token="a b"tail` is a single value. Matching one balanced fragment and stopping leaked the rest of the secret *and* left the marker abutting text for the next pass to swallow — non-idempotence and a leak from one root cause.
+
+**There is no executor inference, by design.** `eval '…'` and `sh -c "…"` do execute their string argument, and two attempts to detect that both leaked and mangled: keying on any `sh`/`bash` token destroyed `echo sh -c '…'` (which executes nothing), and keying on command position still missed `env sh -c '…'` / `command sh -c '…'` while over-arming `sh -- -c '…'` (after `--`, `-c` is the command *name*). Recognizing an executor is the POSIX command grammar wearing a smaller hat. So **a quoted argument is always data**, with no exception, and the residual — a secret inside an eval'd string — is declared in spec §10 and pinned by `test_executed_string_residual_is_known_and_bounded`.
+
+**`_scrub_substitution`** exists for one reason worth stating: **redaction must never delete captured input.** The scanners are heuristics and will disagree with a real shell — a lone apostrophe inside a heredoc body makes `_end_of_substitution` run to end-of-text — and an unconditional `end - 1` slice silently ate the final character of a real `git commit -m "$(cat <<'EOF' … )"`. It re-emits a closing delimiter only when one was actually there. A mis-scan is acceptable; losing a byte of the user's command is not.
+
+**The accepted cost.** A credential-*named argument* to another command (`env PATH=/bin pytest api_key=example`, `awk -v api_key=x`) is redacted even though a perfect parser would leave it alone. It is fail-closed, the command's shape survives (`api_key=[REDACTED:env-secret]`), and only a small minority of real captured commands contain a secret-named `name=` token at all — so position tracking buys little fidelity in practice while costing correctness we could not deliver. The case for the trade is the **fail-open history** (seven revisions, each leaking a secret), not a percentage; `scripts/audit_command_redaction.py` re-runs the local no-mangling check and documents its method, but it is anecdotal validation against one corpus, not a general guarantee. `_SECRET_OPTION_NAMES` is an allow-list, never a `*key*` pattern: `--sort-key=name`, `--key=id`, `--password-policy=strict` select and configure, they do not authenticate.
+
+**`redact_command(text, extra_patterns)`** — the public entry point for a value the caller *knows* is a shell command: spec §4's tool-activity digest, where the scribe captured Claude's `input.command` verbatim. It applies the same literal built-in patterns as `redact`, then uses `_scrub_shell` for assignment-shaped shell text, and composes that with configured extras to a fixed point. `adapters/claude/scribe.py` uses it for the `### Commands run` bullets and plain `redact` for everything else.
+
+**Known residual** (recorded in spec §10): a lowercase secret-named assignment embedded *mid-sentence in prose* — "…then I ran export api_token=abc123" — is not redacted, because catching it requires treating any keyword anywhere as shell, which is the over-broad rule above. D13 is a best-effort regex table; silently gutting captured prose was judged the worse failure mode. Commands themselves are fully covered.
 
 These six/seven rules are collected in `_BUILTIN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...]` (private key through bearer; the env-secret rule is applied separately afterward since its replacement needs a backreference, not a fixed string).
 
 ```python
 def redact(text: str, extra_patterns: Iterable[str] = ()) -> str
 ```
-Applies every builtin pattern in table order, then the env-secret rule, then any caller-supplied `extra_patterns` (raw regex strings, typically sourced from config `[redact].extra_patterns`), each of which redacts its match to the fixed string `[REDACTED:custom]`. Returns the fully redacted text; pure function, no I/O, no exceptions expected from well-formed input.
+Applies every builtin pattern in table order, then the env-secret rule, then any caller-supplied `extra_patterns` (raw regex strings, typically sourced from config `[redact].extra_patterns`), each of which redacts its match to the fixed string `[REDACTED:custom]`. The built-in table and extras are iterated to one combined fixed point because a custom replacement can expose a built-in assignment boundary. Returns the fully redacted text; pure function, no I/O, no exceptions expected from well-formed input.
 
 Invariants / gotchas:
 - The `[REDACTED:<type>]` vocabulary is **closed** for the six built-in types (`private-key`, `aws-key`, `api-key`, `slack-token`, `github-token`, `bearer`, `env-secret`) — new built-in secret shapes require a code change, not config. Only `extra_patterns` may introduce new redactions, and they are always folded into the single generic `[REDACTED:custom]` tag rather than getting their own type name.
@@ -801,6 +830,8 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 **Module constants**
 
 - `DEFAULT_TOMBSTONE_GRACE_DAYS = 14` — matches spec §8's `TOMBSTONE_GRACE_DAYS`.
+- `DEFAULT_PLAN_PAYLOAD_MAX_BYTES = 262_144` — spec §8's `PLAN_PAYLOAD_MAX_BYTES`; the per-plan-request byte budget (ADR-0012), overridable via `[curate].plan_payload_max_bytes`.
+- `OVERSIZE_RAW_MARKER` — the `[truncated for plan payload]` suffix stamped on a raw body that had to be cut to fit its own batch.
 - `NODE_SUFFIX = "-status"` — the node name is always `<project>-status` (spec §8).
 - `CURATOR_LOG = ".curator-log.jsonl"` — per-project append-only pass log under the memory dir.
 - `PLAN_SYSTEM` / `NODE_SYSTEM` — the two hand-written system prompts satisfying spec §2.1 and §2.2 respectively. `PLAN_SYSTEM` establishes the curator's identity and goal ("small, non-redundant, current fact set — optimize for deletion and merging, not accumulation"), states the reuse-slug/supersedes/tombstone/pinned rules, and mandates a bare-JSON response of the exact `{"upserts": [...], "tombstones": [...]}` shape. `NODE_SYSTEM` mandates a single synthesized markdown node — title line plus grouped bullets, "invent nothing," markdown only.
@@ -809,21 +840,20 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 
 - `node_name(project: str) -> str` — returns `f"{project}{NODE_SUFFIX}"`, the deterministic status-node name; re-exported from `neurobase.curator`.
 
-- `curate(root: Path, project: str, brain: Brain, *, dry_run: bool = False, resynth: bool = False, tombstone_grace_days: int = DEFAULT_TOMBSTONE_GRACE_DAYS) -> dict[str, Any]` — runs one full pass of the spec §2 sequence and returns the summary dict (the function re-exported as `curate` from `neurobase.curator`, imported by the CLI as `run_curate`). Control flow:
+- `curate(root: Path, project: str, brain: Brain, *, dry_run: bool = False, resynth: bool = False, tombstone_grace_days: int = DEFAULT_TOMBSTONE_GRACE_DAYS, plan_payload_max_bytes: int = DEFAULT_PLAN_PAYLOAD_MAX_BYTES) -> dict[str, Any]` — runs one full pass of the spec §2 sequence and returns the summary dict (the function re-exported as `curate` from `neurobase.curator`, imported by the CLI as `run_curate`). Control flow:
   1. `store.ensure_tree(project, root)` — guarantees the directory tree exists before any read/write.
   2. **`--resynth` short-circuit**: if `resynth` is true, skip everything else and call `_synthesize` directly, then log and return `{"status": "resynth", "active_facts": <count>}`. This is the `neurobase curate --resynth` path from spec §2's partial-failure contract — regenerate node + index without consuming any new raw.
   3. Load unconsumed raw via `store.list_raw(root, project, unconsumed_only=True)`. **Empty ⇒ no-op**: log and return `{"status": "noop", "raw": 0, "active_facts": <count>}` — this is the idempotence guarantee of spec §2 step 1.
-  4. Load active curated facts (`store.list_curated`), compute `pinned = _pinned_slugs(curated)`, and build the plan's user payload: `{"curated_facts": [...], "raw_captures": [{"raw": <filename>, "body": ...}, ...]}` via `_facts_payload` and a literal list comprehension over `raw_docs`.
-  5. **Plan step**: call `brain.plan_json(PLAN_SYSTEM, user_payload)`. If this raises `BrainError` (unparseable/timeout/etc.), the pass **aborts**: no raws are marked consumed, nothing is written, and the function returns `{"status": "error", "raw": len(raw_docs), "error": str(exc)}` after logging. This is the unconsumed-on-parse-failure safety rule (spec §2 step 3 / decision D9) — a transient bad LLM response can never silently drop an observation, because it is retried wholesale on the next pass.
-  6. Extract `upserts = plan.get("upserts") or []` and `tombstones = plan.get("tombstones") or []`.
-  7. **`--dry-run` short-circuit**: if `dry_run` is true, return `{"status": "dry-run", "raw": len(raw_docs), "plan": plan}` immediately — *before* the pinned-slug filter, the apply pipeline, or consumption. Nothing is written to disk, and `_log_pass` is skipped on this path (it runs only on the noop/error/final/resynth return paths), so a dry run leaves absolutely no trace and every raw remains unconsumed for the real pass.
-  8. **Pinned-fact guard (decision D-b)**: `upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]` — deterministically drops any upsert targeting a pinned (user-directed) slug, regardless of what the prompt says. This is enforced in code, not just by prompt instruction, so a plan that ignores the "never touch pinned facts" prompt rule still cannot mutate one.
-  9. **Apply upserts** (step 4 of spec §2) via `_apply_upserts`, then tombstone every superseded slug that was *not itself re-upserted this pass* and is not pinned, via `_safe_soft_delete`, deduped order-preserving with `dict.fromkeys`.
-  10. **Apply explicit tombstones** (step 5): for each `{"slug", "reason"}` entry, skip if the slug is empty, was upserted this pass, or is pinned; otherwise soft-delete it and count it.
-  11. **Consume raw** (step 6): `store.mark_consumed(doc.file_path)` for every doc in `raw_docs` — unconditionally, since reaching this point means the plan parsed successfully (even if empty).
-  12. **Prune tombstones** (step 7): `store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)`.
-  13. **Synthesize** (step 8): call `_synthesize(root, project, brain)` inside a `try/except Exception`. On success, `status = "ok"`. On *any* exception — brain error, malformed sibling node breaking the index rebuild, linkify/disk error — `status = "partial"` and `synth_error = str(exc)`; this is caught deliberately broadly (`# noqa: BLE001`) per spec §2's partial-failure contract: the applied curated-fact state and raw-consumption already happened and must stand, because the node is a pure function of `curated/` and will self-heal on the next `curate` (or `--resynth`) pass.
-  14. Build and return the summary dict: `{"status", "raw", "upserts", "superseded", "tombstones", "pruned_tombstones", "active_facts"}`, plus `"error"` if synthesis failed — this exact key set matches spec §2 step 9. The summary is appended to the curator log via `_log_pass` before returning.
+  4. **Batch loop (ADR-0012 / decision D22)**, repeated until every raw is planned. Each iteration reloads active curated facts (`store.list_curated`) so a later batch sees everything earlier batches upserted, superseded, and tombstoned, then calls `_next_plan_batch` to take the next oldest-first run of raws whose *final combined request* — `combine_prompt(PLAN_SYSTEM, user_payload)`, measured in UTF-8 **bytes**, exactly what a CLI backend passes as one argv entry — fits `plan_payload_max_bytes` (default 262,144). A raw too large to fit even alone is truncated by `_truncate_raw_to_fit` and marked, never skipped. If not even a marked envelope fits (an absurdly small budget, or curated facts that already fill it), `_next_plan_batch` raises `ValueError` and the pass returns `{"status": "error", …}` with nothing consumed.
+  5. **Plan step, per batch**: call `brain.plan_json(PLAN_SYSTEM, user_payload)`. If this raises `BrainError` (unparseable/timeout/etc.), **this batch and every later batch abort**: their raws stay unconsumed and the loop breaks with `plan_error` set. Any *earlier* batch that planned successfully keeps its applied facts and its consumed raws (D22) — each committed batch is a durable unit backed by a valid plan. A failure in the **first** batch is **state-equivalent** to v0.1: nothing was applied, so the pass returns immediately and every raw remains unconsumed (spec §2 step 3 / decision D9). The *summary* is not byte-identical — it now carries `"batches": 0` — but no caller depends on the old key set, and the summary contract changed for every path in this pass anyway. But if at least one batch *did* commit, the pass **still falls through to steps 11–12** before returning its error — see the derived-state invariant below. A transient bad LLM response still never silently drops an observation: unplanned raws are retried wholesale on the next pass.
+  6. **`--dry-run` short-circuit**: if `dry_run` is true, the batch loop only *collects* plans — it applies nothing and consumes nothing, so every preview batch is planned against the same current facts (a dry run does not pretend to simulate model-authored mutations in memory). After the loop it returns `{"status": "dry-run", "raw", "batches"}` plus `"plan"` for the single-batch case (the v0.1 shape) or `"plans"` (the list) when the backlog needed more than one. `_log_pass` is skipped on this path, so a dry run leaves absolutely no trace.
+  7. **Pinned-fact guard (decision D-b)**: `upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]` — deterministically drops any upsert targeting a pinned (user-directed) slug, regardless of what the prompt says. This is enforced in code, not just by prompt instruction, so a plan that ignores the "never touch pinned facts" prompt rule still cannot mutate one. `pinned` is recomputed per batch from that batch's freshly loaded facts.
+  8. **Apply upserts** (step 4 of spec §2) via `_apply_upserts`, then tombstone every superseded slug that was *not itself re-upserted in this batch* and is not pinned, via `_safe_soft_delete`, deduped order-preserving with `dict.fromkeys`.
+  9. **Apply explicit tombstones** (step 5): for each `{"slug", "reason"}` entry, skip if the slug is empty, was upserted in this batch, or is pinned; otherwise soft-delete it and count it.
+  10. **Consume this batch's raw** (step 6): `store.mark_consumed(doc.file_path)` for every doc in the batch — reaching this point means *that batch's* plan parsed successfully (even if empty). Loop back to 4 with the remaining raws.
+  11. **Prune tombstones** (step 7), once, after the loop: `store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)`.
+  12. **Synthesize** (step 8), once, after the loop: call `_synthesize(root, project, brain)` inside a `try/except Exception`. On *any* exception — brain error, malformed sibling node breaking the index rebuild, linkify/disk error — `synth_error = str(exc)`; this is caught deliberately broadly (`# noqa: BLE001`) per spec §2's partial-failure contract: the applied curated-fact state and raw-consumption already happened and must stand, because the node is a pure function of `curated/` and will self-heal on the next `curate` (or `--resynth`) pass.
+  13. Build and return the summary dict: `{"status", "raw", "batches", "upserts", "superseded", "tombstones", "pruned_tombstones", "active_facts"}`, plus `"error"` — this exact key set matches spec §2 step 9. `upserts`/`superseded`/`tombstones` are summed across batches. `status` is `"error"` if a batch's plan failed (the pass failed; its raws are still unconsumed), else `"partial"` if only synthesis failed, else `"ok"`. If a plan failure *and* a synthesis failure coincide, `error` carries the plan failure and `synth_error` the other, so neither masks the other. The summary is appended to the curator log via `_log_pass` before returning.
 
 - `is_stale(root: Path, project: str, hours: int) -> bool` — decision D8's `--if-stale` gate. Scans unconsumed raw docs; for each with a `captured_at` frontmatter field, parses it as ISO-8601 (tolerating a trailing `Z` by rewriting to `+00:00`) and returns `True` as soon as one predates `now - hours*3600` seconds. Docs missing `captured_at` are skipped (not counted as stale); docs with an unparseable timestamp are also skipped (`except ValueError: continue`) rather than raising. Returns `False` if nothing unconsumed is old enough (including the case of zero unconsumed raw). The CLI (`src/neurobase/cli/__init__.py:202`) calls this only when `--if-stale` is passed and `--resynth` is not (`checking_staleness = if_stale and not resynth`), using `config.curate.stale_hours` (spec §8 default: 12h) as `hours`; if not stale it prints "Not stale — nothing to curate." and returns before `resolve_brain`, so it never constructs a `Brain` or calls `curate()`.
 
@@ -832,6 +862,14 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 **Internal helpers**
 
 - `_facts_payload(docs: list[store.Document]) -> list[dict[str, Any]]` — converts curated `Document`s into the plan/node payload shape `{"slug", "body"}` (slug is `d.get("name", d.file_path.stem)`, body is stripped), adding `"pinned": True` when the doc's `provenance` frontmatter contains `"user-directed"`. Used both for the plan's `curated_facts` and the node prompt's `active_facts`.
+
+- `_raw_payload(doc, body=None) -> dict[str, str]` / `_plan_user_payload(curated, raw_captures) -> str` — the one place a plan's user payload is serialized (`{"curated_facts": [...], "raw_captures": [{"raw": <filename>, "body": ...}, ...]}`, `ensure_ascii=False`). Keeping it in a single helper is what makes the byte budget honest: the string that is *measured* is the exact string that is *sent*.
+
+- `_plan_request_bytes(user_payload: str) -> int` — `len(combine_prompt(PLAN_SYSTEM, user_payload).encode("utf-8"))`. The budget is bytes, not characters, because the kernel's `ARG_MAX` boundary is bytes — a character count is unrelated to it once non-ASCII text or JSON escaping is in play (ADR-0012 measured the local macOS limit at 1,048,576 bytes total, with the accepting/rejecting argv boundary at 1,045,268/1,045,269). The API backend keeps system and user prompts in separate slots and has no argv limit at all, but every backend is budgeted against the *combined CLI shape* so the conservative bound holds everywhere.
+
+- `_truncate_raw_to_fit(curated, doc, max_bytes) -> dict[str, str]` — for the pathological case of one raw larger than the whole budget. Binary-searches the body's *character* prefix while measuring the *serialized byte* size at each step (the two are not proportional), and appends `OVERSIZE_RAW_MARKER` (`"[truncated for plan payload]"`) so the model — and anyone reading the payload later — can see the body was cut. Raises `ValueError` if even the marked envelope plus the fixed prompt and current facts can't fit, which `curate` turns into `status: "error"` with that raw left unconsumed. It never silently drops a session.
+
+- `_next_plan_batch(curated, remaining, max_bytes) -> tuple[list[Document], str]` — greedily accumulates raws oldest-first while the measured request stays within budget, stopping at the first raw that would overflow (that raw opens the next batch). Guarantees a non-empty batch, so the caller's loop always makes progress.
 
 - `_pinned_slugs(docs: list[store.Document]) -> set[str]` — the set of slugs whose `provenance` includes `"user-directed"` (i.e. saved via the MCP `memory_remember` tool per spec §13). This is the deterministic enforcement point for the pinned-fact invariant described above; it is *not* trust-the-prompt — `curate()` intersects every upsert/tombstone/supersession-tombstone against this set.
 
@@ -847,10 +885,11 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 
 **Invariants and gotchas worth flagging explicitly**
 
-- **Unconsumed-on-parse-failure is absolute** (spec §2 step 3 / D9): the *only* way a raw capture is marked consumed is by reaching step 6 of `curate()`, which is only reached after `brain.plan_json` returns successfully (even with an empty plan). There is no partial-consumption path.
+- **Derived state never lags committed facts** (D22): any pass that committed at least one batch runs prune + node synthesis + index + linkify *before returning*, **including when a later batch failed and the pass returns `status: "error"`**. This is not defensive tidiness — it is load-bearing. The node is what recall injects, and the natural "just return the error, a later pass will re-synthesize" shortcut is wrong: the retry re-plans the same unconsumed raws, so a raw that fails the plan step *permanently* would keep every fact the successful batches wrote out of recall **forever**, until a human noticed and ran `--resynth`. `test_recall_sees_committed_facts_even_when_a_later_batch_keeps_failing` pins this across two consecutive failing passes.
+- **A raw is consumed only by a plan that covered it** (spec §2 step 3 / D9, refined by D22): the *only* way a raw capture is marked consumed is by being in a batch whose `brain.plan_json` returned successfully (even with an empty plan). Batching does introduce a partial-*consumption* path — batch 1 can commit while batch 2 fails — but never a partial-*planning* one: no raw is ever consumed without a valid plan that saw it. With a single batch (the overwhelmingly common case) this collapses to the v0.1 all-or-nothing rule exactly.
 - **A valid-but-empty plan is still consumed** — `upserts`/`tombstones` defaulting to `[]` via `plan.get(...) or []` means a plan of `{}` or `{"upserts": [], "tombstones": []}` proceeds through the entire apply/consume/prune/synthesize sequence normally; only a raised `BrainError` aborts.
 - **Deletion-first mandate**: the prompt (`PLAN_SYSTEM`) explicitly instructs the model to "optimize for deletion and merging, not accumulation," and the apply order enforces this structurally — an upsert's `supersedes` list drives an *automatic* tombstone of the old slug in the same pass, without a separate model round-trip.
-- **`--dry-run` never mutates**: it returns immediately after the plan call, before the pinned filter, before any `store.upsert_curated`/`soft_delete_curated`/`mark_consumed` call, and before `_log_pass`. A dry run and a real run against the same raw set will therefore produce the same plan (same unconsumed raw, same curated facts) unless the brain is non-deterministic.
+- **`--dry-run` never mutates**: each batch's plan call is followed by `continue`, before the pinned filter and before any `store.upsert_curated`/`soft_delete_curated`/`mark_consumed` call, and `_log_pass` is skipped entirely. A dry run and a real run against the same raw set produce the same *first* plan (same unconsumed raw, same curated facts) unless the brain is non-deterministic; on a multi-batch backlog the later dry-run previews will differ from what a real run would send, because a real run's batch N sees the facts batches 1…N-1 wrote and the dry run has nothing to show it. The preview is honest about what it is: N independent plans, not a simulation of the pass.
 - **`--if-stale` staleness is computed outside `curate()` entirely** — `is_stale()` is a separate, cheaper read-only scan the CLI calls first; `curate()` itself has no staleness awareness and will always attempt a pass on whatever unconsumed raw exists (or no-op if none).
 - **Pinned facts are enforced twice** — once via prompt instruction (soft guarantee) and once via the `pinned` set intersection in `curate()` (hard guarantee) at three separate points: dropping pinned upserts outright, skipping pinned slugs in the supersession-tombstone step, and skipping pinned slugs in the explicit-tombstone step. A pinned fact can still receive a linkify lineage footer (not a content edit) since linkify runs after and outside this logic.
 - **Bad model output degrades gracefully everywhere**: an invalid slug in an upsert is skipped (`_apply_upserts`); a tombstone target that doesn't exist or is malformed is a no-op (`_safe_soft_delete`); the node text is defensively de-fenced (`_strip_outer_fence`). None of these raise — only an unparseable *plan* JSON response is treated as fatal to the pass.
@@ -875,8 +914,10 @@ Implements the `SessionEnd` capture (spec §4). The module docstring states the 
 
 Module-level tuned constants (spec §8, single source of truth):
 - `MAX_PROMPTS = 25` — the last N user prompts kept.
-- `MAX_PROMPT_CHARS = 600` — per-prompt truncation.
+- `MAX_PROMPT_CHARS = 1200` — per-prompt truncation.
 - `MAX_SUMMARY_CHARS = 4000` — final-summary truncation.
+- `MAX_ASSISTANT_MSG_CHARS = 500` and
+  `MAX_ASSISTANT_TOTAL_CHARS = 6000` — bounded chronological highlights.
 - `_NOISE_PREFIXES` — a tuple of literal prefixes (`"<command-name>"`, `"<local-command-"`, `"<system-reminder>"`, `"Caveat:"`, `"[Request interrupted"`) that mark a user turn as UI/tooling noise rather than a real prompt, per spec §4.
 
 Key functions:
@@ -892,10 +933,19 @@ Key functions:
 - `parse_transcript(transcript_path: Path) -> dict[str, Any]` — the core parser. Iterates `_iter_events`, and for each event:
   - Skips it outright if `event.get("isSidechain")` is truthy (a subagent turn, spec §11.1 line 4).
   - For `type == "user"`: pulls `cwd`, `gitBranch`, `sessionId` off the event as candidate metadata (later-seen non-empty values win — `event.get("cwd") or cwd`, so blank/missing fields never clobber an already-captured value). Extracts text via `_text_from_content`; if that returns `None` (tool_result turn or unrecognized shape) the event is skipped. Otherwise the text is stripped; empty or noise-prefixed text is dropped; anything surviving is appended to `prompts`.
-  - For `type == "assistant"`: extracts text via `_assistant_text`, strips it, and if non-empty overwrites `summary` — so **the last non-empty assistant turn in the file wins** as the session summary, matching spec §4's "last non-empty wins."
-  - Returns `{"prompts": [...], "summary": str, "cwd": str, "branch": str, "session_id": str}`. Note metadata only ever comes from `user`-typed events, never assistant ones (per spec §11.1: "Metadata rides on the user events").
+  - For `type == "assistant"`: extracts visible text for highlights and summary
+    candidates; records Agent/Task ids, edit paths, and Bash command first
+    lines from verified `tool_use` blocks. Matching user `tool_result` blocks
+    supply bounded subagent reports. Compact-summary user events contribute a
+    highlight, never a typed prompt or final-assistant-summary candidate.
+  - The final summary is the longest of the last three assistant texts. The
+    returned mapping also includes bounded highlights, reports, files, and
+    commands alongside prompts and metadata.
 
-- `_assemble_body(prompts: list[str], summary: str, reason: str) -> str` — applies the bounds (`kept = prompts[-MAX_PROMPTS:]`, i.e. keep the *last* 25, then truncate each to 600 chars; summary truncated to 4000 chars) and renders the fixed Markdown template from spec §4:
+- `_assemble_body(parsed: dict[str, Any], reason: str) -> str` — applies the
+  bounds (last 25 prompts at 1200 chars; summary at 4000 chars) and renders the
+  fixed Markdown sections from spec §4, omitting empty activity, subagent, and
+  highlight sections.
   ```
   ## Session
   - ended: <reason>
@@ -904,11 +954,23 @@ Key functions:
   ## Prompts
   - <prompt>…
 
+  ## Activity
+  ### Files touched
+  - <path>…
+  ### Commands run
+  - <command>…
+
+  ## Subagent reports
+  - <report>…
+
+  ## Assistant highlights
+  - <message>…
+
   ## Final assistant summary
 
   <summary>
   ```
-  `<n>` is `len(kept)` (post-truncation prompt count), not the raw pre-slice count.
+  `<n>` is `len(kept)` (post-truncation prompt count), not the raw pre-slice count. `## Activity`, `## Subagent reports`, and `## Assistant highlights` are omitted entirely when they have nothing to say, so a plain Q&A session's raw looks exactly like it did in v0.1.
 
 - `scribe(root: Path, *, transcript_path: Path, cwd: str, reason: str, session_id: str = "") -> Path | None` — the entry point invoked by the CLI's hook dispatcher. Control flow, in order:
   1. `parsed = parse_transcript(transcript_path)`.
@@ -924,6 +986,17 @@ Key functions:
   The docstring is explicit that `scribe()` itself does not swallow exceptions internally past the two guarded points above (`OSError` in `_iter_events`, `UnsupportedSchemaError` here) — "callers should treat any exception as 'capture nothing'"; the actual blanket `except Exception` / exit-0 guarantee lives one layer up, in the CLI's `run_hook` dispatcher (see "Connections" below), not in this module.
 
   Note on `store.write_raw`: per its own docstring, a raw file is keyed by `(project, captured_at, agent, session_id)` and is rewritable by the owning scribe until the curator marks it `consumed: true`, at which point a further write raises `RawConsumedError` — `scribe()` does not catch this, so a session-end firing against an already-curated capture (same session id + timestamp bucket) would propagate that exception up to the fail-safe hook wrapper.
+
+### src/neurobase/adapters/scribe_common.py
+
+The capture-side twin of `recall_common.py`, and it exists for the same reason: spec §8's *assistant* bounds are explicitly agent-agnostic, so the code enforcing them lives in one module that both scribes import and re-export via `__all__`, rather than being written twice and drifting.
+
+- `MAX_ASSISTANT_MSG_CHARS = 500`, `MAX_ASSISTANT_TOTAL_CHARS = 6000`, `SUMMARY_CANDIDATE_WINDOW = 3` — spec §8's tuned defaults for the assistant side of a capture.
+- `bounded_highlights(messages: list[str]) -> list[str]` — builds the `## Assistant highlights` section: truncate each message to `MAX_ASSISTANT_MSG_CHARS`, walk **newest→oldest** keeping messages until the `MAX_ASSISTANT_TOTAL_CHARS` total is spent, then reverse back into chronological order. Eviction is deterministic (the same transcript always yields byte-identical highlights) and biased toward the end of the session, where the durable conclusions usually are. With the default bounds, at least 12 messages always survive.
+- `Redactor` — the type of a D13 redaction pass bound to the caller's `[redact].extra_patterns`. Scribes hand one to their body renderer, which applies it to each captured value *before* rendering. See `core/redact.py` above for why that ordering is a spec §10 MUST.
+- `block(text: str) -> str` — escapes **both** CommonMark heading syntaxes in a captured value. `_ATX_HEADING` catches the leading `#` run of a line (`## foo` → `\## foo`); `_SETEXT_UNDERLINE` catches a line of only `=` or `-`, which underlines the line above it and promotes *that* line to a heading retroactively (`\===`, `\---`) — the easier of the two to miss, because nothing about the promoted line looks like a heading, and escaping only ATX leaves the hole open. Escaping the underline also defuses the same line read as a thematic break. Captured content is untrusted markdown: a prompt, an assistant message, or an IDE context block can contain its own headings, and rendered as-is they become *the raw document's* sections — session content forging the structure the curator then reads. Indentation closes neither syntax: CommonMark still parses a heading indented up to three spaces, so escaping is the load-bearing part. Used for section bodies (the final summary, Codex's IDE context), for the hook-supplied `reason`, and — via `bullet` — for every list item.
+- `bullet(text: str) -> str` — `"- " + block(text).replace("\n", "\n  ")`. Renders one list item: heading-safe, then continuation lines indented so a multi-line value stays *inside* its bullet. Prompts run to 1,200 chars and subagent reports to 1,500, so multi-line markdown is the common case, not an edge one (ADR-0013).
+- `final_summary(candidates: list[str]) -> str` — the `## Final assistant summary` slot: the **longest of the last `SUMMARY_CANDIDATE_WINDOW` (3)** non-empty assistant texts, `""` if there are none. This is the fix for the *final-message trap*: v0.1 took the last non-empty assistant message, so a three-hour debugging session that happened to end with "thanks — what's the relaunch command?" captured `bash scripts/launch.sh` as its entire assistant-side record and the real discovery never reached the curator. Restricting the window to the last 3 keeps the pick anchored to the end of the session (an early giant dump can't win); taking the longest of those 3 skips the throwaway sign-off. `max()` keeps the earlier message on a tie, so selection is deterministic.
 
 ### src/neurobase/adapters/recall_common.py
 
@@ -1018,17 +1091,20 @@ This subsystem is Neurobase's integration with the Codex CLI, mirroring the Clau
 
 Implements the Codex scribe contract (spec §5). Unlike the Claude scribe (`SessionEnd`, fires once), Codex has **no `SessionEnd`** — its hooks fire on every turn (`Stop`) — so this module is designed to be invoked repeatedly per session and converge on a single raw file via a session-keyed overwrite. Every code path is deterministic (no LLM call) and every path that can fail does so by returning `None`/writing nothing rather than raising, so a hook invocation never wedges a turn.
 
-Module constants: `MAX_PROMPTS = 25`, `MAX_PROMPT_CHARS = 600`, `MAX_SUMMARY_CHARS = 4000` (identical tuned defaults to the Claude scribe, spec §8 — agent-agnostic), and `MAX_IDE_CHARS = 800` (Codex-specific: the VS Code extension's IDE-context block, kept once as session metadata). `_IDE_CONTEXT_MARKER = "# Context from my IDE setup:"` and `_IDE_REQUEST_MARKER = "## My request for Codex:"` are the literal markers the VS Code extension wraps prompts in. `_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"` is the default rollout root (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, spec §5/§11.2).
+Module constants: `MAX_PROMPTS = 25`, `MAX_PROMPT_CHARS = 1200`, `MAX_SUMMARY_CHARS = 4000` (identical tuned defaults to the Claude scribe, spec §8 — agent-agnostic), the assistant-highlight bounds `MAX_ASSISTANT_MSG_CHARS = 500` / `MAX_ASSISTANT_TOTAL_CHARS = 6000` (re-exported from `adapters/scribe_common.py`, which both scribes share so one §8 contract can't drift into two), and `MAX_IDE_CHARS = 800` (Codex-specific: the VS Code extension's IDE-context block, kept once as session metadata). `_IDE_CONTEXT_MARKER = "# Context from my IDE setup:"` and `_IDE_REQUEST_MARKER = "## My request for Codex:"` are the literal markers the VS Code extension wraps prompts in. `_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"` is the default rollout root (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, spec §5/§11.2).
 
 - `_iter_events(rollout_path: Path) -> list[dict[str, Any]]` — reads the rollout file and parses each line as JSON, skipping blank lines and any line that fails `json.loads` or isn't a dict. An unreadable file (`OSError`) returns `[]`. Never raises.
 - `_split_ide_wrapper(message: str) -> tuple[str, str | None]` — splits a VS Code-wrapped prompt at `_IDE_REQUEST_MARKER`. If the marker isn't present, returns `(message, None)` (plain prompt, no IDE context). Otherwise returns `(prompt_after_marker, context_before_marker)`, stripping the `_IDE_CONTEXT_MARKER` prefix from the context half if present; an empty context becomes `None`.
 - `parse_rollout(rollout_path: Path) -> dict[str, Any]` — the core rollout parser. Iterates events from `_iter_events` and extracts:
   - `session_meta` events: `session_id` (from `payload.session_id` or `payload.id`), `cwd`, `started_at` (from `payload.timestamp`), and `branch` (from `payload.git.branch` if `git` is a dict).
   - `event_msg` events with `payload.type == "user_message"`: the message is split via `_split_ide_wrapper`; a non-`None` context replaces `ide_context` (**latest IDE context wins**, not the first); the prompt is stripped and, if non-empty, appended to `prompts` — **unless it equals the previous prompt** (`thread_rolled_back` re-emits the last prompt verbatim; consecutive duplicates are dropped per spec §5).
-  - `event_msg` events with `payload.type == "agent_message"`: a non-empty stripped message overwrites `summary` (**last non-empty wins**).
+  - `event_msg` events with `payload.type == "agent_message"`: collect every
+    non-empty stripped message as a bounded highlight; the longest of the last
+    three becomes the summary.
   - All other event types (`response_item`, `turn_context`, `token_count`, `task_started`, `task_complete`, etc.) are silently ignored — the function only branches on `event_msg`/`session_meta`, so the turn-completion marker from ADR-0001 (`task_complete`) plays no role in parsing; the *hook firing itself* is what triggers a scribe run, not any particular event in the file.
-  - Returns `{prompts, summary, ide_context, cwd, branch, session_id, started_at}`.
-- `_assemble_body(prompts: list[str], summary: str, ide_context: str) -> str` — renders the raw capture body: truncates each of the last `MAX_PROMPTS` prompts to `MAX_PROMPT_CHARS`, truncates `summary` to `MAX_SUMMARY_CHARS`, and truncates `ide_context` to `MAX_IDE_CHARS`. Structure: `## Session` (with `- agent: codex` and a prompt count), an optional `## Files in focus (IDE)` section (only if `ide_context` is non-empty), `## Prompts` (one bullet per kept prompt), and `## Final assistant summary`.
+  - Returns `{prompts, summary, highlights, ide_context, cwd, branch,
+    session_id, started_at}`.
+- `_assemble_body(prompts: list[str], summary: str, ide_context: str, highlights: list[str]) -> str` — renders the raw capture body: truncates each of the last `MAX_PROMPTS` prompts to `MAX_PROMPT_CHARS`, truncates `summary` to `MAX_SUMMARY_CHARS`, and truncates `ide_context` to `MAX_IDE_CHARS`. Structure, in spec §5 order: `## Session` (with `- agent: codex` and a prompt count), an optional `## Files in focus (IDE)` section (only if `ide_context` is non-empty), `## Prompts` (one bullet per kept prompt), an optional `## Assistant highlights` (one bullet per kept message), and `## Final assistant summary`. Codex has no `## Activity` or `## Subagent reports` section — ADR-0013 defers both pending a bounded format contract for `response_item` payloads.
 - `_parse_started_at(started_at: str) -> datetime` — parses the session's ISO timestamp (`Z` suffix normalized to `+00:00`) into an aware `datetime`; this **keys the per-turn overwrite** (see below). Any parse failure, or an empty string, falls back to `datetime.now(UTC)` — capture still proceeds, but that session's per-turn dedupe is lost (each turn would get a new `captured_at`, hence a new filename), which is called out explicitly as a known degradation, not a crash.
 - `_read_session_meta(rollout_path: Path) -> dict[str, Any] | None` — reads only the **first line** of the rollout and, if it parses as JSON and has `type == "session_meta"`, returns its `payload` dict. Used by `discover_rollout` for cheap cross-checking without parsing the whole file. Returns `None` on any I/O or parse failure, or if the first line isn't a `session_meta` event.
 - `discover_rollout(*, session_id: str | None = None, min_mtime: float | None = None, sessions_root: Path | None = None) -> Path | None` — finds the active rollout when the hook payload carries no path, which is the case for the `notify` fallback (spec §11.4 — its argv JSON never includes a path). Globs `**/rollout-*.jsonl` under `sessions_root` (default `_SESSIONS_ROOT`), sorted newest-mtime-first; if the root doesn't exist, or the glob/stat raises `OSError`, returns `None`. Filters to `eligible` paths with `mtime >= min_mtime` when given (a defensive floor only — a resumed session's rollout can legitimately be old). Then:
@@ -1196,7 +1272,7 @@ This pattern directly implements spec §7's installer rules: *"show exact diff +
 
 - **`_print_recommender_metrics(resolved_root: Path) -> None`** — calls `metrics.compute_metrics(resolved_root)` and prints: decided/accepted/rejected counts, precision, edited rate, reviewed-event count, a survival summary, and recurrence reduction — all through `_fmt_metric`. The survival block has a special case: if `result.survival` is empty, prints `"Survival: insufficient data"` rather than `"0 survived, 0 not survived, 0 insufficient data"`, because a zero-length dict means "no ledger-confirmed accepted proposals to measure survival from" (not applicable), not a measured all-zero result — explicitly called out in the code as a Codex round-2 review finding. When non-empty, prints aggregate counts plus one `"  {slug}: {status}"` line per slug, sorted by slug, with underscores replaced by spaces (`"not_survived"` → `"not survived"`).
 
-- **`curate(root, cwd, if_stale: bool = False, dry_run: bool = False, resynth: bool = False) -> None`** — folds unconsumed raw captures into curated facts (spec §2). Resolves config/root/cwd/project (same not-enabled-⇒-exit-1 pattern as `status`), checks schema. If `--if-stale` is set *and* `--resynth` is not, checks `is_stale(root, slug, config.curate.stale_hours)`; if not stale, echoes "Not stale — nothing to curate." and returns without calling the brain at all (this is what makes the SessionStart hook's detached `spawn_curate_if_stale` cheap on the common case). Otherwise resolves a brain backend via `resolve_brain(config)`; `None` ⇒ red error naming `resolution.reason` and pointing at `neurobase doctor`, exit 1. Calls `run_curate(root, slug, brain, dry_run=dry_run, resynth=resynth, tombstone_grace_days=config.curate.tombstone_grace_days)`. `--dry-run` prints only `summary["plan"]` as indented JSON and returns (no mutation happened inside the curator either). Otherwise prints the summary minus the `"plan"` key as compact JSON, and exits 1 if `summary["status"] == "error"`.
+- **`curate(root, cwd, if_stale: bool = False, dry_run: bool = False, resynth: bool = False) -> None`** — folds unconsumed raw captures into curated facts (spec §2). Resolves config/root/cwd/project (same not-enabled-⇒-exit-1 pattern as `status`), checks schema. If `--if-stale` is set *and* `--resynth` is not, checks `is_stale(root, slug, config.curate.stale_hours)`; if not stale, echoes "Not stale — nothing to curate." and returns without calling the brain at all (this is what makes the SessionStart hook's detached `spawn_curate_if_stale` cheap on the common case). Otherwise resolves a brain backend via `resolve_brain(config)`; `None` ⇒ red error naming `resolution.reason` and pointing at `neurobase doctor`, exit 1. Calls `run_curate(root, slug, brain, dry_run=dry_run, resynth=resynth, tombstone_grace_days=config.curate.tombstone_grace_days, plan_payload_max_bytes=config.curate.plan_payload_max_bytes)`. `--dry-run` prints the preview as indented JSON — `summary["plans"]` (the list) when the backlog needed more than one batch, else `summary["plan"]` — and returns (no mutation happened inside the curator either). Otherwise prints the summary minus the `"plan"` key as compact JSON, and exits 1 if `summary["status"] == "error"`.
 
 - **`seed(from_dir, from_claude_memory, project, all_projects, root, cwd) -> None`** — imports existing notes and/or Claude auto-memory as curated facts (spec §12.3). Validation order matters and is commented in the source:
   1. Requires at least one of `--from-dir`/`--from-claude-memory` (hard error otherwise) — "never crawls a directory the user did not name."
@@ -1736,21 +1812,30 @@ The map below is by subsystem; each file's line names the contract it pins.
   `openai-api`/unknown backends.
 
 **Curator**
-- `test_curator.py` (24) — the spec §2 loop via fake brains: plan apply
+- `test_curator.py` (31) — the spec §2 loop via fake brains: plan apply
   (add/supersede/tombstone), the hard unconsumed-on-parse-failure rule, empty
   plan still consumes, node-synthesis-failure = `partial`, `--dry-run`,
-  `--if-stale` staleness, fact-count-trend logging.
+  `--if-stale` staleness, fact-count-trend logging, and the D22 byte-budgeted
+  batching (single-batch payload byte-identical to v0.1, oldest-first batches
+  with facts reloaded between them, a failed batch leaving earlier commits
+  standing and later raws unconsumed, oversize-raw truncation, multi-batch
+  dry-run preview), and that a pass which committed a batch still refreshes the
+  node when a *later* batch fails.
 
 **Adapters**
-- `test_claude_scribe.py` (9) — §11.1 transcript parse: sidechain/tool_result/
-  noise skipping, last-non-empty summary, §8 bounds, opt-in + empty-skip,
-  redaction before write.
+- `test_claude_scribe.py` (18) — §11.1 transcript parse: sidechain/tool_result/
+  noise skipping, §8 bounds, opt-in + empty-skip, redaction before write, and
+  the Tier-1 skim: longest-of-last-3 summary (the final-message trap), `Agent`
+  subagent-report correlation, the tool-activity digest and its best-effort
+  handling of odd/empty tool inputs, highlight eviction, compact summaries as
+  highlights.
 - `test_claude_recall.py` (8) / `test_recall_common.py` (3) — node assembly,
   6000-char cap dropping whole trailing nodes, framing header, JSON envelope,
   fail-safe emptiness.
-- `test_codex_scribe.py` (14) — §11.2 rollout parse, IDE-wrapper split,
-  consecutive-duplicate-prompt skip, the started-at-keyed overwrite, and the
-  consumed-raw retry with a fresh filename.
+- `test_codex_scribe.py` (17) — §11.2 rollout parse, IDE-wrapper split,
+  consecutive-duplicate-prompt skip, the started-at-keyed overwrite, the
+  consumed-raw retry with a fresh filename, and the shared §8 assistant bounds
+  (highlights + longest-of-last-3 summary, evicting exactly as Claude's do).
 - `test_claude_install.py` (15) / `test_codex_install.py` (25) — fenced
   ownership, idempotent merge, foreign entries preserved byte-for-byte, surgical
   removal, and (Codex) the TOML surgery that preserves comments/ordering.

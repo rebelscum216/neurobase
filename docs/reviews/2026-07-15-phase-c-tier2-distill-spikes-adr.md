@@ -1,6 +1,6 @@
 ---
 slug: phase-c-tier2-distill-spikes-adr
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-c-tier2-distill
@@ -174,3 +174,22 @@ the scribe's established §10/ADR-0013 discipline. No other findings open;
 round-1's stale-cache fix was accepted. Re-arming for round 3.
 
 **Verdict:** changes-requested — _round 2; addressed, re-submitted._
+
+## Round-3 reviewer findings  _(Reviewer — Codex)_
+
+No new findings. I re-checked the revised ADR against the prior findings and the
+current store/curator/redaction contracts:
+
+- D15 remains additive and backward-compatible; `mark_consumed` preserves
+  frontmatter and no `STORE_SCHEMA_VERSION` bump is warranted for optional raw
+  keys.
+- The `.digests/` sidecar remains invisible to `list_raw`'s non-recursive
+  `raw/*.md` glob, and the content fingerprint closes the stale-cache issue from
+  the Codex per-turn overwrite path.
+- D17 now requires per-value redaction before labels/truncation/rendering, with
+  `redact_command()` for command-shaped values and whole-render/digest redaction
+  only as defense in depth. That matches the established ADR-0013/scribe
+  discipline and closes the round-2 leak shape.
+
+**Verdict:** approve — the remaining changes are docs-only contract work, and
+the Phase C ADR is now sound enough to fold into the spec before implementation.

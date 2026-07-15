@@ -9,11 +9,18 @@ payload defaults). Companion: [S-cf5](S-cf5-distill-quality.md).
 The curator passes the whole plan payload as **one argv string** to `claude -p`
 (`brain/claude_cli.py`: `cmd = ["claude", "-p", prompt, …]`). Copying a multi-MB
 transcript into that slot fails with `E2BIG` at `execve` time. What is the real
-single-arg ceiling on this machine, and does `PLAN_PAYLOAD_MAX_CHARS = 300_000`
-(plan §A4) sit safely under it with headroom for the environment?
+single-arg ceiling on this machine, and does the shipped payload cap sit safely
+under it with headroom for the environment?
+
+Note: S-cf4 was first cited by [ADR-0012](../../adr/0012-curator-plan-payload-batching.md),
+which shipped Phase B batching with `[curate].plan_payload_max_bytes = 262_144`
+(256 KiB) — **byte-budgeted, not char-budgeted**. The plan's §A4 draft named
+`300_000`; the shipped default is the rounder 262 144. This note records the
+independent re-measurement that confirms that default's margin and carries it
+into Phase C. Both values are checked below.
 
 **Exit criterion:** an empirically measured ceiling, and a stated safety margin
-for the 300 K default.
+for the shipped payload cap.
 
 ## Method
 
@@ -42,29 +49,31 @@ headroom under fat env    :    715,340  (3.4x)
 
 - The ceiling tracks `ARG_MAX` (1 MiB) minus the environment and per-string
   overhead: ~1.045 MB with a tiny env, ~1.015 MB once the env carries ~29 KB.
-- `PLAN_PAYLOAD_MAX_CHARS = 300_000` sits **~3.4× under** the worst measured
-  ceiling. Even a pathological 64 KB environment leaves the 300 K payload with
-  well over 600 KB of slack.
+- The **shipped 262 144-byte** cap sits **~3.9× under** the worst measured
+  ceiling; the plan's draft 300 000 sits ~3.4× under. Either is safe — even a
+  pathological 64 KB environment leaves both with well over 600 KB of slack.
 
 ## Findings for the contract (A3/A4)
 
-1. **300 K is a safe, conservative default.** ~3.4× margin absorbs env growth,
-   argv-pointer overhead, and the `-p`/`--output-format`/`--max-turns` flags.
+1. **The shipped 262 144-byte default is safe and conservative.** ~3.9× margin
+   absorbs env growth, argv-pointer overhead, and the
+   `-p`/`--output-format`/`--max-turns` flags. No reason to raise it toward the
+   plan's 300 000; keep 262 144.
 2. **The cap is measured in *bytes*, not chars — already correct.** Phase B's
    batching closes a batch on `_plan_request_bytes(payload) <= max_bytes`
    (`curator/engine.py:_next_plan_batch`), so a multibyte-UTF-8 payload cannot
-   silently blow past a char-counted cap. The plan text says "300000 chars";
-   the implemented budget is bytes, which is the safe interpretation. Keep it
-   byte-based and describe the default in bytes in the spec.
+   silently blow past a char-counted cap. Any spec prose that says "300000
+   chars" should be read as the byte-budgeted 262 144 the code enforces.
 3. **`DISTILL_CHUNK_CHARS = 200_000` is comfortable** for the same reason — each
    chunk is a separate `claude -p` arg well under the ceiling. (Chunk sizing is
    really about model context, not argv; see S-cf5.)
 4. **The ceiling is env-dependent, so keep the margin.** A user with a very
    large exported environment shrinks it; do not raise the default toward the
-   measured max. 300 K stays.
+   measured max.
 
 ## Result
 
-S-cf4 **closed**. Measured ceiling ≈ 1.02–1.05 MB; `PLAN_PAYLOAD_MAX_CHARS =
-300_000` (bytes) is safe with ~3.4× headroom. No change to the Phase B batching
-default. Folds into the Phase C ADR as the payload-sizing rationale.
+S-cf4 **closed** (confirms ADR-0012). Measured ceiling ≈ 1.02–1.05 MB; the
+shipped `plan_payload_max_bytes = 262_144` is safe with ~3.9× headroom, and the
+budget is correctly byte-based. No default change. The Phase C ADR relies on
+this cap unchanged and adds only the per-session distill step above it.

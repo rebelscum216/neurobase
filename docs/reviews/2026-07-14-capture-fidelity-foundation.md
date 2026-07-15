@@ -1,6 +1,6 @@
 ---
 slug: capture-fidelity-foundation
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: capture-fidelity-foundation
@@ -1448,6 +1448,57 @@ both `redact()` and `redact_command()`. Spec §10, ADR-0013, and the implementat
 guide state the boundary.
 
 **Verdict:** _pending independent re-review._
+
+## Round 12 — Reviewer findings  _(Reviewer — Claude)_
+
+Both round-11 findings are resolved — and resolved by fixing the implementation,
+not by narrowing the claims. Verified `git diff main...HEAD` (follow-up commit
+`26ef93e`) against the running code and against real bash (GNU bash 3.2.57), not
+the resolution notes. No new findings.
+
+**F36 — confirmed resolved.** `_decode_ansi_c` no longer delegates to Python's
+`unicode_escape`; it is a hand-rolled decoder of the bounded Bash ANSI-C subset
+that now returns `(decoded, fail_closed)`. The two spellings that leaked in
+round 11 are closed at both entry points: `export $'api_token\x0'=SECRET` and
+`export $'api_token\c@'=SECRET` now redact the value (the decoder produces NUL
+and fail-closes), matching bash, which exports `api_token=SECRET` for both. The
+counter-case holds too — `export $'api_token\cA'=SECRET` is *not* redacted,
+because `\cA` is SOH (not NUL) and bash rejects it as a non-identifier, so
+there is no `api_token` export to protect. Unknown/undecodable escapes fail
+**closed** (over-redact), which is the safe direction. All three are pinned in
+the exact-output oracle. Independently confirmed `\0`/`\00`/`\000`/`\x00`/
+`\U00000000` all fail-close as well.
+
+**F37 — confirmed resolved.** `redact()` and `redact_command()` now route
+through `_apply_redactions`, which iterates the built-in table, the assignment
+scrub, and the compiled extras to a **single combined fixed point** rather than
+running extras only after the built-ins. The round-11 repro is closed and
+idempotent on the first pass: `redact("run zAPI_TOKEN=v", ["z"])` →
+`run [REDACTED:custom]API_TOKEN=[REDACTED:env-secret]`, stable under a second
+call. The metamorphic suite now has an extras variant
+(`test_metamorphic_properties_hold_with_extra_patterns`) carrying the exact
+reviewer repro plus realistic patterns, so this class is covered by an oracle,
+not prose. I checked the loop's termination and cost directly: it converges and
+stays idempotent on adversarial inputs (broad `.`/`.+`, multiple overlapping
+patterns, marker-interleaved text, 29 KB) — the non-marker-character measure is
+non-increasing, so it cannot loop forever.
+
+Also re-verified: `tests/test_redact.py` passes, `scripts/audit_command_redaction.py`
+reports 0 changed-without-marker and 0 non-idempotent over 2,543 unique commands,
+and §10 / ADR-0013 / how-it-works carry the NUL-effective-name rule and the
+"extras compose to one fixed point" boundary.
+
+One non-blocking observation (not a finding): a deliberately pathological
+`extra_patterns` value such as `["."]` makes the combined loop expand ~15× and
+run the full pipeline several times (~0.5 s on a 29 KB body). `extra_patterns`
+is trusted operator config, not attacker input, and any realistic pattern is
+sub-millisecond, so this is fine as-is; worth a one-line note in the config docs
+only if you ever expose that setting to less-trusted callers.
+
+**Verdict:** approve — the ANSI-C decoder now matches bash's NUL behavior and
+fails closed on the unknowable, and the idempotence MUST holds for the composed
+built-in + extra-pattern system with oracle coverage to keep it that way. This
+was the last open blocker/major on the branch; from my side it is ready to merge.
 
 ## Round 11 — Reviewer findings  _(Reviewer — Claude)_
 

@@ -249,6 +249,15 @@ EXACT: list[tuple[str, str]] = [
     # assignment-shaped syntax that is not an assignment WORD
     ("echo ${API_TOKEN:=SECRET}", f"echo ${{API_TOKEN:={R}}}"),
     ("echo $((API_TOKEN=SECRET))", f"echo $((API_TOKEN={R}))"),
+    ("echo ${OUTER:-${API_TOKEN:=SECRET}}", f"echo ${{OUTER:-${{API_TOKEN:={R}}}}}"),
+    ("echo ${OUTER:-$(API_TOKEN=SECRET ./run)}", f"echo ${{OUTER:-$(API_TOKEN={R} ./run)}}"),
+    ("echo ${OUTER:-`API_TOKEN=SECRET ./run`}", f"echo ${{OUTER:-`API_TOKEN={R} ./run`}}"),
+    ('echo "${API_TOKEN:=SECRET}"', f'echo "${{API_TOKEN:={R}}}"'),
+    (
+        'echo "${OUTER:-${API_TOKEN:=SECRET}}"',
+        f'echo "${{OUTER:-${{API_TOKEN:={R}}}}}"',
+    ),
+    ("echo ${OUTER:-api_key=example}", "echo ${OUTER:-api_key=example}"),
     # structure around the value survives exactly
     ("echo ok; api_token=SECRET ./run", f"echo ok; api_token={R} ./run"),
     ('echo "$(api_token=SECRET ./run)"', f'echo "$(api_token={R} ./run)"'),

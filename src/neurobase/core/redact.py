@@ -519,12 +519,72 @@ def _scrub_shell(text: str) -> str:
 def _scrub_expansion(span: str) -> str:
     """`${NAME:=value}` / `${NAME=value}` ASSIGN when NAME is unset — a secret
     assignment wearing an expansion's clothes. `${NAME:-value}` only substitutes
-    and is left alone. Delimiters are preserved either way."""
+    and is left alone, but its WORD can still contain nested expansions or
+    command substitutions that execute/assign and must be scrubbed. Delimiters
+    are preserved either way."""
     match = _EXPANSION_ASSIGN.match(span)
     if match is None:
-        return span
+        if not span.startswith("${"):
+            return span
+        closed = span.endswith("}")
+        inner_end = len(span) - 1 if closed else len(span)
+        return "${" + _scrub_expansion_word(span[2:inner_end]) + ("}" if closed else "")
     closer = "}" if span.endswith("}") else ""
     return f"{match.group(0)}[REDACTED:env-secret]{closer}"
+
+
+def _scrub_expansion_word(text: str) -> str:
+    """Scrub executable/nested constructs inside a parameter-expansion WORD.
+
+    The word itself is not a shell command, so `api_key=example` text inside it
+    is data. Only constructs the shell evaluates recursively are scrubbed:
+    nested `${...}`, command substitutions, arithmetic substitutions, backticks,
+    and those same constructs inside double quotes.
+    """
+    out: list[str] = []
+    index, size = 0, len(text)
+    while index < size:
+        char = text[index]
+        if char == "\\" and index + 1 < size:
+            out.append(text[index : index + 2])
+            index += 2
+            continue
+        if char == "'":
+            end = text.find("'", index + 1)
+            end = size if end == -1 else end + 1
+            out.append(text[index:end])
+            index = end
+            continue
+        if char == '"':
+            end = _end_of_double_quote(text, index)
+            out.append(_scrub_double_quoted(text[index:end]))
+            index = end
+            continue
+        if text.startswith("$((", index):
+            end = _end_of_substitution(text, index + 2)
+            out.append("$(" + _scrub_substitution(text, index + 2, end))
+            index = end
+            continue
+        if text.startswith("$(", index):
+            end = _end_of_substitution(text, index + 1)
+            out.append("$(" + _scrub_substitution(text, index + 2, end))
+            index = end
+            continue
+        if text.startswith("${", index):
+            end = _end_of_expansion(text, index + 1)
+            out.append(_scrub_expansion(text[index:end]))
+            index = end
+            continue
+        if char == "`":
+            end = _end_of_backticks(text, index)
+            closed = end <= size and text[end - 1 : end] == "`"
+            inner = text[index + 1 : end - 1] if closed else text[index + 1 : end]
+            out.append("`" + _scrub_shell(inner) + ("`" if closed else ""))
+            index = end
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
 
 
 def _scrub_substitution(text: str, start: int, end: int) -> str:
@@ -769,6 +829,11 @@ def _scrub_double_quoted(span: str) -> str:
         if span.startswith("$(", index):
             end = _end_of_substitution(span, index + 1)
             out.append("$(" + _scrub_substitution(span, index + 2, end))
+            index = end
+            continue
+        if span.startswith("${", index):
+            end = _end_of_expansion(span, index + 1)
+            out.append(_scrub_expansion(span[index:end]))
             index = end
             continue
         if char == "`":

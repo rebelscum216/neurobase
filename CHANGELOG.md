@@ -5,12 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] — 2026-07-14
+## 0.1.0 — Unreleased
 
-Initial public release. Built in nine phases per
+Prepared first public release. Built in nine phases per
 [docs/neurobase-build-plan.md](docs/neurobase-build-plan.md); see
 [AGENTS.md](AGENTS.md) for the full phase-by-phase state and
-[docs/how-it-works.md](docs/how-it-works.md) for a module-by-module tour.
+[docs/how-it-works.md](docs/how-it-works.md) for a module-by-module tour. The
+`v0.1.0` git tag, GitHub Release, and PyPI publish have not happened yet.
 
 ### Added
 
@@ -61,6 +62,4 @@ Initial public release. Built in nine phases per
 - SQLite-backed search, a native scheduler, an Ollama backend, and a third
   agent adapter are tracked in the build-plan
   [backlog](docs/neurobase-build-plan.md#backlog-post-010-in-rough-order),
-  not this release.
-
-[0.1.0]: https://github.com/rebelscum216/neurobase/releases/tag/v0.1.0
+  not this release candidate.

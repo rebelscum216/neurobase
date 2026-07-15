@@ -14,14 +14,13 @@ patterns and proposes promoting them into standard **SKILL.md** and
 It all runs on your machine, on the agent subscriptions you already pay for, with
 **zero cloud dependency and zero telemetry — permanently.**
 
-> **Status: `0.1.0` — the first public release.** The full loop is implemented
-> for Claude Code and Codex CLI: deterministic capture, an LLM curator that
-> folds and deletes, cross-agent recall, consent-first hook installers, an MCP
-> server, and the v1 recommender (mine → rank → propose → accept/reject/edit →
-> metrics) — see [CHANGELOG.md](CHANGELOG.md) for the full scope. This is a
-> young, solo-maintained project: "works as designed and live-verified by the
-> maintainer," not yet "battle-tested by strangers on every platform." File an
-> issue if something doesn't match what's documented here.
+> **Status: `0.1.0` release candidate — not yet tagged or published.** The full
+> loop is implemented for Claude Code and Codex CLI: deterministic capture, an
+> LLM curator that folds and deletes, cross-agent recall, consent-first hook
+> installers, an MCP server, and the v1 recommender (mine → rank → propose →
+> accept/reject/edit → metrics). The package version is prepared as `0.1.0`, but
+> the `v0.1.0` git tag, GitHub Release, and PyPI publish are intentionally held
+> until release approval.
 
 ## How it works
 
@@ -84,18 +83,22 @@ that actively deletes instead of just accumulating, is the actual bet.
 
 ## Quickstart
 
+Until the first public package is published, install from a checkout:
+
+```bash
+git clone https://github.com/rebelscum216/neurobase.git
+cd neurobase
+uv tool install .                 # installs the `neurobase` command
+```
+
+After the PyPI release, the install command will be:
+
 ```bash
 uv tool install neurobase-cli     # command: `neurobase`
 ```
 
 (`neurobase-cli` because `neurobase` is taken on PyPI — decision D2. `pip
-install` works too; `uv` is recommended, not required.)
-
-Building from a checkout instead? From the repo root:
-
-```bash
-uv tool install .     # installs the `neurobase` command
-```
+install` will work too; `uv` is recommended, not required.)
 
 Then run the guided setup in the repo you want Neurobase to remember:
 

@@ -17,6 +17,26 @@ that states the resulting decision.
 | S5 | `claude -p` JSON contract for the curator | Parse success ≥ 9/10 with lenient parser | ✅ Closed → ADR-0002 |
 | S6 | Hook latency budget | Start+end overhead < 500ms warm | ✅ Closed → ADR-0003 |
 
+## Capture-fidelity spikes (Part II plan §C)
+
+De-risking spikes for the capture-fidelity work
+(`neurobase-capture-fidelity-plan.md`, Part II §C). S-cf1–S-cf3 were resolved
+structurally in [ADR-0013](../../adr/0013-capture-fidelity-event-shapes.md);
+S-cf4/S-cf5 gate the Phase C (Tier-2 distill) contracts.
+
+| ID | Question | Exit criterion | Status |
+|---|---|---|---|
+| S-cf1 | Claude `tool_use`/`tool_result` correlation + Task-result shape | Fixture §11.1 extended | ✅ Closed → ADR-0013 |
+| S-cf2 | Compaction-summary event shape | Decide harvest-as-highlight | ✅ Closed → ADR-0013 |
+| S-cf3 | Codex `response_item` structure — activity/subagent parity | Parity feasible? | ✅ Closed (deferred) → ADR-0013 |
+| S-cf4 | Real `claude -p` argv ceiling on macOS | Measured ceiling + margin for 300 K | ✅ Closed → [S-cf4](S-cf4-argv-ceiling.md) |
+| S-cf5 | Distill quality: one real transcript through DISTILL_SYSTEM v1 | Digest-vs-skim recorded; prompt gaps enumerated | ✅ Closed → [S-cf5](S-cf5-distill-quality.md) |
+
+S-cf4/S-cf5 feed the Phase C ADR (A2 frontmatter + A3 curate sequence). S-cf5
+found `DISTILL_SYSTEM` v1 needs digest-size enforcement, an untrusted-data fence
+against transcript-borne role hijacking, and output-shape validation before the
+contract freezes.
+
 ## Naming
 
 `SN-short-slug.md` — e.g. `S1-codex-capture-wiring.md`, `S5-claude-p-json-reliability.md`.

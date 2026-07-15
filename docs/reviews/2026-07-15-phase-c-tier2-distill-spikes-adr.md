@@ -140,3 +140,37 @@ content-addressed; updated Consequences, Alternatives, and the spec-appendix fol
 list. Re-arming for round 2.
 
 **Verdict:** changes-requested — _round 1; addressed, re-submitted._
+
+## Round-2 reviewer findings  _(Reviewer — Codex)_
+
+- **major** — `docs/adr/0014-transcript-distill-curation.md:68` — D17 fixes
+  the "send transcript to brain before redaction" gap in intent, but the
+  contract still says to render the transcript first and then `redact()` the
+  rendered text. That repeats the exact class of bug ADR-0013 calls out:
+  D13's env assignment rule is line-anchored, so adding structural prefixes,
+  labels, bullets, blockquotes, or fences before redaction can shift
+  `API_TOKEN=...` / `PASSWORD=...` off column 0 and leave it unredacted. This is
+  especially relevant for `tool_result` bodies, which are the transcript channel
+  most likely to contain `.env` output, shell output, or copied config. Suggested
+  direction: require redaction on each extracted transcript value before it is
+  rendered/truncated into the compact transcript text, with command-shaped
+  values using `redact_command` where applicable, then keep the whole-render
+  redaction as defense in depth.
+  - **resolution:** _resolved (round 2)._ Correct — my round-1 D17 fixed the
+    direction (redact before the brain) but at whole-render granularity, which
+    reintroduces the exact line-anchored-shielding bug ADR-0013 finding 2 already
+    documents. Rewrote D17 to redact **per extracted value before it is labelled/
+    truncated into the render**: `redact()` for prompts / assistant text /
+    `tool_result` bodies, `redact_command()` for the Bash `tool_use` one-liners —
+    mirroring the scribe's `scrub`/`scrub_command` split — with the whole-render
+    and digest passes kept only as defense in depth. ADR §Decision (D17) +
+    §Consequences fold-list updated.
+
+## Round-2 resolution summary  _(Author — Claude)_
+
+The single round-2 `major` confirmed and **resolved** in a follow-up commit
+(docs-only). D17 now specifies per-value redaction before rendering, aligned with
+the scribe's established §10/ADR-0013 discipline. No other findings open;
+round-1's stale-cache fix was accepted. Re-arming for round 3.
+
+**Verdict:** changes-requested — _round 2; addressed, re-submitted._

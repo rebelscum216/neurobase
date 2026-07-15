@@ -69,8 +69,9 @@ moved path silently degrades to the skim — a wrong path is never an error.
 `[curate].distill != "off"`):** render the transcript to compact text (prompts,
 all assistant texts, `tool_use` one-liners, `tool_result` bodies truncated to
 2 000 chars each; sidechains **included** — subagent context is cheap here),
-**`redact()` the rendered text (D17, below) before it is chunked or sent**, chunk
-at `distill_chunk_chars` (200 000), and call `brain.text(DISTILL_SYSTEM, chunk)`
+**redacting each extracted value *before* it is labelled/truncated into the
+render, and re-redacting the whole render as defense in depth (D17, below)**,
+chunk at `distill_chunk_chars` (200 000), and call `brain.text(DISTILL_SYSTEM, chunk)`
 per chunk, capped at `MAX_DISTILL_CHUNKS = 5` (drop middle chunks first, noting
 the drop in the digest header); `> 1` chunk ⇒ a final merge call. The digest
 **replaces the raw's body** in that batch's `raw_captures` entry — same `raw`
@@ -90,11 +91,24 @@ that assumption does not hold: neurobase is cross-agent, so a **Codex** session'
 transcript can be distilled by a `claude`/`anthropic-api` brain (or vice-versa),
 and the API backend is a different credential/endpoint than the CLI that made the
 session. So the transcript render is redacted before every distill/merge call,
-holding the store's existing "only redacted text leaves" guarantee. Redaction is
-best-effort (regex table, D13) — the same level the store already ships — and the
-digest is redacted a second time, so the render-side pass is defense forward, not
-the only line. Sending unredacted transcripts is **not** offered even as an
-opt-in here; if a future need arises it gets its own ADR + SECURITY treatment.
+holding the store's existing "only redacted text leaves" guarantee.
+
+**Redact per value, before rendering — not the finished render.** This follows
+the scribe's own rule (spec §10, ADR-0013 finding 2): D13's env-assignment rule
+is **line-anchored**, so prepending a structural label/prefix (`ASSISTANT:`,
+`[tool_result] `, a bullet, a fence, the untrusted-data delimiter) *before*
+redacting shifts an `API_TOKEN=…` / `PASSWORD=…` off column 0 and shields it from
+the line-anchored pattern — exactly the shape that leaked in the scribe until it
+was fixed. `tool_result` bodies are the transcript's likeliest carrier of `.env`
+dumps and shell output, so this is where it bites. Therefore each extracted value
+is redacted **before** it is labelled or truncated into the compact render:
+prompts / assistant text / `tool_result` bodies via `redact()`, and command-shaped
+values (the Bash `tool_use` one-liners) via `redact_command()`, mirroring the
+scribe's `scrub` / `scrub_command` split. The whole-render `redact()` and the
+second pass over the digest remain as defense in depth, not the primary line.
+Redaction is best-effort (regex table, D13) — the same level the store already
+ships. Sending unredacted transcripts is **not** offered even as an opt-in here;
+if a future need arises it gets its own ADR + SECURITY treatment.
 
 **Digest cache (content-addressed).** Digests are written to
 `raw/.digests/<raw-filename>` so a failed or aborted pass never re-distills. But
@@ -176,8 +190,8 @@ parked pending its own ADR (plan Phase D).
   the skim body is the payload. Tier-2 is purely additive over ADR-0012.
 - **Spec appendix** must gain: §1 the two optional raw keys + the `.digests/`
   sidecar exclusion + the content-addressed cache fingerprint; §2 the distill
-  step in the curate sequence, the D17 redact-before-brain rule, and the D16
-  failure policy; §8 the new defaults; §10 the `[curate]` config keys. **This
+  step in the curate sequence, the D17 per-value redact-before-render rule
+  (`redact`/`redact_command`, mirroring the scribe), and the D16 failure policy; §8 the new defaults; §10 the `[curate]` config keys. **This
   ADR is the proposal; that appendix is the law** — fold these in when
   implementing. SECURITY.md gains the note that **only redacted** transcript text
   is sent to the user's configured brain (D17), the transcript itself never lands

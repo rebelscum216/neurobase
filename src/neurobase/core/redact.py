@@ -837,12 +837,11 @@ def _scrub_double_quoted(span: str) -> str:
             index = end
             continue
         if char == "`":
-            end = span.find("`", index + 1)
-            end = size if end == -1 else end
-            out.append("`" + _scrub_shell(span[index + 1 : end]))
-            if end < size:
-                out.append("`")
-            index = end + 1
+            end = _end_of_backticks(span, index)
+            closed = end <= size and span[end - 1 : end] == "`"
+            inner = span[index + 1 : end - 1] if closed else span[index + 1 : end]
+            out.append("`" + _scrub_shell(inner) + ("`" if closed else ""))
+            index = end
             continue
         out.append(char)
         index += 1

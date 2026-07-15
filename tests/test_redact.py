@@ -257,6 +257,7 @@ EXACT: list[tuple[str, str]] = [
         'echo "${OUTER:-${API_TOKEN:=SECRET}}"',
         f'echo "${{OUTER:-${{API_TOKEN:={R}}}}}"',
     ),
+    ('echo "`echo \\`api_token=SECRET ./run\\``"', f'echo "`echo \\`api_token={R} ./run\\``"'),
     ("echo ${OUTER:-api_key=example}", "echo ${OUTER:-api_key=example}"),
     # structure around the value survives exactly
     ("echo ok; api_token=SECRET ./run", f"echo ok; api_token={R} ./run"),

@@ -1,6 +1,6 @@
 ---
 slug: webui-phase1-suggestions
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/webui-phase1-suggestions
@@ -181,4 +181,23 @@ next (session→fact provenance hardening; the app-shell UI phases).
 
 **Verdict (round 1):** changes-requested (Codex: BLOCKED) — _three P1s:
 Host-boundary bypass, unpreviewed-bytes install, unredacted edit surface._
-All findings addressed in revision 1; awaiting round 2.
+
+**Verdict (round 2):** changes-requested (Codex: BLOCKED, converging — no new
+finding IDs; full drop archived at
+`~/vault/outputs/reviews/neurobase/webui-phase1-suggestions.r2.review.md`):
+- F3/P1-SECURITY-003 **fixed**; F5/P3-DOCS-005 **fixed** (confirmed).
+- F1/P1-SECURITY-001 **partially fixed** — the ordinary rebinding shape is
+  blocked, but `is_loopback_host` is not a strict authority parser (probes:
+  `evil.example@localhost:8765`, `localhost#evil.example`,
+  `localhost/evil.example`, `localhost:notaport` all reach routing) and a
+  malformed Origin (`http://[::1`) 500s instead of 403ing. Completion: strict
+  fail-closed authority parse + Origin parse errors → rejection.
+- F2/P1-CORRECTNESS-002 **partially fixed** — the NUL-delimiter serialization
+  is not injective (`("A\0B","C")` vs `("A","B\0C")` collide) and the path
+  isn't resolved. Completion: length-prefixed/canonical encoding + resolved
+  path identity.
+- F4/P2-TEST-GAP-004 **partially fixed** — baseline tests landed; missing:
+  adversarial authority/origin cases, the collision unit test, exact
+  before/after snapshots on 409 (proposal + full ledger bytes), a non-GET/POST
+  method through the Host gate, and secret-injection tests for the detail and
+  accept-preview surfaces.

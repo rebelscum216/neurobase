@@ -103,29 +103,34 @@ uv tool install neurobase-cli     # command: `neurobase`
 (`neurobase-cli` because `neurobase` is taken on PyPI — decision D2. `pip
 install` will work too; `uv` is recommended, not required.)
 
-Then run the guided setup in the repo you want Neurobase to remember:
+Then run the guided setup once, from any repo you want Neurobase to remember:
 
 ```bash
-neurobase init
+neurobase init --user
 neurobase doctor
 ```
 
 `init` chooses a visible store root (default `~/neurobase`), enables the current
 repo, detects Claude Code / Codex CLI on your `PATH`, shows the exact config
 diffs, asks before writing, backs up any existing agent config, registers the MCP
-server, and prints the next-session notice. Codex will also ask you to approve the
-edited hook on its next launch; until that trust prompt is accepted, Codex won't
-run the hook. `doctor` reports the installed shim, store, project, brain backend,
-agent binaries, hook wiring, MCP registration, and Codex trust state — each with a
-named remedy.
+server, and prints the next-session notice. `--user` installs the hooks once in
+the agent's user config; capture still remains per-repo opt-in because the hook
+silently no-ops unless the current directory resolves to an enabled Neurobase
+project. Codex will also ask you to approve the edited hook on its next launch;
+until that trust prompt is accepted, Codex won't run the hook. `doctor` reports
+the installed shim, store, project, brain backend, agent binaries, hook wiring,
+MCP registration, and Codex trust state — each with a named remedy.
 
 Prefer the explicit path? Use the per-agent installers:
 
 ```bash
 neurobase enable                  # register the current repo as a project
-neurobase init --agent claude
-neurobase init --agent codex
+neurobase init --agent claude --user
+neurobase init --agent codex --user
 ```
+
+For additional repos on the same machine, run only `neurobase enable` from that
+repo; the user-scoped hooks already know how to no-op everywhere else.
 
 ## Everyday use
 

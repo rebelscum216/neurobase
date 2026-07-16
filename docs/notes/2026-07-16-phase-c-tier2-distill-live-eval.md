@@ -73,6 +73,29 @@ Claude transcript in a temp store:
 - The digest sidecar cache was written and reused on the second pass.
 - The dogfood store was not touched.
 
-Remaining optional follow-up: rerun the same harness with `ClaudeCLIBrain` after
-the 2026-07-16 12:30pm America/New_York reset, if backend-specific Claude
-evidence is desired.
+## ClaudeCLIBrain rerun
+
+The backend-specific rerun with `ClaudeCLIBrain` succeeded later on
+2026-07-16, using the same real Claude transcript and a temporary Neurobase
+store only. The dogfood store was not touched.
+
+Observed output:
+
+```text
+transcript bytes: 341614
+rendered chars: 39893
+transcript_path_recorded: True
+capture_version: 2
+pass1_counts: {'distilled': 1, 'fallback': 0}
+brain_calls_after_pass1: 1
+pass2_counts: {'distilled': 1, 'fallback': 0}
+total_brain_calls: 1
+cache_hit: True
+cache_sidecar: True
+skim_chars: 7715
+digest_chars: 3297
+digest_has_expected_heading: True
+```
+
+The digest started with `## Decisions`, so it passed ADR-0014 shape validation.
+This closes the earlier optional Claude-backend follow-up.

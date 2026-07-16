@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — {{ slug }}{% endblock %}
+{% block content %}
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+
+<section class="panel">
+  <h1><span class="mono">{{ slug }}</span> <span class="status-chip {{ status }}">{{ status }}</span></h1>
+  <dl class="meta">
+    <dt>Type</dt>
+    <dd>{{ type }} → {{ target }}</dd>
+    <dt>Project</dt>
+    <dd>{{ project or "multiple" }}</dd>
+    <dt>Candidate type</dt>
+    <dd>{{ candidate_type }}</dd>
+    <dt>Scores</dt>
+    <dd>
+      recurrence {{ scores.get("recurrence") }}, breadth {{ scores.get("breadth") }},
+      recency {{ scores.get("recency") }}, total {{ scores.get("total") }}
+    </dd>
+    <dt>Created</dt>
+    <dd>{{ created_at }}</dd>
+    <dt>Updated</dt>
+    <dd>{{ updated_at }}</dd>
+    {% if supersedes %}
+    <dt>Supersedes</dt>
+    <dd>{{ supersedes | join(", ") }}</dd>
+    {% endif %}
+    {% if installed_path %}
+    <dt>Installed at</dt>
+    <dd>{{ installed_path }}</dd>
+    {% endif %}
+  </dl>
+
+  <div class="actions">
+    {% if status == "proposed" %}
+      {% if type == "skill" %}
+      <a class="btn" href="/suggestions/{{ slug }}/accept?target=user">Preview accept (user skill)</a>
+      <a class="btn" href="/suggestions/{{ slug }}/accept?target=project">Preview accept (project skill)</a>
+      {% else %}
+      <a class="btn" href="/suggestions/{{ slug }}/accept">Preview accept</a>
+      {% endif %}
+      <a class="btn" href="/suggestions/{{ slug }}/edit">Edit draft</a>
+      <form class="inline" method="post" action="/suggestions/{{ slug }}/reject">
+        <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+        <button class="btn danger" type="submit">Reject</button>
+      </form>
+    {% elif status == "accepted" %}
+      <a class="btn" href="/suggestions/{{ slug }}/accept">Re-check install</a>
+    {% endif %}
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Draft (redacted)</h2>
+  <pre class="body">{{ body }}</pre>
+</section>
+
+<section class="panel">
+  <h2>Evidence</h2>
+  {% if evidence %}
+  <ul class="plain">
+    {% for e in evidence %}
+    <li class="mono">
+      {% if e.kind %}
+        {{ e.kind }}{% if e.project %} project={{ e.project }}{% endif %}{% if e.slug %} slug={{ e.slug }}{% endif %}{% if e.file %} file={{ e.file }}{% endif %}
+      {% else %}
+        {{ e.raw }}
+      {% endif %}
+      — [{{ e.status }}{% if e.tombstoned %}, tombstoned{% endif %}]
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No evidence recorded.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>History</h2>
+  {% if history %}
+  <ul class="plain">
+    {% for event in history %}
+    <li class="mono">
+      {{ event.at }} — {{ event.event }}
+      {%- for key, value in event.items() %}{% if key not in ["at", "slug", "event"] %} {{ key }}={{ value }}{% endif %}{% endfor -%}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No history yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

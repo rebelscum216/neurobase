@@ -1082,6 +1082,25 @@ def mcp_serve(
     _serve(store.resolve_root(root))
 
 
+# --- ui: the local Suggestions-review web server (Web UI Phase 1) ------------
+
+
+@app.command("ui")
+def ui(
+    root: str | None = typer.Option(None, "--root", help="Override the store root."),
+    port: int = typer.Option(8765, "--port", help="Loopback port to serve on."),
+) -> None:
+    """Serve the local Suggestions review web UI (127.0.0.1 only)."""
+    # Lazy import: webui pulls in starlette/jinja2/uvicorn — keep them off the
+    # hot path for every other command (and the hook fast-path), same pattern
+    # as `mcp serve` above.
+    from neurobase.webui.app import serve as _serve
+
+    resolved_root = store.resolve_root(root)
+    _check_store_schema(resolved_root)
+    _serve(resolved_root, port=port)
+
+
 def _read_stdin_json() -> dict[str, object]:
     """Read the hook's stdin JSON payload. Any problem ⇒ empty dict (fail-safe;
     never blocks on an interactive terminal)."""

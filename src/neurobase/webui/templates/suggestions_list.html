@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Suggestions{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Suggestions</h1>
+  <div class="metrics-strip">
+    <div class="metric">
+      <span class="label">Decided</span>
+      <span class="value">{{ metrics.decided }} (accepted {{ metrics.accepted }}, rejected {{ metrics.rejected }})</span>
+    </div>
+    <div class="metric">
+      <span class="label">Precision</span>
+      <span class="value">{{ metrics.precision }}</span>
+    </div>
+    <div class="metric">
+      <span class="label">Edited rate</span>
+      <span class="value">{{ metrics.edited_rate }}</span>
+    </div>
+    <div class="metric">
+      <span class="label">Reviewed events</span>
+      <span class="value">{{ metrics.reviewed_events }}</span>
+    </div>
+    <div class="metric">
+      <span class="label">Survival</span>
+      <span class="value">{{ metrics.survival_summary }}</span>
+    </div>
+    <div class="metric">
+      <span class="label">Recurrence reduction</span>
+      <span class="value">{{ metrics.recurrence_reduction }}</span>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  {% if rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Status</th>
+        <th>Type</th>
+        <th>Target</th>
+        <th>Project</th>
+        <th>Score</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td><a class="mono" href="/suggestions/{{ row.slug }}">{{ row.slug }}</a></td>
+        <td><span class="status-chip {{ row.status }}">{{ row.status }}</span></td>
+        <td>{{ row.type }}</td>
+        <td class="mono">{{ row.target }}</td>
+        <td>{{ row.project or "multiple" }}</td>
+        <td class="mono">{{ row.total }}</td>
+        <td class="mono">{{ row.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No proposals yet. Run <code class="mono">neurobase recommend run</code> to mine some.</p>
+  {% endif %}
+</section>
+{% endblock %}

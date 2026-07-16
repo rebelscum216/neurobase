@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — edit {{ slug }}{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Edit draft <span class="mono">{{ slug }}</span></h1>
+  <form method="post" action="/suggestions/{{ slug }}/edit">
+    <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+    <textarea name="draft" spellcheck="false">{{ draft }}</textarea>
+    <div class="actions">
+      <button class="btn" type="submit">Save draft</button>
+      <a class="btn" href="/suggestions/{{ slug }}">Cancel</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

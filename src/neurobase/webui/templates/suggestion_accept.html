@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — accept {{ slug }}{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Accept <span class="mono">{{ slug }}</span></h1>
+  <p>Target: <span class="mono">{{ target_path }}</span> (<span class="mono">{{ artifact_target }}</span>)</p>
+
+  {% if foreign %}
+  <div class="warning">Warning: target is not Neurobase-owned and will be replaced.</div>
+  {% endif %}
+
+  {% if already_up_to_date %}
+  <div class="flash">Already up to date — no changes to install.</div>
+  {% else %}
+  <pre class="diff">{% for line, cls in diff_lines %}<span class="diff-line {{ cls }}">{{ line }}</span>
+{% endfor %}</pre>
+  <form method="post" action="/suggestions/{{ slug }}/accept">
+    <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+    {% if is_skill %}<input type="hidden" name="target" value="{{ requested_target }}" />{% endif %}
+    <div class="actions">
+      <button class="btn" type="submit">Install and accept</button>
+    </div>
+  </form>
+  {% endif %}
+
+  <p><a href="/suggestions/{{ slug }}">Back to proposal</a></p>
+</section>
+{% endblock %}

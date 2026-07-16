@@ -202,6 +202,19 @@ finding IDs; full drop archived at
   method through the Host gate, and secret-injection tests for the detail and
   accept-preview surfaces.
 
+> **Round 3 (Codex):** P1-CORRECTNESS-002 confirmed **fixed** (incl. an
+> independent end-to-end target-drift probe: 409, tree byte-identical);
+> 003/005 hold. P1-SECURITY-001 partial — `$` matches before a trailing
+> newline, `\d`/`(?i:)` are Unicode-aware (`localhost\n`, full-width
+> digits, long-s lookalike passed). P2-TEST-GAP-004 partial — those parser
+> cases + target-drift e2e + resolved-path identity + recursive backup
+> snapshot missing. Full drop: `...r3.review.md`.
+>
+> **Revision 3 (author, 2026-07-16):** parser is `fullmatch` + `re.ASCII` +
+> `[0-9]` ports (all three lookalike classes rejected, tested); target-drift
+> e2e 409 test, resolved-path identity test, recursive relpath→bytes backup
+> snapshot. Full gate green. Awaiting round 4.
+
 > **Revision 2 (author, 2026-07-16, commit `697ce5a`):** all three partials
 > completed — strict full-string authority parser (userinfo/suffix/junk-port/
 > bracket/whitespace fail closed; malformed Origin → 403 not 500); fingerprint

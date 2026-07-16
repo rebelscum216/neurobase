@@ -271,7 +271,15 @@ def _state_snapshot(seed: Seed) -> dict[str, object]:
     ledger = ledger_path(seed.root)
     return {
         "target": target.read_bytes() if target.exists() else None,
-        "backups": sorted(p.name for p in backups.iterdir()) if backups.exists() else [],
+        # Recursive relpath -> bytes, not just top-level names — a mutation
+        # INSIDE an existing backup dir must fail this comparison too.
+        "backups": {
+            str(p.relative_to(backups)): p.read_bytes()
+            for p in sorted(backups.rglob("*"))
+            if p.is_file()
+        }
+        if backups.exists()
+        else {},
         "proposal": doc.file_path.read_bytes(),
         "ledger": ledger.read_bytes() if ledger.exists() else b"",
     }
@@ -310,6 +318,28 @@ def test_accept_post_with_stale_fingerprint_returns_409_and_writes_nothing(
     assert "A different draft entirely." in (seed.repo / "AGENTS.md").read_text(encoding="utf-8")
 
 
+def test_accept_post_with_stale_fingerprint_after_target_drift_returns_409(
+    client: TestClient, app: Starlette, seed: Seed
+) -> None:
+    # The OTHER drift dimension: the proposal is untouched but the target
+    # file's bytes changed after the preview — the previewed diff no longer
+    # describes what the install would do, so the stale form must 409 with
+    # zero side effects.
+    target = seed.repo / "AGENTS.md"
+    target.write_text("# Original target bytes\n", encoding="utf-8")
+    stale = _preview_fingerprint(client, seed.proposed_slug)
+    target.write_text("# Someone else touched the target\n", encoding="utf-8")
+    before = _state_snapshot(seed)
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/accept",
+        data={"csrf_token": app.state.csrf_token, "fingerprint": stale},
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 409
+    assert _state_snapshot(seed) == before
+
+
 def test_accept_post_without_fingerprint_returns_409_and_writes_nothing(
     client: TestClient, app: Starlette, seed: Seed
 ) -> None:
@@ -343,6 +373,26 @@ def test_preview_fingerprint_encoding_is_injective(tmp_path: Path) -> None:
     assert webui_routes._preview_fingerprint(
         preview("A\0B", "C")
     ) != webui_routes._preview_fingerprint(preview("A", "B\0C"))
+
+
+def test_preview_fingerprint_uses_resolved_path_identity(tmp_path: Path) -> None:
+    # §14 names the RESOLVED path: two spellings of the same file must
+    # fingerprint identically, and genuinely different paths must not.
+    from neurobase.core.store import Document
+    from neurobase.recommender import emitters
+    from neurobase.webui import routes as webui_routes
+
+    doc = Document(frontmatter={}, body="", file_path=tmp_path / "p.md")
+    (tmp_path / "sub").mkdir()
+
+    def fp(path: Path) -> str:
+        artifact = emitters.Artifact(path=path, before="a", after="b", target="AGENTS.md")
+        return webui_routes._preview_fingerprint(
+            install.InstallPreview(doc=doc, artifact=artifact, already_up_to_date=False)
+        )
+
+    assert fp(tmp_path / "sub" / ".." / "AGENTS.md") == fp(tmp_path / "AGENTS.md")
+    assert fp(tmp_path / "AGENTS.md") != fp(tmp_path / "sub" / "AGENTS.md")
 
 
 def test_accept_post_when_already_up_to_date_is_a_no_op(

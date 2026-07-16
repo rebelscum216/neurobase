@@ -145,6 +145,12 @@ def test_is_loopback_host_vocabulary() -> None:
         "[::1:8765",  # unmatched bracket
         "::1:8765",  # unbracketed IPv6-with-port is ambiguous — fail closed
         "127.0.0.1:8765/",
+        "localhost\n",  # $ would match before a trailing newline; fullmatch must not
+        "localhost:8765\n",
+        "localhost\r",
+        "localhost:１２３",  # non-ASCII decimal digits are not a port
+        "localhoſt",  # Unicode case-fold lookalike (long s) is not 'localhost'
+        "localhoſt:8765",
     ],
 )
 def test_is_loopback_host_rejects_malformed_authorities(host: str) -> None:

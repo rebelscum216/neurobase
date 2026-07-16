@@ -35,8 +35,15 @@ CSRF_FORM_FIELD = "csrf_token"
 # ``hostname``) tolerates userinfo (``evil.example@localhost``), path/query/
 # fragment suffixes (``localhost/evil.example``), and junk ports
 # (``localhost:notaport``), all of which must fail closed here.
+#
+# Strictness details that all matter: matched via ``fullmatch`` (a ``$``
+# anchor would match before a trailing newline, letting ``"localhost\n"``
+# through); compiled ``re.ASCII`` so case-insensitivity cannot Unicode-fold a
+# lookalike (``localhoſt``) onto ``localhost``; and ports are ``[0-9]``
+# so non-ASCII decimal digits (``１２３``) don't count as numeric.
 _LOOPBACK_AUTHORITY_RE = re.compile(
-    r"^(?:127\.0\.0\.1|\[::1\]|(?i:localhost))(?::(?P<port>\d{1,5}))?$"
+    r"(?:127\.0\.0\.1|\[::1\]|(?i:localhost))(?::(?P<port>[0-9]{1,5}))?",
+    re.ASCII,
 )
 
 
@@ -53,7 +60,7 @@ def is_loopback_host(host: str | None) -> bool:
     rejects the whole header — fail closed, never extract-and-hope."""
     if not host:
         return False
-    match = _LOOPBACK_AUTHORITY_RE.match(host)
+    match = _LOOPBACK_AUTHORITY_RE.fullmatch(host)
     if match is None:
         return False
     port = match.group("port")

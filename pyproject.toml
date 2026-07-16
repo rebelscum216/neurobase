@@ -55,6 +55,7 @@ exclude = [".uv-cache/", "PICKUP.md"]
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-timeout>=2.3",
     "ruff>=0.6",
     "mypy>=1.11",
     "pre-commit>=3.8",
@@ -71,6 +72,13 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Fail-loud guardrail: no single test may block the gate indefinitely. The whole
+# suite runs in ~5s, so 60s is enormous headroom — it only ever trips on a real
+# hang (a subprocess that never returns, a blocking stdin read), and when it does
+# it fails *naming the test* with a stack dump instead of hanging forever. Method
+# defaults to `signal` (SIGALRM) on Unix so a blocked syscall is actually
+# interrupted; pytest-timeout falls back to `thread` automatically on Windows CI.
+timeout = 60
 
 # Lenient to start (build-plan §9); tighten as the codebase grows.
 [tool.mypy]

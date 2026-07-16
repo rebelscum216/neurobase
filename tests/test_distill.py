@@ -236,13 +236,20 @@ def test_secret_in_tool_result_never_reaches_the_brain(root: Path, tmp_path: Pat
 
 def test_secret_in_tool_use_command_never_reaches_the_brain(root: Path, tmp_path: Path) -> None:
     """A planted secret in an assistant ``tool_use`` *command* field must be
-    scrubbed before the render reaches the distiller (D17). This drives the
-    ``_tool_use_line`` path, whose command value goes through ``redact_command``
-    (a *different* redactor than the tool_result path) — an env-assignment secret
-    is exactly what that lexical boundary is meant to catch."""
-    secret = "API_TOKEN=supersecretvalue123"
+    scrubbed by ``_tool_use_line``'s command-channel redactor (``redact_command``,
+    D17) — a *different* redactor than the tool_result/prose path.
+
+    The fixture is chosen so this test actually pins ``scrub_command`` and isn't
+    self-satisfied by the whole-render ``redact()`` defense-in-depth pass in
+    ``_distill_one`` (Codex round-1 F1): ``pytest --api-key=<val>`` is a
+    command-flag shape that ``redact_command`` catches but plain ``redact`` does
+    *not* once the value sits behind the ``command=`` label. So if the command
+    branch regressed to plain ``scrub`` or no scrub, the secret would survive and
+    this test would fail."""
+    secret_value = "supersecretvalue123"
+    command = f"pytest --api-key={secret_value}"
     events = [
-        {"type": "user", "message": {"role": "user", "content": "set up the env"}},
+        {"type": "user", "message": {"role": "user", "content": "run the tests"}},
         {
             "type": "assistant",
             "message": {
@@ -252,7 +259,7 @@ def test_secret_in_tool_use_command_never_reaches_the_brain(root: Path, tmp_path
                         "type": "tool_use",
                         "id": "t1",
                         "name": "Bash",
-                        "input": {"command": f"export {secret} && env"},
+                        "input": {"command": command},
                     }
                 ],
             },
@@ -275,12 +282,15 @@ def test_secret_in_tool_use_command_never_reaches_the_brain(root: Path, tmp_path
     assert counts["distilled"] == 1
     assert captured, "distiller was called"
     rendered = captured[0]
-    # The command line was rendered (proves _tool_use_line ran) but scrubbed.
+    # The command line was rendered (proves _tool_use_line ran)...
     assert "[tool_use Bash] command=" in rendered
-    assert "supersecretvalue123" not in rendered
-    # and never in the cached digest sidecar
+    # ...the command-channel scrubber fired on it (redaction marker present)...
+    assert "[REDACTED:" in rendered
+    # ...and the secret never reached the brain.
+    assert secret_value not in rendered
+    # nor the cached digest sidecar
     cache = store.memory_dir("proj", root) / "raw" / ".digests" / "r1.md"
-    assert "supersecretvalue123" not in cache.read_text(encoding="utf-8")
+    assert secret_value not in cache.read_text(encoding="utf-8")
 
 
 def test_tool_result_block_list_is_joined_and_scrubbed(root: Path, tmp_path: Path) -> None:
@@ -338,11 +348,21 @@ def test_tool_result_block_list_is_joined_and_scrubbed(root: Path, tmp_path: Pat
 
 
 def test_oversize_transcript_drops_middle_chunks_and_marks_it(root: Path, tmp_path: Path) -> None:
-    """When the render exceeds the chunk cap, the middle chunks are dropped (head
-    + tail kept) and the digest is prefixed with a visible drop marker so the
-    loss is never silent (``_chunk`` + the ``dropped`` path in ``_distill_one``)."""
+    """When the render exceeds the chunk cap, the **middle** chunks are dropped
+    while the head and tail are kept, and the digest is prefixed with a visible
+    drop marker so the loss is never silent (``_chunk`` + the ``dropped`` path in
+    ``_distill_one``).
+
+    To pin the head+tail *retention* (not just the marker — Codex round-1 F2), the
+    render carries distinguishable HEAD/MIDDLE/TAIL sentinels and a capturing brain
+    records the per-chunk prompts actually sent: HEAD and TAIL must appear in them,
+    MIDDLE must not."""
+    # 6-char "USER: " prefix + sentinels spaced so HEAD lands in the first chunk,
+    # TAIL in the last, and MIDDLE deep in the dropped interior. At chunk_chars=50
+    # / MAX_DISTILL_CHUNKS=5, _chunk keeps the first 3 and last 2 chunks.
+    text = "HEADsentinel" + ("a" * 300) + "MIDDLEsentinel" + ("a" * 300) + "TAILsentinel"
     events = [
-        {"type": "user", "message": {"role": "user", "content": "X" * 1000}},
+        {"type": "user", "message": {"role": "user", "content": text}},
         {
             "type": "assistant",
             "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
@@ -350,14 +370,29 @@ def test_oversize_transcript_drops_middle_chunks_and_marks_it(root: Path, tmp_pa
     ]
     t = _write_transcript(tmp_path / "t.jsonl", events)
 
+    chunk_prompts: list[str] = []
+
+    class CapturingBrain(DistillBrain):
+        def text(self, system: str, user: str) -> str:
+            if system.startswith("You compress"):  # per-chunk calls only, not merge
+                chunk_prompts.append(user)
+            return super().text(system, user)
+
     doc = _write_raw(root, "proj", "r1.md", transcript_path=str(t))
-    # chunk_chars small ⇒ the ~1000-char render splits into far more than
-    # MAX_DISTILL_CHUNKS (5) chunks, forcing the middle-drop.
-    out, counts = distill.distill_docs(root, "proj", [doc], DistillBrain(), chunk_chars=50)
+    # chunk_chars small ⇒ the render splits into far more than MAX_DISTILL_CHUNKS
+    # (5) chunks, forcing the middle-drop.
+    out, counts = distill.distill_docs(root, "proj", [doc], CapturingBrain(), chunk_chars=50)
 
     assert counts["distilled"] == 1
-    body = out[0].body
-    assert "middle chunk(s) dropped for size" in body
+    # The drop is marked in the digest body...
+    assert "middle chunk(s) dropped for size" in out[0].body
+    # ...and only 5 chunks (MAX_DISTILL_CHUNKS) were actually sent to the brain...
+    assert len(chunk_prompts) == 5
+    # ...carrying the head and tail, but not the dropped middle.
+    sent = "\n".join(chunk_prompts)
+    assert "HEADsentinel" in sent
+    assert "TAILsentinel" in sent
+    assert "MIDDLEsentinel" not in sent
 
 
 # --- rendering (summary + subagent sidechain) ----------------------------

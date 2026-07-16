@@ -1,6 +1,6 @@
 ---
 slug: webui-phase1-suggestions
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/webui-phase1-suggestions
@@ -201,3 +201,11 @@ finding IDs; full drop archived at
   before/after snapshots on 409 (proposal + full ledger bytes), a non-GET/POST
   method through the Host gate, and secret-injection tests for the detail and
   accept-preview surfaces.
+
+> **Revision 2 (author, 2026-07-16, commit `697ce5a`):** all three partials
+> completed — strict full-string authority parser (userinfo/suffix/junk-port/
+> bracket/whitespace fail closed; malformed Origin → 403 not 500); fingerprint
+> components length-prefixed (injective) over the resolved path; adversarial
+> authority tests, collision unit test, exact byte snapshots on both 409
+> paths, PUT through the Host gate, and secret-injection tests on all three
+> draft surfaces. Full gate green. Awaiting round 3.

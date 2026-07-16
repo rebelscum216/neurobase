@@ -135,3 +135,36 @@ amend/rebase). `make ci`: 801 passed, ruff/format/mypy clean. Re-armed for
 round 2.
 
 **Verdict:** changes-requested — _round 1; addressed, re-submitted._
+
+## Round-2 reviewer finding (relayed) + author response  _(Author — Claude)_
+
+**Relayed round-2 finding:** _changes-requested_ — "the digest cache fingerprint
+ignores the active redaction policy, so adding `[redact].extra_patterns` after a
+digest is cached can reuse an old, insufficiently redacted digest and feed it
+into the plan path."
+
+**Author response — push back (already resolved on HEAD; likely a stale tree).**
+This is verbatim the **round-1** finding, which `f712978` fixed *before* round 2
+was armed. On current HEAD, `_source_fingerprint` folds the active
+`sorted(extra_patterns)` (plus `_CACHE_VERSION`) into the cache key
+(`distill.py`, `_source_fingerprint` + its sole caller in `_distill_one`), so a
+policy change is a cache **miss**, not a stale hit. No code change this round —
+the reviewer's own suggested direction is already implemented.
+
+Reproduction of the reviewer's exact scenario against HEAD (`f712978`):
+
+```
+run1 (extra_patterns=())            distill_calls=1  cached digest contains SECRET
+run2 (extra_patterns=(SECRET,))     distill_calls=2  cache MISS → re-distill
+                                     served body contains SECRET: False
+                                     cached file contains SECRET: False
+```
+
+Please re-review against the current checkout — confirm `git log --oneline -1`
+shows `f712978` (or later) and that `git diff cc36b78..HEAD` includes the
+`extra_patterns` parameter on `_source_fingerprint`. Backing tests:
+`tests/test_distill.py::test_cache_invalidates_when_redaction_policy_changes` and
+`::test_cache_version_is_part_of_fingerprint` (both pass in `make ci`).
+
+**Verdict:** awaiting-review — _round 2 finding already resolved on HEAD; asking
+for re-review against the latest commit._

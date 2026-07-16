@@ -16,6 +16,7 @@ during the earlier GET preview).
 from __future__ import annotations
 
 import difflib
+import hashlib
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -247,6 +248,18 @@ def _diff_line_class(line: str) -> str:
     return ""
 
 
+def _preview_fingerprint(preview: install.InstallPreview) -> str:
+    """A server-verifiable identity for one rendered preview: resolved path,
+    target scope, and the exact before/after bytes. Carried as a hidden form
+    field and re-checked inside the committing POST, so consent binds to the
+    precise diff the user saw (§14) — a proposal, registry, or target-file
+    change between preview and commit must force a re-preview, never install
+    unpreviewed bytes."""
+    artifact = preview.artifact
+    payload = "\0".join([str(artifact.path), str(artifact.target), artifact.before, artifact.after])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _run_prepare_install(
     request: Request, root: Path, slug: str, target: str | None
 ) -> install.InstallPreview | Response:
@@ -287,6 +300,7 @@ async def _accept_view(request: Request) -> Response:
             "diff_lines": diff_lines,
             "requested_target": target or "",
             "is_skill": str(preview.doc.get("type")) == "skill",
+            "fingerprint": _preview_fingerprint(preview),
         }
         return _templates(request).TemplateResponse(request, "suggestion_accept.html", context)
 
@@ -298,6 +312,18 @@ async def _accept_view(request: Request) -> Response:
     if isinstance(outcome, Response):
         return outcome
     preview = outcome
+
+    # §14: consent binds to the exact previewed diff. The fresh preparation
+    # above prevents writing stale bytes; this check prevents the converse —
+    # writing *fresh* bytes the user never previewed.
+    submitted = form.get("fingerprint")
+    if not isinstance(submitted, str) or submitted != _preview_fingerprint(preview):
+        return _error_response(
+            request,
+            409,
+            f"proposal {slug!r} (or its install target) changed after the diff "
+            "was previewed — nothing was installed. Re-review the new diff.",
+        )
 
     if preview.already_up_to_date:
         # Mirrors `recommend accept`'s own early return: nothing to install,
@@ -348,7 +374,9 @@ async def _edit_view(request: Request) -> Response:
         draft = proposals.extract_draft(doc.body)
         if draft is None:
             return _error_response(request, 400, f"proposal {slug!r} has no managed draft region")
-        context = {**_base_context(request), "slug": slug, "draft": draft}
+        # §14/§12.8: redact at display time on EVERY draft surface — a legacy
+        # or hand-edited proposal may carry secrets the write paths never saw.
+        context = {**_base_context(request), "slug": slug, "draft": proposals.redact_body(draft)}
         return _templates(request).TemplateResponse(request, "suggestion_edit.html", context)
 
     form = await request.form()

@@ -16,6 +16,7 @@
 {% endfor %}</pre>
   <form method="post" action="/suggestions/{{ slug }}/accept">
     <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+    <input type="hidden" name="fingerprint" value="{{ fingerprint }}" />
     {% if is_skill %}<input type="hidden" name="target" value="{{ requested_target }}" />{% endif %}
     <div class="actions">
       <button class="btn" type="submit">Install and accept</button>

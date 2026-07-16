@@ -28,10 +28,15 @@ coupling, mirroring `mcp serve`). The accept choreography is extracted to
 `recommender/install.py` (`prepare_install`/`commit_install`) so CLI and web UI
 install through one code path; the CLI wrapper preserves its messages and exit
 codes with `tests/test_cli_recommend.py` as the unmodified oracle. Security
-posture: bind hard-pinned to `127.0.0.1` (no `--host`), every POST gated before
-routing by a same-origin check plus a per-process CSRF token compared with
-`secrets.compare_digest`, reads side-effect-free, no cookies or sessions,
-drafts redacted at display time. No build step, no npm — server-rendered HTML
+posture: bind hard-pinned to `127.0.0.1` (no `--host`); every request must
+carry a loopback `Host` authority (`127.0.0.1`/`localhost`/`::1` — the
+DNS-rebinding defense: the bind alone does not constrain the `Host` header);
+every POST additionally gated before routing by a same-origin check plus a
+per-process CSRF token compared with `secrets.compare_digest`; the committing
+accept POST verifies a fingerprint of the previewed diff against its fresh
+preparation (consent binds to the exact bytes shown, 409 on drift); reads
+side-effect-free, no cookies or sessions, drafts redacted at display time on
+every surface that renders them. No build step, no npm — server-rendered HTML
 (vanilla JS only if a later phase needs it); `jinja2` and `uvicorn` become
 direct base dependencies. The behavioral contract is recorded as spec
 appendix **§14**.

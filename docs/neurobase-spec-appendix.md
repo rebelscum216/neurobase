@@ -1888,13 +1888,20 @@ review surface; later phases extend this section rather than bypassing it.
 
 ### Request discipline
 
+- Every request — any method — **MUST carry a loopback `Host` authority**
+  (`127.0.0.1`, `localhost`, or `::1`, any port); anything else answers 403
+  before routing. The socket bind does not constrain the HTTP `Host` value: a
+  DNS-rebound hostname resolves to loopback and would otherwise become
+  same-origin with this server, so the boundary is enforced on the header, not
+  just the socket.
 - Every read route is a **side-effect-free GET**; every mutation is a **POST**.
-- Every POST **MUST pass, before routing**: (a) a same-origin check — `Origin`
-  header, falling back to `Referer`, netloc-matched against `Host`; and (b) a
-  CSRF token check — one per-process `secrets.token_urlsafe(32)` embedded as a
-  hidden form field and compared with `secrets.compare_digest`. Failures answer
-  403. No cookies, no sessions, nothing persisted — a server restart
-  invalidates all outstanding forms by design.
+- Every POST **MUST additionally pass, before routing**: (a) a same-origin
+  check — `Origin` header, falling back to `Referer`, netloc-matched against
+  the (already loopback-validated) `Host`; and (b) a CSRF token check — one
+  per-process `secrets.token_urlsafe(32)` embedded as a hidden form field and
+  compared with `secrets.compare_digest`. Failures answer 403. No cookies, no
+  sessions, nothing persisted — a server restart invalidates all outstanding
+  forms by design.
 - Successful POSTs answer **303 See Other** (post/redirect/get) with any flash
   message carried as a query parameter.
 - Expected failures render the error template with typed status codes (404
@@ -1908,6 +1915,13 @@ review surface; later phases extend this section rather than bypassing it.
   `installed_hash`. The committing POST **MUST re-run `prepare_install`
   fresh** — a GET-time preview is never trusted. A no-op install
   (before == after) short-circuits with no ledger event.
+- Consent binds to the **exact previewed diff**: the confirm form carries a
+  fingerprint of the previewed result (resolved path, target, exact
+  before/after bytes), and the committing POST **MUST verify the freshly
+  prepared result matches it** — on mismatch (or a missing fingerprint) answer
+  a typed 409 with **no backup, no artifact write, no proposal mutation, and
+  no ledger event**; the user re-previews. Fresh preparation without this
+  binding would authorize bytes the user never saw.
 - Reject and edit call the same `proposals` functions as the CLI, with the same
   blocked-status rules (§12.7).
 - Draft bodies **MUST be redacted at display time** (§12.8) — never render an

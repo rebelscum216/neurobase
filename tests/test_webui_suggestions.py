@@ -14,6 +14,7 @@ inside the tmp repo.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,7 +117,22 @@ def app(seed: Seed) -> Starlette:
 
 @pytest.fixture
 def client(app: Starlette) -> TestClient:
-    return TestClient(app)
+    # Loopback base_url — TestClient's default `testserver` Host authority is
+    # (correctly) rejected by the §14 loopback-Host gate.
+    return TestClient(app, base_url="http://127.0.0.1:8765")
+
+
+_FINGERPRINT_RE = re.compile(r'name="fingerprint" value="([0-9a-f]{64})"')
+
+
+def _preview_fingerprint(client: TestClient, slug: str) -> str:
+    """Scrape the consent fingerprint from a live GET preview — the same
+    hidden field a real browser form would submit."""
+    response = client.get(f"/suggestions/{slug}/accept")
+    assert response.status_code == 200
+    match = _FINGERPRINT_RE.search(response.text)
+    assert match is not None, "accept preview did not render a fingerprint field"
+    return match.group(1)
 
 
 # --- list ---------------------------------------------------------------------
@@ -211,7 +227,10 @@ def test_full_accept_writes_backs_up_and_flips_status(
 
     response = client.post(
         f"/suggestions/{seed.proposed_slug}/accept",
-        data={"csrf_token": app.state.csrf_token},
+        data={
+            "csrf_token": app.state.csrf_token,
+            "fingerprint": _preview_fingerprint(client, seed.proposed_slug),
+        },
         headers={"origin": str(client.base_url)},
         follow_redirects=False,
     )
@@ -233,6 +252,105 @@ def test_full_accept_writes_backs_up_and_flips_status(
 
     history = proposals.ledger_history(seed.root, seed.proposed_slug)
     assert history[-1]["event"] == "accepted"
+
+
+# --- accept (POST) — consent binds to the previewed diff (§14) -----------------
+
+
+def _assert_nothing_installed(seed: Seed) -> None:
+    assert not (seed.repo / "AGENTS.md").exists()
+    assert not (seed.root / "backups").exists()
+    doc = proposals.load_proposal(seed.root, seed.proposed_slug)
+    assert doc is not None
+    assert doc.get("status") == "proposed"
+    history = proposals.ledger_history(seed.root, seed.proposed_slug)
+    assert all(event["event"] != "accepted" for event in history)
+
+
+def test_accept_post_with_stale_fingerprint_returns_409_and_writes_nothing(
+    client: TestClient, app: Starlette, seed: Seed
+) -> None:
+    # The P1-CORRECTNESS-002 shape: preview one draft, change the proposal,
+    # submit the original form — the freshly prepared bytes were never
+    # previewed, so the commit must refuse with a typed 409 and no side
+    # effects (no backup, no artifact, no proposal mutation, no ledger event).
+    stale = _preview_fingerprint(client, seed.proposed_slug)
+    assert proposals.save_edited_draft(seed.root, seed.proposed_slug, "A different draft entirely.")
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/accept",
+        data={"csrf_token": app.state.csrf_token, "fingerprint": stale},
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 409
+    assert "changed after the diff" in response.text
+    _assert_nothing_installed(seed)
+    # A fresh preview + commit still works after the drift refusal.
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/accept",
+        data={
+            "csrf_token": app.state.csrf_token,
+            "fingerprint": _preview_fingerprint(client, seed.proposed_slug),
+        },
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "A different draft entirely." in (seed.repo / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_accept_post_without_fingerprint_returns_409_and_writes_nothing(
+    client: TestClient, app: Starlette, seed: Seed
+) -> None:
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/accept",
+        data={"csrf_token": app.state.csrf_token},
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 409
+    _assert_nothing_installed(seed)
+
+
+def test_accept_post_when_already_up_to_date_is_a_no_op(
+    client: TestClient, app: Starlette, seed: Seed
+) -> None:
+    # §14: a no-op install (before == after) short-circuits — no backup, no
+    # artifact write, no second ledger event. The seed's accepted proposal is
+    # already installed unchanged, so its fresh preview is up to date.
+    backups_dir = seed.root / "backups"
+    backups_before = sorted(backups_dir.iterdir()) if backups_dir.exists() else []
+    accepted_before = [
+        event
+        for event in proposals.ledger_history(seed.root, seed.accepted_slug)
+        if event["event"] == "accepted"
+    ]
+
+    preview = install.prepare_install(seed.root, seed.accepted_slug, target="project")
+    assert preview.already_up_to_date
+    from neurobase.webui import routes as webui_routes
+
+    response = client.post(
+        f"/suggestions/{seed.accepted_slug}/accept",
+        data={
+            "csrf_token": app.state.csrf_token,
+            "target": "project",
+            "fingerprint": webui_routes._preview_fingerprint(preview),
+        },
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "Already+up+to+date" in response.headers["location"]
+
+    backups_after = sorted(backups_dir.iterdir()) if backups_dir.exists() else []
+    assert backups_after == backups_before
+    accepted_after = [
+        event
+        for event in proposals.ledger_history(seed.root, seed.accepted_slug)
+        if event["event"] == "accepted"
+    ]
+    assert accepted_after == accepted_before
 
 
 # --- reject ---------------------------------------------------------------------
@@ -279,3 +397,25 @@ def test_edit_round_trips_new_draft(client: TestClient, app: Starlette, seed: Se
 
     history = proposals.ledger_history(seed.root, seed.proposed_slug)
     assert history[-1]["event"] == "edited"
+
+
+def test_edit_get_redacts_legacy_draft_secrets(client: TestClient, seed: Seed) -> None:
+    # §14/§12.8: display-time redaction on EVERY draft surface, including a
+    # legacy/hand-edited proposal whose file was written outside the redacting
+    # write paths. Inject a secret directly into the managed draft region on
+    # disk (save_edited_draft would redact it, which is exactly the point).
+    doc = proposals.load_proposal(seed.root, seed.proposed_slug)
+    assert doc is not None
+    secret = "ghp_" + "A" * 36
+    path = doc.file_path
+    text = path.read_text(encoding="utf-8")
+    assert "Always use uv run." in text
+    path.write_text(
+        text.replace("Always use uv run.", f"Always use uv run. token: {secret}"),
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/suggestions/{seed.proposed_slug}/edit")
+    assert response.status_code == 200
+    assert secret not in response.text
+    assert "[REDACTED:github-token]" in response.text

@@ -21,10 +21,31 @@ from starlette.responses import PlainTextResponse, Response
 # The hidden form field every mutating (POST) form must carry.
 CSRF_FORM_FIELD = "csrf_token"
 
+# The only Host authorities this server answers (spec §14). Binding the
+# socket to 127.0.0.1 does not constrain the HTTP ``Host`` value: under DNS
+# rebinding a hostile page's own hostname resolves to loopback, its requests
+# carry that hostname as ``Host`` (and as a *matching* ``Origin``), and the
+# browser then treats the response as same-origin — so the boundary must be
+# enforced on the header, not just the socket. Loopback names cannot be
+# rebound; anything else is rejected before routing, on every method.
+LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
 
 def new_csrf_token() -> str:
     """A fresh, unguessable per-process CSRF token."""
     return secrets.token_urlsafe(32)
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """Whether a raw ``Host`` header names a loopback authority
+    (``127.0.0.1``, ``localhost``, or ``::1``, any port)."""
+    if not host:
+        return False
+    try:
+        hostname = urlsplit(f"//{host}").hostname
+    except ValueError:
+        return False
+    return hostname in LOOPBACK_HOSTNAMES
 
 
 def _origin_netloc(request: Request) -> str | None:
@@ -57,8 +78,12 @@ async def check_same_origin_csrf(request: Request, csrf_token: str) -> str | Non
     keeps this middleware-level check side-effect-neutral for every
     downstream handler in ``webui/routes.py``.
     """
-    origin_netloc = _origin_netloc(request)
     host = request.headers.get("host")
+    if not is_loopback_host(host):
+        # Checked again here (not only in the middleware) so a direct caller
+        # of this function gets the full §14 gate, not a partial one.
+        return "non-loopback host rejected"
+    origin_netloc = _origin_netloc(request)
     if origin_netloc is None or host is None or origin_netloc != host:
         return "cross-origin request rejected"
     await request.body()
@@ -70,15 +95,18 @@ async def check_same_origin_csrf(request: Request, csrf_token: str) -> str | Non
 
 
 class CSRFMiddleware(BaseHTTPMiddleware):
-    """Rejects every POST that fails :func:`check_same_origin_csrf` with 403,
-    before it reaches any route handler. Reads the token from
-    ``request.app.state.csrf_token`` at dispatch time (set once, at
-    app-build time, by ``webui.app.build_app``) rather than capturing it at
-    construction time, so it stays correct regardless of when Starlette
-    happens to build its lazy middleware stack.
+    """Enforces the §14 request gate before any route handler runs: every
+    request (any method) must carry a loopback ``Host`` authority, and every
+    POST must additionally pass :func:`check_same_origin_csrf`. Failures
+    answer 403. Reads the token from ``request.app.state.csrf_token`` at
+    dispatch time (set once, at app-build time, by ``webui.app.build_app``)
+    rather than capturing it at construction time, so it stays correct
+    regardless of when Starlette happens to build its lazy middleware stack.
     """
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if not is_loopback_host(request.headers.get("host")):
+            return PlainTextResponse("non-loopback host rejected", status_code=403)
         if request.method == "POST":
             csrf_token = request.app.state.csrf_token
             rejection = await check_same_origin_csrf(request, csrf_token)

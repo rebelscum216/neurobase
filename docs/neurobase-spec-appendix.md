@@ -1859,3 +1859,58 @@ no resources and no prompt are registered — and `resources/list` is still `[]`
 / `codex mcp add`) under the **same consent → diff → backup** flow as the hook
 installers (§7). `doctor` checks the server is registered and startable per
 agent; `uninstall` removes any registration it added.
+
+## 14. Web UI contract (`webui/`, Web UI Phase 1)
+
+A local, loopback-only web server (`neurobase ui`) — a **second presentation
+layer** over the same core the CLI drives. Phase 1 scope is the Suggestions
+review surface; later phases extend this section rather than bypassing it.
+
+### Layering
+
+- `webui/` is a **peer of `cli/`**: both sit on `core/`, `brain/`, and the mid
+  tier; **neither imports the other's code**. The one sanctioned coupling is the
+  launcher: the `ui` CLI command lazily imports `neurobase.webui.app.serve`
+  inside its body (the `mcp serve` pattern) so starlette/jinja2/uvicorn stay off
+  the hook fast path.
+- Choreography shared with the CLI lives in named mid-tier services
+  (`recommender/install.py` — `prepare_install`/`commit_install`), never in a
+  lateral import between the two edges.
+
+### Serving
+
+- The server **MUST bind `127.0.0.1` only**; no `--host` option exists. This is
+  a local tool by charter — exposure beyond loopback requires real auth first
+  and is out of contract.
+- `neurobase ui` **MUST run the §10/D11 schema check** on the resolved root
+  before serving anything.
+- `jinja2` and `uvicorn` are direct base dependencies (no extras).
+
+### Request discipline
+
+- Every read route is a **side-effect-free GET**; every mutation is a **POST**.
+- Every POST **MUST pass, before routing**: (a) a same-origin check — `Origin`
+  header, falling back to `Referer`, netloc-matched against `Host`; and (b) a
+  CSRF token check — one per-process `secrets.token_urlsafe(32)` embedded as a
+  hidden form field and compared with `secrets.compare_digest`. Failures answer
+  403. No cookies, no sessions, nothing persisted — a server restart
+  invalidates all outstanding forms by design.
+- Successful POSTs answer **303 See Other** (post/redirect/get) with any flash
+  message carried as a query parameter.
+- Expected failures render the error template with typed status codes (404
+  not-found, 409 decided/blocked-status, 400 malformed) — never a raw 500.
+
+### Parity with the CLI (§12 discipline)
+
+- Accept **MUST** flow through `install.prepare_install` → `commit_install`:
+  status guard before any render/diff/write, diff preview, backup under
+  `<root>/backups/<ts>/`, atomic write, ledger `accepted` event with
+  `installed_hash`. The committing POST **MUST re-run `prepare_install`
+  fresh** — a GET-time preview is never trusted. A no-op install
+  (before == after) short-circuits with no ledger event.
+- Reject and edit call the same `proposals` functions as the CLI, with the same
+  blocked-status rules (§12.7).
+- Draft bodies **MUST be redacted at display time** (§12.8) — never render an
+  unredacted draft, even hand-edited/legacy.
+- Metrics rendering follows §12.9: `None` renders as *insufficient data*, never
+  a fake measured zero.

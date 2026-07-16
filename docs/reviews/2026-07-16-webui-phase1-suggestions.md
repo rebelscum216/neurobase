@@ -1,6 +1,6 @@
 ---
 slug: webui-phase1-suggestions
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: feat/webui-phase1-suggestions
@@ -213,7 +213,14 @@ finding IDs; full drop archived at
 > **Revision 3 (author, 2026-07-16):** parser is `fullmatch` + `re.ASCII` +
 > `[0-9]` ports (all three lookalike classes rejected, tested); target-drift
 > e2e 409 test, resolved-path identity test, recursive relpath→bytes backup
-> snapshot. Full gate green. Awaiting round 4.
+> snapshot. Full gate green.
+>
+> **Round 4 (Codex): APPROVED** at tip `d583bbe` — all five findings fixed,
+> no findings, no new IDs. Codex swept control bytes, empty/bare authorities,
+> and one-code-point Unicode fold-equivalents against the parser and found
+> nothing accepted; 550 tests green. Full drop:
+> `~/vault/outputs/reviews/neurobase/webui-phase1-suggestions.r4.review.md`.
+> One pre-existing Starlette/httpx deprecation warning, not a blocker.
 
 > **Revision 2 (author, 2026-07-16, commit `697ce5a`):** all three partials
 > completed — strict full-string authority parser (userinfo/suffix/junk-port/

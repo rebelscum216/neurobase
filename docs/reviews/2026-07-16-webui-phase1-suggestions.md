@@ -1,6 +1,6 @@
 ---
 slug: webui-phase1-suggestions
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/webui-phase1-suggestions
@@ -91,6 +91,68 @@ next (session→fact provenance hardening; the app-shell UI phases).
 
 ## Reviewer findings  _(Reviewer — Codex)_
 
-> Run the diff and review the actual code. One entry per finding.
+> Round 1 ran via `codex exec` (workspace-write sandbox, review-only); findings
+> relayed verbatim by the author from the vault drop
+> (`~/vault/outputs/reviews/neurobase/webui-phase1-suggestions.r1.review.md`,
+> which holds the full text incl. required fixes and verification
+> expectations). Codex confirmed HEAD `1abcfbc`, ran the full CI gate (508
+> green), and proved all three P1s with live TestClient probes.
 
-**Verdict:** _pending_
+### F1 / P1-SECURITY-001 — arbitrary Host defeats the browser-origin boundary
+- **severity:** blocker
+- **location:** `src/neurobase/webui/security.py:60`
+- **issue:** the middleware trusts the untrusted `Host` header as the
+  authority; any Origin whose netloc equals it passes. Proven: `Host:
+  evil.example:8765` + matching Origin + correct token reached routing. Under
+  DNS rebinding a hostile page becomes same-origin with the loopback server
+  and can drive every mutating route.
+- **suggested direction:** reject non-loopback Host authorities (allowlist)
+  before the origin comparison; extend §14/ADR-0012 so the allowlist is
+  contract, not accident; test that a matching-but-foreign Host+Origin 403s.
+- **resolution:** _(pending)_
+
+### F2 / P1-CORRECTNESS-002 — commit POST can install bytes never previewed
+- **severity:** blocker
+- **location:** `src/neurobase/webui/routes.py:293`
+- **issue:** the confirm form carries no fingerprint of the previewed result;
+  the POST re-prepares fresh and commits whatever it gets. Proven: previewed
+  `VERSION ONE`, edited the proposal, submitted the old form → installed
+  `VERSION TWO`. Violates the §12/§14 exact-diff consent MUST.
+- **suggested direction:** carry a server-verifiable fingerprint (resolved
+  path/target + before/after bytes) in the form; on mismatch answer a typed
+  409 re-preview with no backup/write/ledger. Keep the fresh POST prepare.
+- **resolution:** _(pending)_
+
+### F3 / P1-SECURITY-003 — edit GET renders legacy drafts unredacted
+- **severity:** blocker
+- **location:** `src/neurobase/webui/routes.py:348`
+- **issue:** the edit GET passes `extract_draft(doc.body)` straight into the
+  textarea. Proven: a legacy proposal containing an `sk-...` secret rendered
+  it literally. §14 requires display-time redaction on every draft surface.
+- **suggested direction:** redact the extracted draft (shared configured
+  redaction path) before templating; test with built-in + configured-extra
+  patterns.
+- **resolution:** _(pending)_
+
+### F4 / P2-TEST-GAP-004 — §14 MUSTs not fully covered by contract tests
+- **severity:** major
+- **location:** `tests/test_webui_app.py:34`
+- **issue:** no tests for the loopback bind, pre-serve schema refusal, web
+  no-op (no backup/no ledger), preview drift, edit-display redaction, or
+  loopback-only Host acceptance; the same-origin success test normalizes the
+  F1 weakness via TestClient's `testserver` authority.
+- **suggested direction:** focused contract tests that fail at `1abcfbc` and
+  pass after the fixes; full gate stays green.
+- **resolution:** _(pending)_
+
+### F5 / P3-DOCS-005 — provenance plan overstates the curator log as counts-only
+- **severity:** nit
+- **location:** `docs/notes/2026-07-16-provenance-plan.md:39`
+- **issue:** the log records pass summaries (status/timestamp/optional error),
+  not literally "only counts"; the real gap is no raw→fact identities/edges.
+- **suggested direction:** reword; Slice B's compatibility reasoning should
+  start from the exact record shape.
+- **resolution:** _(pending)_
+
+**Verdict:** changes-requested (Codex: BLOCKED) — _three P1s: Host-boundary
+bypass, unpreviewed-bytes install, unredacted edit surface._

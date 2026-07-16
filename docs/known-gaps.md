@@ -186,3 +186,52 @@ uninstall/recovery **require**. Where D11 matters for these commands is installi
 skips the backup); the **non-purge uninstall and `--restore-backup` paths open no
 handle** — the backup/restore itself is a schema-independent maintenance exception
 (spec §10).
+
+---
+
+### G2 — accepted-proposal state can drift from disk; there is no revert path
+
+- **status:** open
+- **severity:** minor — nothing corrupts, but the store's view of the present is
+  wrong: a proposal stays `accepted` with a dangling `installed_path` after its
+  artifact is removed by hand, and §12.7 makes reject-on-accepted a hard error,
+  so there is no sanctioned way back.
+- **found:** 2026-07-16 by Andrew (live browser smoke of Web UI Phase 1 —
+  accepted `surgical-git-staging`, then deleted the installed SKILL.md; the
+  proposal still reads `accepted`).
+
+**Detail.** Accept records `status: accepted`, `installed_path`, and a ledger
+`accepted` event with `installed_hash` (ADR-0011). The survival metric already
+distinguishes missing/modified artifacts, but `recommend list`/`show` and the
+web UI render `accepted` with no drift signal, and no command un-accepts. The
+ledger is honest about history; the proposal frontmatter is wrong about now.
+
+**Direction.** Either a consent-gated `recommend revert <slug>` (flips status,
+appends a ledger event, never deletes the artifact itself) or drift annotation
+on every read surface (the app-shell plan's Phase S gallery renders
+`installed` / `missing on disk` / `modified` honestly — but rendering is not a
+fix). Needs a small §12 note either way.
+
+---
+
+### G3 — the skill emitter can double frontmatter and misuses `candidate_type` as `description`
+
+- **status:** open
+- **severity:** minor — the installed artifact is valid enough for Claude to
+  load, but reads wrong.
+- **found:** 2026-07-16 by Andrew (same live smoke; emitted SKILL.md had two
+  frontmatter blocks and `description: repeated-correction`).
+
+**Detail.** `_skill` (`recommender/emitters.py:65-86`) wraps the managed draft
+in a generated frontmatter block (`name`, `description`, `neurobase_slug`,
+`neurobase_managed`) and prepends a `# <slug>` heading when the draft lacks one.
+A draft that itself begins with `---` frontmatter is embedded verbatim →
+doubled frontmatter, with consumers reading only the first block. And
+`description:` is set to `candidate_type` (`emitters.py:80` —
+`str(doc.get("candidate_type") or title)`), so skills ship with descriptions
+like `repeated-correction`. Partly a fixture-authoring artifact (drafts should
+not carry frontmatter), but the emitter should not depend on that.
+
+**Direction.** Emitter-side: strip or merge a draft's own frontmatter; derive
+`description` from the proposal title or rationale, falling back to
+`candidate_type` only as a last resort. Test with a frontmatter-bearing draft.

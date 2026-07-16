@@ -188,16 +188,16 @@ printed summary so shape drift actually fails. Applied passes append:
   **the frontmatter∪journal union is the contract.** Frontmatter backstops
   exactly the fact-granular edges of a lost pass.
 
-### ADR-0013 (one ADR covers the slice-B package)
+### ADR-0016 (one ADR covers the slice-B package)
 
 Records: the §2 step-4 validation change; the fold-record read contract; the
 explicit judgment that additive JSONL fields + additive read service need **no
 D11 schema bump** (the seed-importer `extra_frontmatter` precedent — recorded
 deliberately because G1 shows the schema guard is already contentious); the
 rejection of heuristic backfill; and the deferral of the `sources:` frontmatter
-key. Numbering: the ADR index jumps 0008→0010 (0009 is treated as burned) and
-**0012 is the web UI surface ADR** landing with the Phase 1 branch — take
-**0013**.
+key. Numbering: the ADR index runs to **0014** on main (0009 is burned) and
+**0015 is the web UI surface ADR** landing with the Phase 1 branch — so the
+fold-journal ADR takes **0016**.
 
 ### Deferred, with a blueprint on file
 
@@ -207,7 +207,7 @@ candidate design, but its own backfill analysis proved the read-time ladder
 covers every current store with zero writes — the extra machinery hedges a
 raw-retention policy that doesn't exist. Deferred until raw pruning or
 store-git-sync is real. If revived, the judged design's load-bearing details
-are recorded in ADR-0013's alternatives section verbatim: `sources` must be a
+are recorded in ADR-0016's alternatives section verbatim: `sources` must be a
 store-managed core key (unknown keys are dropped on upsert), inheritance must
 run only over facts whose soft-delete actually applied, must exclude the
 `user-directed` sentinel (else a pinned fact's successor is permanently
@@ -238,7 +238,7 @@ semantics (ADR-0007 D21) and must be named, not discovered.
 
 1. **Slice B** first, on `main`, through the Codex review relay — it is
    independent of the uncommitted webui branch and smallest-blast-radius
-   (~40 changed lines in `engine.py`, spec edit, ADR-0013, tests).
+   (~40 changed lines in `engine.py`, spec edit, ADR-0016, tests).
 2. **Slice A** second (`core/graph.py` + tests) — also branch-independent.
 3. The graph **UI** (routes + template + renderer) stacks on the webui branch —
    scheduled as Phase G of the app-shell plan.

@@ -28,6 +28,10 @@ Prepared first public release. Built in nine phases per
   non-redundant, current fact set — upserts, explicit supersession, and
   tombstones, optimized for deletion over accumulation, with node
   synthesis and wikilink regeneration on every run.
+- **Curate-time transcript distill.** Claude captures now carry a transcript
+  pointer, letting the curator replace a thin skim with a bounded, redacted
+  digest of the full session before planning. Distill degrades to skim on any
+  failure and caches derived digests with a source/redaction-policy fingerprint.
 - **Claude Code adapter.** Deterministic SessionEnd capture and SessionStart
   recall hooks, a consent-first installer that diffs/backs up/writes
   `settings.json`, and fenced ownership so Neurobase only ever touches the

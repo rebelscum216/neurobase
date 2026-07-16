@@ -114,7 +114,8 @@ Module map — where each responsibility lives and the contract it implements:
 | `core/backups.py` | Timestamped backups + manifest (the consent-first discipline) | §7 |
 | `core/search.py` | Keyword scan + ranking behind MCP `memory_search` | §13 |
 | `brain/` | Provider-independent LLM backends + auto-detection | §2, D9 |
-| `curator/engine.py` | The fold: plan → apply → consume → prune → synthesize | §2 |
+| `curator/distill.py` | Tier-2 transcript render → redacted digest cache | §2.0, ADR-0014 |
+| `curator/engine.py` | The fold: distill → plan → apply → consume → prune → synthesize | §2 |
 | `adapters/claude/`, `adapters/codex/` | Per-agent scribe (capture), recall (inject), installer | §3–§5, §7 |
 | `adapters/recall_common.py` | Shared injection logic both adapters re-export | §3 |
 | `adapters/scribe_common.py` | Shared capture bounds both scribes re-export | §4–§5, §8 |
@@ -136,10 +137,10 @@ This is the core value loop, and it runs without you thinking about it.
       │                                   │                                  │
       ▼                                   ▼                                  ▼
  SessionEnd hook  ───▶  raw/*.md  ───▶  curator.curate()  ───▶  nodes/*.md  ───▶  SessionStart hook
- (scribe: parse                  (plan via brain → apply     (+ index.md,        (recall: assemble
-  transcript/rollout,             upserts/supersessions →     wikilinks)          nodes → inject as
-  redact, write one               consume raws → prune                            additionalContext,
-  raw per session)                tombstones → synthesize)                        capped at 6000 chars)
+ (scribe: parse                  (optional transcript        (+ index.md,        (recall: assemble
+  transcript/rollout,             distill → plan via brain →  wikilinks)          nodes → inject as
+  redact, write one               apply upserts/supersessions                     additionalContext,
+  raw per session)                → consume raws → synthesize)                    capped at 6000 chars)
 ```
 
 1. **Capture.** When a session ends, the agent fires a hook that runs
@@ -147,20 +148,24 @@ This is the core value loop, and it runs without you thinking about it.
    fires per turn). The CLI's fast-path dispatches to the agent's **scribe**,
    which parses the transcript/rollout (real formats pinned in spec §11), keeps
    the last N prompts and the final assistant summary, **redacts** the body
-   (D13), and writes exactly one `raw/*.md` capture — but only if the directory
-   is an enabled project (opt-in) and the capture is non-empty. Codex has no
+   (D13), stores a transcript pointer when available, and writes exactly one
+   `raw/*.md` capture — but only if the directory is an enabled project (opt-in)
+   and the capture is non-empty. Codex has no
    "session end" event, so its scribe keys every turn's write to the session's
    start timestamp and overwrites one file in place until the curator consumes
    it.
 
-2. **Curate.** `curator.curate()` gathers the unconsumed raws, asks the **brain**
-   (an injectable LLM backend) for a *plan* — a JSON object of add / supersede /
-   delete operations over the curated set — applies it, marks the raws consumed,
-   prunes expired tombstones, and re-synthesizes the project's status node. The
-   load-bearing safety rule: if the plan won't parse, the raws stay **unconsumed**
-   so nothing is silently lost (D9). Curation is triggered opportunistically —
-   the SessionStart hook spawns a detached `curate --if-stale` (D8) so it never
-   delays the session that triggered it.
+2. **Curate.** `curator.curate()` gathers the unconsumed raws, optionally
+   distills any resolvable Claude transcript into a richer redacted digest, then
+   asks the **brain** (an injectable LLM backend) for a *plan* — a JSON object of
+   add / supersede / delete operations over the curated set — applies it, marks
+   the raws consumed, prunes expired tombstones, and re-synthesizes the project's
+   status node. The load-bearing safety rule: if the plan won't parse, the raws
+   stay **unconsumed** so nothing is silently lost (D9). Distill failures are
+   weaker: they degrade that raw to its skim and never abort the pass (D16).
+   Curation is triggered opportunistically — the SessionStart hook spawns a
+   detached `curate --if-stale` (D8) so it never delays the session that
+   triggered it.
 
 3. **Recall.** At the next session start, the **recall** module resolves the
    project from the cwd, assembles its status nodes (alphabetical, capped at 6000
@@ -823,6 +828,41 @@ Because detection (`select.py`) is re-run on every `resolve_brain` call rather t
 
 The curator is the subsystem that turns raw, noisy captures from coding-agent sessions into a small, current, non-redundant set of curated facts, then synthesizes those facts into a single skimmable "status node." It sits downstream of the scribes (which write to `raw/`) and upstream of recall (which injects the synthesized node at `SessionStart`); it is also invoked opportunistically by the recall adapters via `spawn_curate_if_stale` (`src/neurobase/adapters/recall_common.py:112`), and directly by the `neurobase curate` CLI command. Its entire read/write surface is the on-disk store contract in `neurobase.core.store`, and it delegates all LLM calls to an injected `Brain`, keeping the whole apply pipeline testable offline with a fake brain.
 
+### `src/neurobase/curator/distill.py`
+
+Tier-2 capture fidelity (spec §2.0, ADR-0014): this module turns a raw capture's
+`transcript_path` into a bounded digest that replaces the raw body for the
+current curate pass. Capture remains deterministic and no-LLM; the curator is
+the first layer allowed to read the full transcript and call a brain.
+
+Key mechanics:
+
+- Claude JSONL transcripts render into compact text: user prompts, assistant
+  text, tool-use one-liners, tool-result bodies capped per result, and sidechain
+  context. Codex transcript rendering is deliberately deferred by ADR-0013, so a
+  Codex raw falls back to its skim.
+- Every extracted value is redacted before labels/truncation are added. Command-
+  shaped tool inputs use `redact_command`; prose/tool-result values use
+  `redact`. The whole render and final digest are redacted again as defense in
+  depth.
+- Renders are chunked at `DISTILL_CHUNK_CHARS` (default `200_000`) with a cap of
+  five chunks, dropping middle chunks first when necessary. Each chunk is fenced
+  as untrusted transcript data before `brain.text(DISTILL_SYSTEM, ...)`; multiple
+  partial digests are merged with `MERGE_SYSTEM`.
+- A digest must contain one of the expected headings (`## Decisions`,
+  `## Discoveries & gotchas`, `## State changes`, `## Unresolved`) and is hard-
+  capped at `DIGEST_MAX_CHARS` (`6000`) with a `[digest truncated]` marker.
+- The derived digest cache lives at `raw/.digests/<raw-filename>` and is keyed by
+  a `source_fingerprint` over the raw body, transcript path/size/mtime, cache
+  version, and active `[redact].extra_patterns`. A cache miss re-distills; a bad
+  cache doc is ignored.
+- `_distill_one` catches every exception and returns `None`, which means
+  "fallback to the skim." Distill can improve a pass, but it must never decide
+  whether the pass succeeds.
+
+`distill_docs(...)` returns `Document` copies with only the body replaced, so the
+real raw filename stays intact for `from_raw` provenance and `mark_consumed`.
+
 ### `src/neurobase/curator/engine.py`
 
 The single-file implementation of the spec §2 curator contract. Its module docstring states the three hard rules it exists to preserve: a plan that won't parse aborts the pass and leaves every raw unconsumed (decision D9); a valid-but-empty plan *is* consumed (idempotence); and node/index failures *after* raws are consumed yield `partial`, never a crash, because the node is a pure function of `curated/` and self-heals on the next pass.
@@ -831,6 +871,9 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 
 - `DEFAULT_TOMBSTONE_GRACE_DAYS = 14` — matches spec §8's `TOMBSTONE_GRACE_DAYS`.
 - `DEFAULT_PLAN_PAYLOAD_MAX_BYTES = 262_144` — spec §8's `PLAN_PAYLOAD_MAX_BYTES`; the per-plan-request byte budget (ADR-0012), overridable via `[curate].plan_payload_max_bytes`.
+- `DEFAULT_DISTILL = "auto"` and `DEFAULT_DISTILL_CHUNK_CHARS = 200_000` — spec
+  §8's Tier-2 defaults, wired to `[curate].distill` and
+  `[curate].distill_chunk_chars`.
 - `OVERSIZE_RAW_MARKER` — the `[truncated for plan payload]` suffix stamped on a raw body that had to be cut to fit its own batch.
 - `NODE_SUFFIX = "-status"` — the node name is always `<project>-status` (spec §8).
 - `CURATOR_LOG = ".curator-log.jsonl"` — per-project append-only pass log under the memory dir.
@@ -840,20 +883,27 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 
 - `node_name(project: str) -> str` — returns `f"{project}{NODE_SUFFIX}"`, the deterministic status-node name; re-exported from `neurobase.curator`.
 
-- `curate(root: Path, project: str, brain: Brain, *, dry_run: bool = False, resynth: bool = False, tombstone_grace_days: int = DEFAULT_TOMBSTONE_GRACE_DAYS, plan_payload_max_bytes: int = DEFAULT_PLAN_PAYLOAD_MAX_BYTES) -> dict[str, Any]` — runs one full pass of the spec §2 sequence and returns the summary dict (the function re-exported as `curate` from `neurobase.curator`, imported by the CLI as `run_curate`). Control flow:
+- `curate(root: Path, project: str, brain: Brain, *, dry_run: bool = False, resynth: bool = False, tombstone_grace_days: int = DEFAULT_TOMBSTONE_GRACE_DAYS, plan_payload_max_bytes: int = DEFAULT_PLAN_PAYLOAD_MAX_BYTES, distill: str = DEFAULT_DISTILL, distill_chunk_chars: int = DEFAULT_DISTILL_CHUNK_CHARS, redact_patterns: tuple[str, ...] = ()) -> dict[str, Any]` — runs one full pass of the spec §2 sequence and returns the summary dict (the function re-exported as `curate` from `neurobase.curator`, imported by the CLI as `run_curate`). Control flow:
   1. `store.ensure_tree(project, root)` — guarantees the directory tree exists before any read/write.
   2. **`--resynth` short-circuit**: if `resynth` is true, skip everything else and call `_synthesize` directly, then log and return `{"status": "resynth", "active_facts": <count>}`. This is the `neurobase curate --resynth` path from spec §2's partial-failure contract — regenerate node + index without consuming any new raw.
   3. Load unconsumed raw via `store.list_raw(root, project, unconsumed_only=True)`. **Empty ⇒ no-op**: log and return `{"status": "noop", "raw": 0, "active_facts": <count>}` — this is the idempotence guarantee of spec §2 step 1.
-  4. **Batch loop (ADR-0012 / decision D22)**, repeated until every raw is planned. Each iteration reloads active curated facts (`store.list_curated`) so a later batch sees everything earlier batches upserted, superseded, and tombstoned, then calls `_next_plan_batch` to take the next oldest-first run of raws whose *final combined request* — `combine_prompt(PLAN_SYSTEM, user_payload)`, measured in UTF-8 **bytes**, exactly what a CLI backend passes as one argv entry — fits `plan_payload_max_bytes` (default 262,144). A raw too large to fit even alone is truncated by `_truncate_raw_to_fit` and marked, never skipped. If not even a marked envelope fits (an absurdly small budget, or curated facts that already fill it), `_next_plan_batch` raises `ValueError` and the pass returns `{"status": "error", …}` with nothing consumed.
-  5. **Plan step, per batch**: call `brain.plan_json(PLAN_SYSTEM, user_payload)`. If this raises `BrainError` (unparseable/timeout/etc.), **this batch and every later batch abort**: their raws stay unconsumed and the loop breaks with `plan_error` set. Any *earlier* batch that planned successfully keeps its applied facts and its consumed raws (D22) — each committed batch is a durable unit backed by a valid plan. A failure in the **first** batch is **state-equivalent** to v0.1: nothing was applied, so the pass returns immediately and every raw remains unconsumed (spec §2 step 3 / decision D9). The *summary* is not byte-identical — it now carries `"batches": 0` — but no caller depends on the old key set, and the summary contract changed for every path in this pass anyway. But if at least one batch *did* commit, the pass **still falls through to steps 11–12** before returning its error — see the derived-state invariant below. A transient bad LLM response still never silently drops an observation: unplanned raws are retried wholesale on the next pass.
-  6. **`--dry-run` short-circuit**: if `dry_run` is true, the batch loop only *collects* plans — it applies nothing and consumes nothing, so every preview batch is planned against the same current facts (a dry run does not pretend to simulate model-authored mutations in memory). After the loop it returns `{"status": "dry-run", "raw", "batches"}` plus `"plan"` for the single-batch case (the v0.1 shape) or `"plans"` (the list) when the backlog needed more than one. `_log_pass` is skipped on this path, so a dry run leaves absolutely no trace.
-  7. **Pinned-fact guard (decision D-b)**: `upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]` — deterministically drops any upsert targeting a pinned (user-directed) slug, regardless of what the prompt says. This is enforced in code, not just by prompt instruction, so a plan that ignores the "never touch pinned facts" prompt rule still cannot mutate one. `pinned` is recomputed per batch from that batch's freshly loaded facts.
-  8. **Apply upserts** (step 4 of spec §2) via `_apply_upserts`, then tombstone every superseded slug that was *not itself re-upserted in this batch* and is not pinned, via `_safe_soft_delete`, deduped order-preserving with `dict.fromkeys`.
-  9. **Apply explicit tombstones** (step 5): for each `{"slug", "reason"}` entry, skip if the slug is empty, was upserted in this batch, or is pinned; otherwise soft-delete it and count it.
-  10. **Consume this batch's raw** (step 6): `store.mark_consumed(doc.file_path)` for every doc in the batch — reaching this point means *that batch's* plan parsed successfully (even if empty). Loop back to 4 with the remaining raws.
-  11. **Prune tombstones** (step 7), once, after the loop: `store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)`.
-  12. **Synthesize** (step 8), once, after the loop: call `_synthesize(root, project, brain)` inside a `try/except Exception`. On *any* exception — brain error, malformed sibling node breaking the index rebuild, linkify/disk error — `synth_error = str(exc)`; this is caught deliberately broadly (`# noqa: BLE001`) per spec §2's partial-failure contract: the applied curated-fact state and raw-consumption already happened and must stand, because the node is a pure function of `curated/` and will self-heal on the next `curate` (or `--resynth`) pass.
-  13. Build and return the summary dict: `{"status", "raw", "batches", "upserts", "superseded", "tombstones", "pruned_tombstones", "active_facts"}`, plus `"error"` — this exact key set matches spec §2 step 9. `upserts`/`superseded`/`tombstones` are summed across batches. `status` is `"error"` if a batch's plan failed (the pass failed; its raws are still unconsumed), else `"partial"` if only synthesis failed, else `"ok"`. If a plan failure *and* a synthesis failure coincide, `error` carries the plan failure and `synth_error` the other, so neither masks the other. The summary is appended to the curator log via `_log_pass` before returning.
+  4. **Tier-2 distill (ADR-0014 / D15-D17)**: unless `distill == "off"`, call
+     `distill.distill_docs(...)` over the unconsumed raws. Any raw whose
+     `transcript_path` resolves and whose renderer/digest succeeds is replaced
+     in memory with a redacted digest body; every other raw stays as its skim.
+     The returned summary counters (`distilled`, `fallback`) are included on
+     every later pass summary. Dry runs may read the cache but pass
+     `write_cache=False`, so they never persist derived state.
+  5. **Batch loop (ADR-0012 / decision D22)**, repeated until every raw is planned. Each iteration reloads active curated facts (`store.list_curated`) so a later batch sees everything earlier batches upserted, superseded, and tombstoned, then calls `_next_plan_batch` to take the next oldest-first run of raws whose *final combined request* — `combine_prompt(PLAN_SYSTEM, user_payload)`, measured in UTF-8 **bytes**, exactly what a CLI backend passes as one argv entry — fits `plan_payload_max_bytes` (default 262,144). A raw too large to fit even alone is truncated by `_truncate_raw_to_fit` and marked, never skipped. If not even a marked envelope fits (an absurdly small budget, or curated facts that already fill it), `_next_plan_batch` raises `ValueError` and the pass returns `{"status": "error", …}` with nothing consumed.
+  6. **Plan step, per batch**: call `brain.plan_json(PLAN_SYSTEM, user_payload)`. If this raises `BrainError` (unparseable/timeout/etc.), **this batch and every later batch abort**: their raws stay unconsumed and the loop breaks with `plan_error` set. Any *earlier* batch that planned successfully keeps its applied facts and its consumed raws (D22) — each committed batch is a durable unit backed by a valid plan. A failure in the **first** batch is **state-equivalent** to v0.1: nothing was applied, so the pass returns immediately and every raw remains unconsumed (spec §2 step 3 / decision D9). The *summary* is not byte-identical — it now carries `"batches": 0` — but no caller depends on the old key set, and the summary contract changed for every path in this pass anyway. But if at least one batch *did* commit, the pass **still falls through to prune + synthesize** before returning its error — see the derived-state invariant below. A transient bad LLM response still never silently drops an observation: unplanned raws are retried wholesale on the next pass.
+  7. **`--dry-run` short-circuit**: if `dry_run` is true, the batch loop only *collects* plans — it applies nothing and consumes nothing, so every preview batch is planned against the same current facts (a dry run does not pretend to simulate model-authored mutations in memory). After the loop it returns `{"status": "dry-run", "raw", "batches"}` plus `"plan"` for the single-batch case (the v0.1 shape) or `"plans"` (the list) when the backlog needed more than one. `_log_pass` is skipped on this path, so a dry run leaves absolutely no trace.
+  8. **Pinned-fact guard (decision D-b)**: `upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]` — deterministically drops any upsert targeting a pinned (user-directed) slug, regardless of what the prompt says. This is enforced in code, not just by prompt instruction, so a plan that ignores the "never touch pinned facts" prompt rule still cannot mutate one. `pinned` is recomputed per batch from that batch's freshly loaded facts.
+  9. **Apply upserts** (step 4 of spec §2) via `_apply_upserts`, then tombstone every superseded slug that was *not itself re-upserted in this batch* and is not pinned, via `_safe_soft_delete`, deduped order-preserving with `dict.fromkeys`.
+  10. **Apply explicit tombstones** (step 5): for each `{"slug", "reason"}` entry, skip if the slug is empty, was upserted in this batch, or is pinned; otherwise soft-delete it and count it.
+  11. **Consume this batch's raw** (step 6): `store.mark_consumed(doc.file_path)` for every doc in the batch — reaching this point means *that batch's* plan parsed successfully (even if empty). Loop back to 4 with the remaining raws.
+  12. **Prune tombstones** (step 7), once, after the loop: `store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)`.
+  13. **Synthesize** (step 8), once, after the loop: call `_synthesize(root, project, brain)` inside a `try/except Exception`. On *any* exception — brain error, malformed sibling node breaking the index rebuild, linkify/disk error — `synth_error = str(exc)`; this is caught deliberately broadly (`# noqa: BLE001`) per spec §2's partial-failure contract: the applied curated-fact state and raw-consumption already happened and must stand, because the node is a pure function of `curated/` and will self-heal on the next `curate` (or `--resynth`) pass.
+  14. Build and return the summary dict: `{"status", "raw", "batches", "upserts", "superseded", "tombstones", "pruned_tombstones", "active_facts"}`, plus `"error"` — this exact key set matches spec §2 step 9. `upserts`/`superseded`/`tombstones` are summed across batches. `status` is `"error"` if a batch's plan failed (the pass failed; its raws are still unconsumed), else `"partial"` if only synthesis failed, else `"ok"`. If a plan failure *and* a synthesis failure coincide, `error` carries the plan failure and `synth_error` the other, so neither masks the other. The summary is appended to the curator log via `_log_pass` before returning.
 
 - `is_stale(root: Path, project: str, hours: int) -> bool` — decision D8's `--if-stale` gate. Scans unconsumed raw docs; for each with a `captured_at` frontmatter field, parses it as ISO-8601 (tolerating a trailing `Z` by rewriting to `+00:00`) and returns `True` as soon as one predates `now - hours*3600` seconds. Docs missing `captured_at` are skipped (not counted as stale); docs with an unparseable timestamp are also skipped (`except ValueError: continue`) rather than raising. Returns `False` if nothing unconsumed is old enough (including the case of zero unconsumed raw). The CLI (`src/neurobase/cli/__init__.py:202`) calls this only when `--if-stale` is passed and `--resynth` is not (`checking_staleness = if_stale and not resynth`), using `config.curate.stale_hours` (spec §8 default: 12h) as `hours`; if not stale it prints "Not stale — nothing to curate." and returns before `resolve_brain`, so it never constructs a `Brain` or calls `curate()`.
 
@@ -897,9 +947,9 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 
 **Connections to the rest of the system**
 
-- Imports `neurobase.brain.base.Brain` (a `@runtime_checkable` `Protocol` with a `name` attribute plus `plan_json(system, user) -> dict` and `text(system, user) -> str`) and `BrainError` — the sole LLM injection point, satisfying spec §2's "both brain calls MUST be injectable" requirement. `Brain` implementations live under `src/neurobase/brain/` and are resolved by the CLI via `resolve_brain(config)` before being passed into `curate()`.
+- Imports `neurobase.brain.base.Brain` (a `@runtime_checkable` `Protocol` with a `name` attribute plus `plan_json(system, user) -> dict` and `text(system, user) -> str`) and `BrainError` — the sole LLM injection point for distill, plan, and node synthesis. `Brain` implementations live under `src/neurobase/brain/` and are resolved by the CLI via `resolve_brain(config)` before being passed into `curate()`.
 - Imports `neurobase.core.store` for the entire on-disk contract: `ensure_tree`, `list_raw`, `list_curated`, `upsert_curated`, `soft_delete_curated`, `prune_tombstones`, `mark_consumed`, `write_node`, `rebuild_index`, `memory_dir`, plus the `Document` type and `InvalidSlugError`.
-- Imports `neurobase.core.linkify` and calls `linkify.linkify(root, project)` as the last step of every synthesis, cross-linking the newly written node against curated facts/other nodes (spec §6).
+- Imports `neurobase.curator.distill` for the Tier-2 transcript digest pass before batching, and `neurobase.core.linkify` for `linkify.linkify(root, project)` as the last step of every synthesis, cross-linking the newly written node against curated facts/other nodes (spec §6).
 - Re-exported from `neurobase.curator` (`src/neurobase/curator/__init__.py`) as `curate`, `is_stale`, `node_name`, `read_fact_count_trend` (its `__all__`).
 - Called by `src/neurobase/cli/__init__.py`'s `curate` command (the `neurobase curate` CLI, flags `--root`, `--if-stale`, `--dry-run`, `--resynth`, plus a hidden `--cwd` for testing), which wires `config.curate.stale_hours` and `config.curate.tombstone_grace_days` from the loaded config into `is_stale`/`curate` respectively, and by `spawn_curate_if_stale` (`src/neurobase/adapters/recall_common.py:112`), which the Claude and Codex recall adapters invoke opportunistically on session-start-type hooks to trigger a detached background `curate --if-stale` pass when memory has gone stale.
 - `read_fact_count_trend`'s fail-soft log-parsing pattern is explicitly named as precedent elsewhere in the codebase (`recommender/corpus.py:479`, `recommender/proposals.py:413`) for reading other JSONL logs defensively.
@@ -1272,7 +1322,7 @@ This pattern directly implements spec §7's installer rules: *"show exact diff +
 
 - **`_print_recommender_metrics(resolved_root: Path) -> None`** — calls `metrics.compute_metrics(resolved_root)` and prints: decided/accepted/rejected counts, precision, edited rate, reviewed-event count, a survival summary, and recurrence reduction — all through `_fmt_metric`. The survival block has a special case: if `result.survival` is empty, prints `"Survival: insufficient data"` rather than `"0 survived, 0 not survived, 0 insufficient data"`, because a zero-length dict means "no ledger-confirmed accepted proposals to measure survival from" (not applicable), not a measured all-zero result — explicitly called out in the code as a Codex round-2 review finding. When non-empty, prints aggregate counts plus one `"  {slug}: {status}"` line per slug, sorted by slug, with underscores replaced by spaces (`"not_survived"` → `"not survived"`).
 
-- **`curate(root, cwd, if_stale: bool = False, dry_run: bool = False, resynth: bool = False) -> None`** — folds unconsumed raw captures into curated facts (spec §2). Resolves config/root/cwd/project (same not-enabled-⇒-exit-1 pattern as `status`), checks schema. If `--if-stale` is set *and* `--resynth` is not, checks `is_stale(root, slug, config.curate.stale_hours)`; if not stale, echoes "Not stale — nothing to curate." and returns without calling the brain at all (this is what makes the SessionStart hook's detached `spawn_curate_if_stale` cheap on the common case). Otherwise resolves a brain backend via `resolve_brain(config)`; `None` ⇒ red error naming `resolution.reason` and pointing at `neurobase doctor`, exit 1. Calls `run_curate(root, slug, brain, dry_run=dry_run, resynth=resynth, tombstone_grace_days=config.curate.tombstone_grace_days, plan_payload_max_bytes=config.curate.plan_payload_max_bytes)`. `--dry-run` prints the preview as indented JSON — `summary["plans"]` (the list) when the backlog needed more than one batch, else `summary["plan"]` — and returns (no mutation happened inside the curator either). Otherwise prints the summary minus the `"plan"` key as compact JSON, and exits 1 if `summary["status"] == "error"`.
+- **`curate(root, cwd, if_stale: bool = False, dry_run: bool = False, resynth: bool = False) -> None`** — folds unconsumed raw captures into curated facts (spec §2). Resolves config/root/cwd/project (same not-enabled-⇒-exit-1 pattern as `status`), checks schema. If `--if-stale` is set *and* `--resynth` is not, checks `is_stale(root, slug, config.curate.stale_hours)`; if not stale, echoes "Not stale — nothing to curate." and returns without calling the brain at all (this is what makes the SessionStart hook's detached `spawn_curate_if_stale` cheap on the common case). Otherwise resolves a brain backend via `resolve_brain(config)`; `None` ⇒ red error naming `resolution.reason` and pointing at `neurobase doctor`, exit 1. Calls `run_curate(root, slug, brain, dry_run=dry_run, resynth=resynth, tombstone_grace_days=config.curate.tombstone_grace_days, plan_payload_max_bytes=config.curate.plan_payload_max_bytes, distill=config.curate.distill, distill_chunk_chars=config.curate.distill_chunk_chars, redact_patterns=tuple(config.redact.extra_patterns))`. `--dry-run` prints the preview as indented JSON — `summary["plans"]` (the list) when the backlog needed more than one batch, else `summary["plan"]` — and returns (no mutation happened inside the curator either; distill cache writes are disabled). Otherwise prints the summary minus the `"plan"` key as compact JSON, and exits 1 if `summary["status"] == "error"`.
 
 - **`seed(from_dir, from_claude_memory, project, all_projects, root, cwd) -> None`** — imports existing notes and/or Claude auto-memory as curated facts (spec §12.3). Validation order matters and is commented in the source:
   1. Requires at least one of `--from-dir`/`--from-claude-memory` (hard error otherwise) — "never crawls a directory the user did not name."

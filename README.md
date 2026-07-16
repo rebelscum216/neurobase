@@ -16,11 +16,11 @@ It all runs on your machine, on the agent subscriptions you already pay for, wit
 
 > **Status: `0.1.0` release candidate — not yet tagged or published.** The full
 > loop is implemented for Claude Code and Codex CLI: deterministic capture, an
-> LLM curator that folds and deletes, cross-agent recall, consent-first hook
-> installers, an MCP server, and the v1 recommender (mine → rank → propose →
-> accept/reject/edit → metrics). The package version is prepared as `0.1.0`, but
-> the `v0.1.0` git tag, GitHub Release, and PyPI publish are intentionally held
-> until release approval.
+> LLM curator that folds and deletes, curate-time transcript distill for richer
+> Claude-session recall, cross-agent recall, consent-first hook installers, an MCP
+> server, and the v1 recommender (mine → rank → propose → accept/reject/edit →
+> metrics). The package version is prepared as `0.1.0`, but the `v0.1.0` git tag,
+> GitHub Release, and PyPI publish are intentionally held until release approval.
 
 ## How it works
 
@@ -36,6 +36,9 @@ hooks capture (auto)  →  curator folds raw into a small durable fact set
   before anything is written.
 - **A curator that deletes.** An LLM folds raw captures into a *small,
   non-redundant, current* fact set — optimizing for supersession, not accumulation.
+- **Transcript distill.** When a raw capture has a resolvable Claude transcript,
+  curate can distill the fuller session into a bounded, redacted digest before the
+  plan step; missing transcripts or backend failures safely fall back to the skim.
 - **Markdown truth.** Wikilinked, Obsidian-readable, git-friendly. No vector or
   graph database in the core.
 - **Cross-agent.** A Codex session's learnings show up in your next Claude Code

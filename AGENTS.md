@@ -184,6 +184,35 @@ in. Replace a stub with real code when its phase lands.
   and leaves the store intact unless `--purge-store` is passed. Reviewed and
   merged in `1caf5e6`. Remaining Phase 6 closeout: S3 clean-machine install on a
   fresh user/container and README/state-doc updates from that evidence.
+- **Phase 7 — MCP registration + tools: done.** `neurobase mcp serve` exposes
+  the universal tools baseline over stdio: search, read node, list projects,
+  remember, and recommender summaries. Claude sugar remains optional; the core
+  path works for tools-only clients such as Codex. Reviewed, merged, and
+  live-demoed from Claude Code.
+- **Phase 8 — recommender: done.** The recommender contract, seed importer,
+  corpus loader, miner, ranker/proposal store, emitters, accept/edit/reject
+  flow, and metrics are implemented and reviewed. `neurobase recommend run`
+  mines real cross-agent history into proposed `SKILL.md` / AGENTS.md /
+  CLAUDE.md artifacts, with human review, diff/backup/consent on accept, ledger
+  feedback, and `status --recommender` metrics. The working note records live
+  closeout evidence against the dogfood store.
+- **Phase 9 — release prep: done; publish held.** Release-facing docs,
+  architecture/security/contributing docs, issue templates, changelog, and the
+  PyPI trusted-publishing workflow are reviewed and merged. `pyproject.toml` is
+  already `0.1.0`, but `v0.1.0`, the GitHub Release, and PyPI publish are still
+  intentionally held pending explicit release approval.
+- **Phase C — Tier-2 transcript distill: done and merged.** ADR-0014 is
+  accepted. Raws can now carry `transcript_path` + `capture_version: 2`; the
+  curator resolves Claude transcripts at curate time, redacts each extracted
+  value before brain calls, chunks and validates/bounds digests, degrades to
+  skim on any distill failure, and caches derived digests under `raw/.digests/`
+  with a fingerprint that includes raw content, transcript metadata, cache
+  version, and active extra redaction patterns. Codex transcript rendering stays
+  deferred by ADR-0013, so Codex raws skim until a verified renderer lands.
+  Review relay approved the implementation; live temp-store evidence with a
+  real CLI brain is recorded in
+  `docs/notes/2026-07-16-phase-c-tier2-distill-live-eval.md`. Current local
+  gate: `make ci` green with 801 tests.
 - **Naming (decision D2):** PyPI package = `neurobase-cli`, command = `neurobase`
   (`neurobase` is taken on PyPI). The npm `neurobase` name is a *defensive
   reservation only* — this is a **Python** project; `package.json`/`index.js` are a

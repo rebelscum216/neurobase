@@ -1,6 +1,6 @@
 ---
 slug: harden-ci-pytest-timeout
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: harden-ci-pytest-timeout
@@ -63,4 +63,19 @@ This change closes that gap.
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+No findings.
+
+Verified the diff against `main...HEAD`: `pytest-timeout` is dev-only, the
+locked package is registered by pytest, the dedicated `timeout` ini key is
+accepted from `pyproject.toml`, and the plugin's default method selection uses
+`signal` when SIGALRM exists and `thread` otherwise. A 60s per-test ceiling is
+well above the observed suite runtime while still preventing an indefinite gate
+hang.
+
+Verification run: `uv run python scripts/ci.py` passed with ruff, format, mypy,
+and `801 passed in 5.75s`. A sandboxed `make ci` attempt failed before reaching
+the repo gate because uv could not open its user cache under `~/.cache/uv`; the
+escalated `uv run` gate was clean.
+
+**Verdict:** approve — the branch adds the intended fail-loud guardrail without
+changing shipped runtime behavior.

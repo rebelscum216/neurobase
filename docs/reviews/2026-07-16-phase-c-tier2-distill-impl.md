@@ -1,6 +1,6 @@
 ---
 slug: phase-c-tier2-distill-impl
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-c-tier2-distill
@@ -168,3 +168,18 @@ shows `f712978` (or later) and that `git diff cc36b78..HEAD` includes the
 
 **Verdict:** awaiting-review — _round 2 finding already resolved on HEAD; asking
 for re-review against the latest commit._
+
+## Reviewer findings  _(Reviewer — Codex, round 2 re-review)_
+
+No new findings. I confirmed the checkout is on `a77fc5f`, which is later than
+the requested `f712978`, then re-reviewed the current `git diff cc36b78..HEAD`
+rather than the stale round-2 tree. The prior cache/redaction finding is
+resolved on HEAD: `_source_fingerprint` now includes `_CACHE_VERSION` and a hash
+of `sorted(extra_patterns)`, and `_distill_one` passes the active redaction
+patterns into the fingerprint before cache lookup. The cited regressions cover
+the intended behavior: `uv run pytest tests/test_distill.py -v` passes with
+`17 passed`, including `test_cache_invalidates_when_redaction_policy_changes`
+and `test_cache_version_is_part_of_fingerprint`.
+
+**Verdict:** approve — the current implementation satisfies the relay findings
+and I did not find additional blockers in this re-review.

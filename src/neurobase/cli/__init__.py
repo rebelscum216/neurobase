@@ -9,7 +9,6 @@ phases land, replace a stub with its real command.
 from __future__ import annotations
 
 import difflib
-import hashlib
 import json
 import shutil
 import sys
@@ -35,7 +34,7 @@ from neurobase.curator import budget as curate_budget
 from neurobase.curator import curate as run_curate
 from neurobase.curator import is_stale, read_fact_count_trend
 from neurobase.recommender import corpus as recommend_corpus
-from neurobase.recommender import emitters, metrics, miner, proposals, ranker
+from neurobase.recommender import install, metrics, miner, proposals, ranker
 from neurobase.recommender import seed as seed_import
 
 app = typer.Typer(
@@ -1028,24 +1027,24 @@ def recommend_accept(
     """Diff, confirm, back up, and install one proposal artifact."""
     resolved_root = store.resolve_root(root)
     handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
-    doc = proposals.load_proposal(handle.root, slug)
-    if doc is None:
-        typer.secho(f"proposal {slug!r} not found or malformed", err=True)
-        raise typer.Exit(code=1)
     # §12.7: accept on a rejected/superseded proposal is a hard error, never
-    # reopened — validate BEFORE rendering, diffing, backing up, or writing, so a
-    # blocked proposal can never leave an artifact on disk (the no-op path would
-    # otherwise swallow it silently too).
-    status = str(doc.get("status") or "proposed")
-    if status in {"rejected", "superseded"}:
-        typer.secho(f"cannot accept proposal {slug!r}: status is {status}", err=True)
-        raise typer.Exit(code=1)
+    # reopened — `prepare_install` validates BEFORE rendering, diffing,
+    # backing up, or writing, so a blocked proposal can never leave an
+    # artifact on disk (the no-op path would otherwise swallow it silently
+    # too).
     try:
-        artifact = emitters.prepare(handle.root, doc, skill_scope=target)
+        preview = install.prepare_install(handle.root, slug, target=target)
+    except install.ProposalNotFoundError:
+        typer.secho(f"proposal {slug!r} not found or malformed", err=True)
+        raise typer.Exit(code=1) from None
+    except install.ProposalDecidedError as exc:
+        typer.secho(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     except ValueError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
-    if artifact.before == artifact.after:
+    artifact = preview.artifact
+    if preview.already_up_to_date:
         typer.echo("Already up to date.")
         return
     if artifact.foreign:
@@ -1054,23 +1053,10 @@ def recommend_accept(
     if not yes and not typer.confirm(f"Install proposal {slug} to {artifact.path}?"):
         typer.echo("Aborted — no changes made.")
         return
-    backup_dir = backups.backup_files(handle.root, [artifact.path])
-    if backup_dir is not None:
-        typer.echo(f"Backed up existing artifact to {backup_dir}")
-    emitters.write_atomic(artifact)
-    # §12.9 survival check (ADR-0007 D2): record the artifact's content hash at
-    # accept time so a later `status --recommender` can tell "modified since
-    # acceptance" apart from "never touched" without diffing against anything
-    # else on disk.
-    installed_hash = hashlib.sha256(artifact.after.encode("utf-8")).hexdigest()
-    proposals.accept_proposal(
-        handle.root,
-        slug,
-        target=artifact.target,
-        installed_path=artifact.path,
-        installed_hash=installed_hash,
-    )
-    typer.echo(f"Accepted proposal {slug}: {artifact.path}")
+    result = install.commit_install(handle.root, preview)
+    if result.backup_dir is not None:
+        typer.echo(f"Backed up existing artifact to {result.backup_dir}")
+    typer.echo(f"Accepted proposal {slug}: {result.path}")
 
 
 # --- mcp: the MCP server (Phase 7) --------------------------------------------

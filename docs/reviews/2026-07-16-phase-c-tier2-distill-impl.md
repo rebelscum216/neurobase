@@ -103,4 +103,35 @@ print(distill.render_transcript('codex', p, ()))"   # codex ⇒ None (deferred)
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _pending._
+- **major** — `src/neurobase/curator/distill.py:241` — The digest cache
+  fingerprint only covers the raw body and transcript path/size/mtime, but the
+  cached body also depends on the active redaction configuration. If a user adds
+  a new `[redact].extra_patterns` entry after a digest has been cached, a later
+  curate pass with the same raw/transcript hits `_cache_read()` and returns the
+  old digest directly, bypassing the new pattern and sending/storing text that
+  the current config would now redact. That breaks the SECURITY.md claim that
+  the digest cache is covered by the same redaction guarantee, and can leak a
+  custom-pattern secret into the plan call without any distill brain call. Suggested
+  direction: include a redaction-policy/cache-version fingerprint in
+  `source_fingerprint`, or re-apply current redaction to cached bodies before
+  using them and rewrite/refresh the cache so `raw/.digests/` is also brought
+  back under the current guarantee.
+  - **resolution:** _resolved (round 1)._ Confirmed real: the fingerprint omitted
+    the redaction policy, so an `extra_patterns` addition over a still-unconsumed
+    raw would serve a stale digest scrubbed under the weaker old policy. Took the
+    first suggested direction (fingerprint) over re-redacting cached bodies —
+    re-redacting a finished digest is only the weak *whole-document* pass D17
+    demotes to defense-in-depth; invalidating forces a full re-distill that
+    re-runs the load-bearing **per-value** redaction under the new policy.
+    `_source_fingerprint` now folds in a `sorted(extra_patterns)` hash and a
+    `_CACHE_VERSION` constant (bump on any redaction-table/render/format change).
+    Tests: policy-change invalidation + cache-version invalidation. SECURITY.md
+    now states the cache-keying guarantee explicitly.
+
+## Round-1 resolution summary  _(Author — Claude)_
+
+The single `major` confirmed and **resolved** in a follow-up commit (no
+amend/rebase). `make ci`: 801 passed, ruff/format/mypy clean. Re-armed for
+round 2.
+
+**Verdict:** changes-requested — _round 1; addressed, re-submitted._

@@ -263,6 +263,34 @@ def test_cache_invalidates_when_transcript_changes(root: Path, tmp_path: Path) -
     assert brain.distill_calls == 2  # transcript changed ⇒ cache miss ⇒ re-distill
 
 
+def test_cache_invalidates_when_redaction_policy_changes(root: Path, tmp_path: Path) -> None:
+    """A new [redact].extra_patterns entry must invalidate the cache, so a digest
+    redacted under the weaker old policy is never served stale (Codex review)."""
+    t = _write_transcript(tmp_path / "t.jsonl", _claude_events())
+    doc = _write_raw(root, "proj", "r1.md", transcript_path=str(t))
+    brain = DistillBrain()
+    distill.distill_docs(root, "proj", [doc], brain, extra_patterns=())
+    assert brain.distill_calls == 1
+    # Same raw + transcript, but the user tightened redaction ⇒ cache miss.
+    distill.distill_docs(root, "proj", [doc], brain, extra_patterns=("CUSTOM_SECRET",))
+    assert brain.distill_calls == 2
+
+
+def test_cache_version_is_part_of_fingerprint(root: Path, tmp_path: Path) -> None:
+    """Bumping the cache version invalidates every cached digest (guards a
+    redaction-table or render-format change)."""
+    t = _write_transcript(tmp_path / "t.jsonl", _claude_events())
+    doc = _write_raw(root, "proj", "r1.md", transcript_path=str(t))
+    fp1 = distill._source_fingerprint(doc.body, Path(str(t)), ())
+    original = distill._CACHE_VERSION
+    try:
+        distill._CACHE_VERSION = original + 1
+        fp2 = distill._source_fingerprint(doc.body, Path(str(t)), ())
+    finally:
+        distill._CACHE_VERSION = original
+    assert fp1 != fp2
+
+
 def test_dry_run_never_writes_cache(root: Path, tmp_path: Path) -> None:
     t = _write_transcript(tmp_path / "t.jsonl", _claude_events())
     doc = _write_raw(root, "proj", "r1.md", transcript_path=str(t))

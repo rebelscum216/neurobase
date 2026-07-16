@@ -87,8 +87,11 @@ no wider a surface than the brain backend above:
 - **The transcript never lands in the store.** Only the bounded, redacted digest
   does — and it is redacted again before it is cached or folded. The digest cache
   lives at `<store>/…/raw/.digests/`, is derived state (safe to delete), and is
-  covered by the same redaction guarantee. To disable distill entirely and keep
-  curate on the deterministic skim only, set `[curate] distill = "off"`.
+  covered by the same redaction guarantee: a cached digest is keyed by a
+  fingerprint that includes your active `[redact].extra_patterns`, so tightening
+  redaction invalidates the cache and re-distills under the new policy rather than
+  serving a digest scrubbed under the old one. To disable distill entirely and
+  keep curate on the deterministic skim only, set `[curate] distill = "off"`.
 
 The pattern-based caveat under Redaction applies here too: distill sends the same
 best-effort-redacted text, not semantically-scrubbed text.

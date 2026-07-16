@@ -36,9 +36,11 @@ acknowledged in `known-gaps.md`:
    fold, the superseded facts' edges survive only the 14-day tombstone grace;
    `supersedes` is overwritten (not merged) on re-upsert (`engine.py:111` +
    `store.py:295`), so chains are single-generation.
-3. **Audit** — the per-pass `.curator-log.jsonl` records only counts
-   (`_log_pass`, `engine.py:153-158`); which raws fed which facts in a given
-   pass is not recorded anywhere.
+3. **Audit** — the per-pass `.curator-log.jsonl` records pass summaries —
+   status, integer counts, timestamp, optional error, and differently-shaped
+   noop/resynth records (`_log_pass`, `engine.py:153-158`) — but no per-pass
+   raw→fact identities or edges; which raws fed which facts in a given pass is
+   not recorded anywhere.
 4. **Read surface** — nothing exposes the edges; the ranker's walk is private.
 
 ## The design (synthesis of three judged candidates)

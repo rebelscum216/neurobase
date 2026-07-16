@@ -1,6 +1,6 @@
 ---
 slug: test-distill-coverage-gaps
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: test-distill-coverage-gaps
@@ -146,3 +146,25 @@ would now fail.
 
 Full `make ci` green after both fixes (ruff, format, mypy, 805 passed). Test-only;
 no `curator/distill.py` source change. Status set back to `awaiting-review`.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex)_
+
+No findings.
+
+Verified the updated diff against `main...HEAD`. The command redaction fixture now
+uses `pytest --api-key=supersecretvalue123`, which is discriminating: I verified
+`redact_command(...)` scrubs it while whole-render `redact("[tool_use Bash]
+command=...")` does not, so the test would fail if `_tool_use_line` stopped using
+the command-channel scrubber. The oversize transcript test now records the
+per-chunk prompts and asserts the retained head/tail sentinels and dropped middle
+sentinel, so it pins the intended `_chunk` behavior rather than only the marker.
+
+Verification run: `uv run pytest tests/test_distill.py -q` passed with 21 tests;
+`uv run --with pytest-cov pytest tests/test_distill.py --cov=neurobase.curator.distill
+--cov-report=term-missing -q` reported 92% coverage; `uv run python scripts/ci.py`
+passed with ruff, format, mypy, and `805 passed in 5.84s`.
+
+**Verdict:** approve — the round-1 coverage issues are resolved, and the branch
+remains test-only with the full gate green.

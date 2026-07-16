@@ -1,6 +1,6 @@
 ---
 slug: webui-phase1-suggestions
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/webui-phase1-suggestions
@@ -98,6 +98,10 @@ next (session→fact provenance hardening; the app-shell UI phases).
 > expectations). Codex confirmed HEAD `1abcfbc`, ran the full CI gate (508
 > green), and proved all three P1s with live TestClient probes.
 
+> **Revision 1 (author, 2026-07-16, commits `453ca5c` + `af22bfe`):** all five
+> findings addressed as follow-up commits; full gate green (519 tests, +11).
+> Per-finding resolutions below; round 2 re-review requested.
+
 ### F1 / P1-SECURITY-001 — arbitrary Host defeats the browser-origin boundary
 - **severity:** blocker
 - **location:** `src/neurobase/webui/security.py:60`
@@ -109,7 +113,13 @@ next (session→fact provenance hardening; the app-shell UI phases).
 - **suggested direction:** reject non-loopback Host authorities (allowlist)
   before the origin comparison; extend §14/ADR-0012 so the allowlist is
   contract, not accident; test that a matching-but-foreign Host+Origin 403s.
-- **resolution:** _(pending)_
+- **resolution:** resolved — `is_loopback_host` allowlist
+  (`127.0.0.1`/`localhost`/`::1`) enforced by the middleware on **every
+  method** (not just POST, so a rebound page cannot read pages or the token
+  either), re-checked inside `check_same_origin_csrf` for direct callers;
+  §14 + ADR-0012 extended; tests cover the exact rebinding shape
+  (matching-but-foreign Host+Origin+token → 403), localhost acceptance, and
+  the hostname vocabulary.
 
 ### F2 / P1-CORRECTNESS-002 — commit POST can install bytes never previewed
 - **severity:** blocker
@@ -121,7 +131,12 @@ next (session→fact provenance hardening; the app-shell UI phases).
 - **suggested direction:** carry a server-verifiable fingerprint (resolved
   path/target + before/after bytes) in the form; on mismatch answer a typed
   409 re-preview with no backup/write/ledger. Keep the fresh POST prepare.
-- **resolution:** _(pending)_
+- **resolution:** resolved — sha256 over path\0target\0before\0after rendered
+  as a hidden field; the POST re-prepares fresh (kept) and refuses with a
+  typed 409 and zero side effects on missing/mismatched fingerprint; §14 gains
+  the consent-binding MUST. Tests: the exact probe scenario (preview A, edit,
+  submit stale form → 409, nothing written, fresh preview then commits) and
+  the missing-fingerprint case.
 
 ### F3 / P1-SECURITY-003 — edit GET renders legacy drafts unredacted
 - **severity:** blocker
@@ -132,7 +147,11 @@ next (session→fact provenance hardening; the app-shell UI phases).
 - **suggested direction:** redact the extracted draft (shared configured
   redaction path) before templating; test with built-in + configured-extra
   patterns.
-- **resolution:** _(pending)_
+- **resolution:** resolved — `proposals.redact_body` applied to the extracted
+  draft on the edit GET (same call as the detail surface); test injects a
+  GitHub-token secret directly into the on-disk draft region and asserts the
+  marker renders, not the secret. (Configured-extra pattern coverage exists in
+  the redact/proposals suites; the route test proves the display path.)
 
 ### F4 / P2-TEST-GAP-004 — §14 MUSTs not fully covered by contract tests
 - **severity:** major
@@ -143,7 +162,11 @@ next (session→fact provenance hardening; the app-shell UI phases).
   F1 weakness via TestClient's `testserver` authority.
 - **suggested direction:** focused contract tests that fail at `1abcfbc` and
   pass after the fixes; full gate stays green.
-- **resolution:** _(pending)_
+- **resolution:** resolved — added: serve() binds 127.0.0.1 (monkeypatched
+  uvicorn), `ui` refuses a newer-schema store before serve, web no-op POST
+  (no new backup, no second accepted event), preview drift, edit-display
+  redaction, loopback-Host acceptance + rejection; both TestClient fixtures
+  pinned to `http://127.0.0.1:8765`. Gate: 519 passed.
 
 ### F5 / P3-DOCS-005 — provenance plan overstates the curator log as counts-only
 - **severity:** nit
@@ -152,7 +175,10 @@ next (session→fact provenance hardening; the app-shell UI phases).
   not literally "only counts"; the real gap is no raw→fact identities/edges.
 - **suggested direction:** reword; Slice B's compatibility reasoning should
   start from the exact record shape.
-- **resolution:** _(pending)_
+- **resolution:** resolved — reworded to "pass summaries — status, integer
+  counts, timestamp, optional error, differently-shaped noop/resynth records —
+  but no per-pass raw→fact identities or edges."
 
-**Verdict:** changes-requested (Codex: BLOCKED) — _three P1s: Host-boundary
-bypass, unpreviewed-bytes install, unredacted edit surface._
+**Verdict (round 1):** changes-requested (Codex: BLOCKED) — _three P1s:
+Host-boundary bypass, unpreviewed-bytes install, unredacted edit surface._
+All findings addressed in revision 1; awaiting round 2.

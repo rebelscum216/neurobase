@@ -254,10 +254,23 @@ def _preview_fingerprint(preview: install.InstallPreview) -> str:
     field and re-checked inside the committing POST, so consent binds to the
     precise diff the user saw (§14) — a proposal, registry, or target-file
     change between preview and commit must force a re-preview, never install
-    unpreviewed bytes."""
+    unpreviewed bytes.
+
+    Components are length-prefixed before hashing (injective encoding):
+    artifact text may legally contain any character, so no delimiter — NUL
+    included — can be trusted to separate fields unambiguously."""
     artifact = preview.artifact
-    payload = "\0".join([str(artifact.path), str(artifact.target), artifact.before, artifact.after])
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256()
+    for part in (
+        str(artifact.path.resolve()),
+        str(artifact.target),
+        artifact.before,
+        artifact.after,
+    ):
+        data = part.encode("utf-8")
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
 
 
 def _run_prepare_install(

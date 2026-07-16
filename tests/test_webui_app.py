@@ -119,11 +119,86 @@ def test_is_loopback_host_vocabulary() -> None:
     assert is_loopback_host("127.0.0.1:8765")
     assert is_loopback_host("127.0.0.1")
     assert is_loopback_host("localhost:9000")
+    assert is_loopback_host("LOCALHOST:9000")  # hostname casing is normalized
     assert is_loopback_host("[::1]:8765")
+    assert is_loopback_host("[::1]")
     assert not is_loopback_host("evil.example:8765")
     assert not is_loopback_host("127.0.0.1.evil.example")
     assert not is_loopback_host("")
     assert not is_loopback_host(None)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "evil.example@localhost:8765",  # userinfo trick — lenient parsers see 'localhost'
+        "localhost@evil.example:8765",
+        "localhost#evil.example",
+        "localhost/evil.example",
+        "localhost?x=evil.example",
+        "localhost:notaport",
+        "localhost:0",
+        "localhost:99999",
+        "localhost:8765 ",
+        " localhost:8765",
+        "localhost.",
+        "[::1:8765",  # unmatched bracket
+        "::1:8765",  # unbracketed IPv6-with-port is ambiguous — fail closed
+        "127.0.0.1:8765/",
+    ],
+)
+def test_is_loopback_host_rejects_malformed_authorities(host: str) -> None:
+    # §14: the whole raw Host value must BE a loopback authority — a strict
+    # full-string parse, not a lenient extract-the-hostname split.
+    assert not is_loopback_host(host)
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["evil.example@localhost:8765", "localhost/evil.example", "localhost:notaport"],
+)
+def test_malformed_host_authorities_are_rejected_by_the_middleware(
+    client: TestClient, host: str
+) -> None:
+    response = client.get("/suggestions", headers={"host": host})
+    assert response.status_code == 403
+
+
+def test_post_with_userinfo_host_and_matching_origin_is_rejected(
+    app: Starlette, client: TestClient
+) -> None:
+    # The round-2 probe shape: a userinfo-decorated authority whose lenient
+    # `hostname` is loopback, with an exactly matching Origin and the real
+    # token — must still die at the gate.
+    response = client.post(
+        "/suggestions/example/accept",
+        data={"csrf_token": app.state.csrf_token},
+        headers={
+            "host": "evil.example@localhost:8765",
+            "origin": "http://evil.example@localhost:8765",
+        },
+    )
+    assert response.status_code == 403
+
+
+def test_malformed_origin_is_a_403_not_a_500(app: Starlette, client: TestClient) -> None:
+    # An unparseable Origin (unclosed IPv6 bracket) is an ordinary rejection —
+    # §14 says failed checks answer 403; an exception-driven 500 is a gate bug.
+    response = client.post(
+        "/suggestions/example/accept",
+        data={"csrf_token": app.state.csrf_token},
+        headers={"host": "127.0.0.1:8765", "origin": "http://[::1"},
+    )
+    assert response.status_code == 403
+
+
+def test_host_gate_covers_other_methods(client: TestClient) -> None:
+    # §14 says EVERY request, any method — not just the GET/POST pair the
+    # route table happens to use.
+    rejected = client.put("/suggestions", headers={"host": "evil.example:8765"})
+    assert rejected.status_code == 403
+    allowed = client.put("/suggestions")  # loopback Host from base_url
+    assert allowed.status_code == 405  # reaches routing; PUT isn't a route method
 
 
 def test_check_same_origin_csrf_rejects_non_loopback_host() -> None:

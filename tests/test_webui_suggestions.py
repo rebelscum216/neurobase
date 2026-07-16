@@ -257,14 +257,24 @@ def test_full_accept_writes_backs_up_and_flips_status(
 # --- accept (POST) — consent binds to the previewed diff (§14) -----------------
 
 
-def _assert_nothing_installed(seed: Seed) -> None:
-    assert not (seed.repo / "AGENTS.md").exists()
-    assert not (seed.root / "backups").exists()
+def _state_snapshot(seed: Seed) -> dict[str, object]:
+    """Exact bytes of everything a refused commit must not touch: the target
+    artifact, the backup tree, the proposal file, and the complete ledger. A
+    409 that leaves any of these different from before is a contract bug even
+    if the status/accepted-event spot checks would still pass."""
+    from neurobase.recommender.corpus import ledger_path
+
     doc = proposals.load_proposal(seed.root, seed.proposed_slug)
     assert doc is not None
-    assert doc.get("status") == "proposed"
-    history = proposals.ledger_history(seed.root, seed.proposed_slug)
-    assert all(event["event"] != "accepted" for event in history)
+    target = seed.repo / "AGENTS.md"
+    backups = seed.root / "backups"
+    ledger = ledger_path(seed.root)
+    return {
+        "target": target.read_bytes() if target.exists() else None,
+        "backups": sorted(p.name for p in backups.iterdir()) if backups.exists() else [],
+        "proposal": doc.file_path.read_bytes(),
+        "ledger": ledger.read_bytes() if ledger.exists() else b"",
+    }
 
 
 def test_accept_post_with_stale_fingerprint_returns_409_and_writes_nothing(
@@ -276,6 +286,7 @@ def test_accept_post_with_stale_fingerprint_returns_409_and_writes_nothing(
     # effects (no backup, no artifact, no proposal mutation, no ledger event).
     stale = _preview_fingerprint(client, seed.proposed_slug)
     assert proposals.save_edited_draft(seed.root, seed.proposed_slug, "A different draft entirely.")
+    before = _state_snapshot(seed)  # after the legitimate edit, before the POST
     response = client.post(
         f"/suggestions/{seed.proposed_slug}/accept",
         data={"csrf_token": app.state.csrf_token, "fingerprint": stale},
@@ -284,7 +295,7 @@ def test_accept_post_with_stale_fingerprint_returns_409_and_writes_nothing(
     )
     assert response.status_code == 409
     assert "changed after the diff" in response.text
-    _assert_nothing_installed(seed)
+    assert _state_snapshot(seed) == before
     # A fresh preview + commit still works after the drift refusal.
     response = client.post(
         f"/suggestions/{seed.proposed_slug}/accept",
@@ -302,6 +313,7 @@ def test_accept_post_with_stale_fingerprint_returns_409_and_writes_nothing(
 def test_accept_post_without_fingerprint_returns_409_and_writes_nothing(
     client: TestClient, app: Starlette, seed: Seed
 ) -> None:
+    before = _state_snapshot(seed)
     response = client.post(
         f"/suggestions/{seed.proposed_slug}/accept",
         data={"csrf_token": app.state.csrf_token},
@@ -309,7 +321,28 @@ def test_accept_post_without_fingerprint_returns_409_and_writes_nothing(
         follow_redirects=False,
     )
     assert response.status_code == 409
-    _assert_nothing_installed(seed)
+    assert _state_snapshot(seed) == before
+
+
+def test_preview_fingerprint_encoding_is_injective(tmp_path: Path) -> None:
+    # P1-CORRECTNESS-002 round-2 probe: artifact text may contain NUL, so a
+    # NUL-delimited serialization collides — ("A\0B","C") vs ("A","B\0C").
+    # The length-prefixed encoding must keep these distinct.
+    from neurobase.core.store import Document
+    from neurobase.recommender import emitters
+    from neurobase.webui import routes as webui_routes
+
+    doc = Document(frontmatter={}, body="", file_path=tmp_path / "p.md")
+
+    def preview(before: str, after: str) -> install.InstallPreview:
+        artifact = emitters.Artifact(
+            path=tmp_path / "AGENTS.md", before=before, after=after, target="AGENTS.md"
+        )
+        return install.InstallPreview(doc=doc, artifact=artifact, already_up_to_date=False)
+
+    assert webui_routes._preview_fingerprint(
+        preview("A\0B", "C")
+    ) != webui_routes._preview_fingerprint(preview("A", "B\0C"))
 
 
 def test_accept_post_when_already_up_to_date_is_a_no_op(
@@ -399,11 +432,10 @@ def test_edit_round_trips_new_draft(client: TestClient, app: Starlette, seed: Se
     assert history[-1]["event"] == "edited"
 
 
-def test_edit_get_redacts_legacy_draft_secrets(client: TestClient, seed: Seed) -> None:
-    # §14/§12.8: display-time redaction on EVERY draft surface, including a
-    # legacy/hand-edited proposal whose file was written outside the redacting
-    # write paths. Inject a secret directly into the managed draft region on
-    # disk (save_edited_draft would redact it, which is exactly the point).
+def _inject_secret_into_draft(seed: Seed) -> str:
+    """Write a secret directly into the on-disk managed draft region — the
+    legacy/hand-edited shape that bypassed every redacting write path
+    (``save_edited_draft`` would redact it, which is exactly the point)."""
     doc = proposals.load_proposal(seed.root, seed.proposed_slug)
     assert doc is not None
     secret = "ghp_" + "A" * 36
@@ -414,8 +446,34 @@ def test_edit_get_redacts_legacy_draft_secrets(client: TestClient, seed: Seed) -
         text.replace("Always use uv run.", f"Always use uv run. token: {secret}"),
         encoding="utf-8",
     )
+    return secret
 
+
+def test_edit_get_redacts_legacy_draft_secrets(client: TestClient, seed: Seed) -> None:
+    # §14/§12.8: display-time redaction on EVERY draft surface, including a
+    # legacy/hand-edited proposal whose file was written outside the redacting
+    # write paths.
+    secret = _inject_secret_into_draft(seed)
     response = client.get(f"/suggestions/{seed.proposed_slug}/edit")
+    assert response.status_code == 200
+    assert secret not in response.text
+    assert "[REDACTED:github-token]" in response.text
+
+
+def test_detail_redacts_legacy_draft_secrets(client: TestClient, seed: Seed) -> None:
+    secret = _inject_secret_into_draft(seed)
+    response = client.get(f"/suggestions/{seed.proposed_slug}")
+    assert response.status_code == 200
+    assert secret not in response.text
+    assert "[REDACTED:github-token]" in response.text
+
+
+def test_accept_preview_redacts_legacy_draft_secrets(client: TestClient, seed: Seed) -> None:
+    # The preview diff renders the emitter-rendered artifact — the emitter's
+    # own configured redaction (§12.8 belt-and-suspenders) must hold on this
+    # surface too.
+    secret = _inject_secret_into_draft(seed)
+    response = client.get(f"/suggestions/{seed.proposed_slug}/accept")
     assert response.status_code == 200
     assert secret not in response.text
     assert "[REDACTED:github-token]" in response.text

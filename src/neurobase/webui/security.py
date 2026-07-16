@@ -11,6 +11,7 @@ behavior for a single-user local tool.
 
 from __future__ import annotations
 
+import re
 import secrets
 from urllib.parse import urlsplit
 
@@ -28,7 +29,15 @@ CSRF_FORM_FIELD = "csrf_token"
 # browser then treats the response as same-origin — so the boundary must be
 # enforced on the header, not just the socket. Loopback names cannot be
 # rebound; anything else is rejected before routing, on every method.
-LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+# A STRICT full-string authority parser, not a lenient URL split: the entire
+# raw header must be exactly one allowlisted loopback name plus an optional
+# valid numeric port — nothing else. Lenient extraction (e.g. urlsplit's
+# ``hostname``) tolerates userinfo (``evil.example@localhost``), path/query/
+# fragment suffixes (``localhost/evil.example``), and junk ports
+# (``localhost:notaport``), all of which must fail closed here.
+_LOOPBACK_AUTHORITY_RE = re.compile(
+    r"^(?:127\.0\.0\.1|\[::1\]|(?i:localhost))(?::(?P<port>\d{1,5}))?$"
+)
 
 
 def new_csrf_token() -> str:
@@ -37,15 +46,18 @@ def new_csrf_token() -> str:
 
 
 def is_loopback_host(host: str | None) -> bool:
-    """Whether a raw ``Host`` header names a loopback authority
-    (``127.0.0.1``, ``localhost``, or ``::1``, any port)."""
+    """Whether a raw ``Host`` header is exactly a loopback authority —
+    ``127.0.0.1``, ``localhost`` (any casing), or ``[::1]``, each with an
+    optional valid port. Any other byte in the value (userinfo, a path or
+    fragment suffix, a malformed port, an unmatched bracket, whitespace)
+    rejects the whole header — fail closed, never extract-and-hope."""
     if not host:
         return False
-    try:
-        hostname = urlsplit(f"//{host}").hostname
-    except ValueError:
+    match = _LOOPBACK_AUTHORITY_RE.match(host)
+    if match is None:
         return False
-    return hostname in LOOPBACK_HOSTNAMES
+    port = match.group("port")
+    return port is None or 0 < int(port) <= 65535
 
 
 def _origin_netloc(request: Request) -> str | None:
@@ -55,7 +67,13 @@ def _origin_netloc(request: Request) -> str | None:
     header = request.headers.get("origin") or request.headers.get("referer")
     if not header:
         return None
-    return urlsplit(header).netloc or None
+    try:
+        return urlsplit(header).netloc or None
+    except ValueError:
+        # A malformed Origin/Referer (e.g. an unclosed IPv6 bracket) is an
+        # ordinary rejection, never an exception surfacing as a 500 — §14
+        # says failed checks answer 403.
+        return None
 
 
 async def check_same_origin_csrf(request: Request, csrf_token: str) -> str | None:

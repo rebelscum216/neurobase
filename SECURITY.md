@@ -68,6 +68,31 @@ Two things worth being explicit about:
   Security through an unpublished pattern list isn't security; the goal is a
   correct, auditable list, not a secret one.
 
+## Curate-time transcript distill
+
+The curator can read an agent session's **full transcript** — the on-disk
+JSONL/rollout the scribe already parsed at capture time — and distill it into a
+compact digest for richer memory (spec §2.0, ADR-0014). Two boundaries make this
+no wider a surface than the brain backend above:
+
+- **Only redacted text is sent, and only to *your* configured brain.** The
+  transcript is run through the same D13 redaction **per value, before it is
+  rendered** (a label prefix would otherwise shift a `KEY=value` line off column
+  0 and shield it), so what reaches the brain is redacted transcript text — not
+  raw tool output. It goes to the same `claude-cli`/`codex-cli`/`anthropic-api`
+  backend described under the trust boundary, nowhere else. Note Neurobase is
+  cross-agent: if your curate brain differs from the agent that produced the
+  session (e.g. a Codex session distilled by a `claude` brain), the redacted
+  transcript reaches *that* backend — still one you configured.
+- **The transcript never lands in the store.** Only the bounded, redacted digest
+  does — and it is redacted again before it is cached or folded. The digest cache
+  lives at `<store>/…/raw/.digests/`, is derived state (safe to delete), and is
+  covered by the same redaction guarantee. To disable distill entirely and keep
+  curate on the deterministic skim only, set `[curate] distill = "off"`.
+
+The pattern-based caveat under Redaction applies here too: distill sends the same
+best-effort-redacted text, not semantically-scrubbed text.
+
 ## Consent for anything outside Neurobase's own files
 
 Neurobase never edits your agent config (`settings.json`, `hooks.json`,

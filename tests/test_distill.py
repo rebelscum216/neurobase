@@ -234,6 +234,168 @@ def test_secret_in_tool_result_never_reaches_the_brain(root: Path, tmp_path: Pat
     assert "supersecretvalue123" not in cache.read_text(encoding="utf-8")
 
 
+def test_secret_in_tool_use_command_never_reaches_the_brain(root: Path, tmp_path: Path) -> None:
+    """A planted secret in an assistant ``tool_use`` *command* field must be
+    scrubbed before the render reaches the distiller (D17). This drives the
+    ``_tool_use_line`` path, whose command value goes through ``redact_command``
+    (a *different* redactor than the tool_result path) — an env-assignment secret
+    is exactly what that lexical boundary is meant to catch."""
+    secret = "API_TOKEN=supersecretvalue123"
+    events = [
+        {"type": "user", "message": {"role": "user", "content": "set up the env"}},
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {"command": f"export {secret} && env"},
+                    }
+                ],
+            },
+        },
+    ]
+    t = _write_transcript(tmp_path / "t.jsonl", events)
+
+    captured: list[str] = []
+
+    class CapturingBrain(DistillBrain):
+        def text(self, system: str, user: str) -> str:
+            if system.startswith("You compress") or system.startswith("You merge"):
+                captured.append(user)
+            return super().text(system, user)
+
+    doc = _write_raw(root, "proj", "r1.md", transcript_path=str(t))
+    brain = CapturingBrain()
+    out, counts = distill.distill_docs(root, "proj", [doc], brain)
+
+    assert counts["distilled"] == 1
+    assert captured, "distiller was called"
+    rendered = captured[0]
+    # The command line was rendered (proves _tool_use_line ran) but scrubbed.
+    assert "[tool_use Bash] command=" in rendered
+    assert "supersecretvalue123" not in rendered
+    # and never in the cached digest sidecar
+    cache = store.memory_dir("proj", root) / "raw" / ".digests" / "r1.md"
+    assert "supersecretvalue123" not in cache.read_text(encoding="utf-8")
+
+
+def test_tool_result_block_list_is_joined_and_scrubbed(root: Path, tmp_path: Path) -> None:
+    """A ``tool_result`` whose ``content`` is a *list* of blocks (text blocks and
+    bare strings) is joined by ``_result_text`` and scrubbed as one value before
+    it reaches the distiller — the list branch, distinct from the string branch."""
+    secret = "API_TOKEN=supersecretvalue123"
+    events: list[dict] = [
+        {"type": "user", "message": {"role": "user", "content": "run it"}},
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [
+                            {"type": "text", "text": "first line of output"},
+                            "a bare-string block",
+                            {"type": "text", "text": secret},
+                        ],
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        },
+    ]
+    t = _write_transcript(tmp_path / "t.jsonl", events)
+
+    captured: list[str] = []
+
+    class CapturingBrain(DistillBrain):
+        def text(self, system: str, user: str) -> str:
+            if system.startswith("You compress") or system.startswith("You merge"):
+                captured.append(user)
+            return super().text(system, user)
+
+    doc = _write_raw(root, "proj", "r1.md", transcript_path=str(t))
+    out, counts = distill.distill_docs(root, "proj", [doc], CapturingBrain())
+
+    assert counts["distilled"] == 1
+    rendered = captured[0]
+    # All three list blocks were joined and rendered under one tool_result label.
+    assert "first line of output" in rendered
+    assert "a bare-string block" in rendered
+    # ...but the planted secret in the joined value was scrubbed.
+    assert "supersecretvalue123" not in rendered
+
+
+# --- chunking (oversize transcript) --------------------------------------
+
+
+def test_oversize_transcript_drops_middle_chunks_and_marks_it(root: Path, tmp_path: Path) -> None:
+    """When the render exceeds the chunk cap, the middle chunks are dropped (head
+    + tail kept) and the digest is prefixed with a visible drop marker so the
+    loss is never silent (``_chunk`` + the ``dropped`` path in ``_distill_one``)."""
+    events = [
+        {"type": "user", "message": {"role": "user", "content": "X" * 1000}},
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        },
+    ]
+    t = _write_transcript(tmp_path / "t.jsonl", events)
+
+    doc = _write_raw(root, "proj", "r1.md", transcript_path=str(t))
+    # chunk_chars small ⇒ the ~1000-char render splits into far more than
+    # MAX_DISTILL_CHUNKS (5) chunks, forcing the middle-drop.
+    out, counts = distill.distill_docs(root, "proj", [doc], DistillBrain(), chunk_chars=50)
+
+    assert counts["distilled"] == 1
+    body = out[0].body
+    assert "middle chunk(s) dropped for size" in body
+
+
+# --- rendering (summary + subagent sidechain) ----------------------------
+
+
+def test_summary_and_sidechain_events_are_rendered(root: Path, tmp_path: Path) -> None:
+    """Compact-summary events and subagent sidechain turns both reach the render
+    (the ``[compact summary]`` line and the ``(subagent)`` marker) — the richer
+    distill is meant to include subagent context, so it must not be dropped."""
+    events: list[dict] = [
+        {"type": "summary", "summary": "earlier we fixed the login bug"},
+        {"type": "user", "isSidechain": True, "message": {"role": "user", "content": "sub task"}},
+        {
+            "type": "assistant",
+            "isSidechain": True,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "sub answer"}]},
+        },
+    ]
+    t = _write_transcript(tmp_path / "t.jsonl", events)
+
+    captured: list[str] = []
+
+    class CapturingBrain(DistillBrain):
+        def text(self, system: str, user: str) -> str:
+            if system.startswith("You compress") or system.startswith("You merge"):
+                captured.append(user)
+            return super().text(system, user)
+
+    doc = _write_raw(root, "proj", "r1.md", transcript_path=str(t))
+    out, counts = distill.distill_docs(root, "proj", [doc], CapturingBrain())
+
+    assert counts["distilled"] == 1
+    rendered = captured[0]
+    assert "[compact summary] earlier we fixed the login bug" in rendered
+    assert "USER (subagent): sub task" in rendered
+    assert "ASSISTANT (subagent): sub answer" in rendered
+
+
 # --- cache (content-addressed) -------------------------------------------
 
 

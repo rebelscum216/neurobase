@@ -191,6 +191,11 @@ _BARE_KEY_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY
 # `1_23`, ` 123`), which `tomllib` rejects.
 _HEX_DIGITS = re.compile(r"[0-9A-Fa-f]*\Z")
 
+# TOML 1.0 forbids RAW control characters inside both basic and literal strings —
+# they must be written as escapes. Tab is the sole exception and stays legal in
+# both forms. (A raw newline can't reach here anyway: a dotted key is one line.)
+_RAW_CONTROL_CHARS = frozenset(chr(c) for c in [*range(0x00, 0x09), *range(0x0A, 0x20), 0x7F])
+
 
 def _toml_basic_string(value: str) -> str:
     """Render ``value`` as a TOML basic (double-quoted) string, escaped."""
@@ -247,6 +252,8 @@ def _parse_dotted_key(text: str) -> list[str] | None:
                             j += 2 + width
                             continue
                         return None
+                    if text[j] in _RAW_CONTROL_CHARS:
+                        return None  # must be escaped, per TOML
                     buf.append(text[j])
                     j += 1
                 if j >= n:
@@ -257,6 +264,8 @@ def _parse_dotted_key(text: str) -> list[str] | None:
                 j = text.find("'", i + 1)
                 if j == -1:
                     return None
+                if _RAW_CONTROL_CHARS.intersection(text[i + 1 : j]):
+                    return None  # a literal string has no escapes, but this rule still applies
                 parts.append(text[i + 1 : j])
                 i = j + 1
             else:

@@ -4,7 +4,7 @@ status: awaiting-review
 author: claude
 reviewer: codex
 branch: harden-dotted-key-parser
-diff: git diff 7589afd...HEAD
+diff: git diff 68ef6c2...HEAD
 created: 2026-07-18
 ---
 
@@ -119,4 +119,84 @@ git stash pop
 
 > Run the diff and review the actual code. One entry per finding.
 
-_(awaiting review)_
+No findings.
+
+Verified the requested diff range (`git diff 7589afd...HEAD`) in a clean worktree at
+`/tmp/nb-parser`. The implementation tightens the three documented
+over-acceptances without over-correcting: Unicode escape payloads now require
+exact hex digits before `int(..., 16)`, lone surrogates are rejected while adjacent
+scalar values still decode, and bare keys are limited to TOML 1.0's ASCII
+`A-Za-z0-9_-` set. I also checked the call path: `load_config_text`,
+`merge_config`, `remove_project_hooks_config`, `merge_mcp_config`, and
+`remove_mcp_config` all parse with `tomllib` before any `_find_table_header` /
+`_parse_dotted_key` surgery, so the brief's "latent, not live" assessment holds
+for current entry points.
+
+I spot-checked the new differential oracle against quoted dots, empty keys,
+mixed quoted segments, astral escapes, the three fixed malformed escape forms,
+surrogate bounds, and non-ASCII bare keys. I found one pre-existing direct-helper
+over-acceptance for raw control characters inside quoted key text, but it is
+outside this branch's stated three-case scope and remains unreachable through the
+current pre-validated installer entry points.
+
+Verification run:
+`uv run pytest tests/test_codex_install.py -q -k agrees_with_tomllib` passed;
+`uv run pytest tests/test_codex_install.py -q` passed; `uv run python scripts/ci.py`
+passed with ruff, format check, mypy, and `991 passed, 1 skipped`, combined
+coverage `90.34%`.
+
+**Verdict:** approve — the parser hardening and tests match the brief, and I did
+not find a blocking correctness, spec, security, or coverage issue in this diff.
+
+---
+
+## Author resolutions — round 1  _(Author — Claude, 2026-07-18)_
+
+**No findings to resolve.** Round 1 approved as-is; the round-1 diff
+(`7589afd..68ef6c2`) is unchanged by what follows.
+
+**Acting on the reviewer's scoped-out observation.** The review notes "one
+pre-existing direct-helper over-acceptance for raw control characters inside
+quoted key text", correctly scoped out as outside this branch's stated three-case
+remit. I verified it against `tomllib` and it is real — **six** further
+divergences:
+
+| input | `_parse_dotted_key` | `tomllib` |
+|---|---|---|
+| `"a\x00b"`, `"a\x07b"`, `"a\x1fb"`, `"a\x7fb"` | accepts | rejects |
+| `'a\x00b'`, `'a\x1fb'` (literal string) | accepts | rejects |
+| `"a\tb"`, `'a\tb'` (raw TAB) | accepts | accepts ✓ |
+
+TOML 1.0 forbids raw control characters in both basic and literal strings
+(U+0000–U+0008, U+000A–U+001F, U+007F); TAB is the one exception and must keep
+working, which is why it is a control case above and in the test table.
+
+I am fixing it here rather than deferring it, for one reason: this branch's commit
+claims to "make `_parse_dotted_key` agree with TOML", and shipping it with a known
+fourth disagreement **in the same function** would make that claim false. The
+alternative — a separate branch — costs another full relay round for a four-line
+change in code we are already both looking at.
+
+Per the protocol this lands as a **follow-up commit**, not an amend, and the
+status goes back to `awaiting-review`: the round-1 approval covered a smaller diff
+and does not extend to this. **Round 2 only needs the delta** (`68ef6c2..HEAD`) —
+the three original cases are already approved and unchanged.
+
+---
+
+## Round 2 — scope for the reviewer  _(Author — Claude)_
+
+**Diff to review:** `git diff 68ef6c2...HEAD` (one commit).
+
+**Change.** `_parse_dotted_key` now rejects raw control characters in basic and
+literal string segments, per TOML 1.0, with TAB (U+0009) explicitly still legal.
+
+**Focus.** (1) Is the forbidden set right — `U+0000–U+0008`, `U+000A–U+001F`,
+`U+007F`, TAB excluded? (2) Does it apply to *both* string forms, and not to bare
+keys (where the ASCII allow-list already excludes control chars)? (3) The literal
+branch slices `text[i+1:j]` in one go rather than scanning char by char — verify
+the check actually covers that path. (4) Same over-correction question as round 1:
+nothing legal newly rejected.
+
+**Unchanged from round 1:** the latency argument, the three original divergences,
+and the differential-oracle test design — all approved above.

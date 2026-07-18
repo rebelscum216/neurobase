@@ -481,6 +481,18 @@ _KEY_TEXTS = [
     '"\\u12"',  # too few digits
     "café",  # str.isalnum() is Unicode-aware; TOML bare keys are ASCII
     "中文",
+    # --- a fourth divergence, spotted by the reviewer in round 1 ---
+    # TOML forbids RAW control characters in both string forms; they must be
+    # escaped. Tab is the sole exception, so it is the control case that keeps
+    # the rule from being "reject every control character".
+    '"a\x00b"',
+    '"a\x07b"',
+    '"a\x1fb"',
+    '"a\x7fb"',
+    "'a\x00b'",  # literal strings have no escapes, but the rule still applies
+    "'a\x1fb'",
+    '"a\tb"',  # legal: raw tab is permitted in a basic string
+    "'a\tb'",  # legal: and in a literal string
 ]
 
 

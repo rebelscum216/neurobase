@@ -1,8 +1,8 @@
 # Coverage report — full repo crawl (2026-07-18)
 
-**Scope:** all 44 source `.py` files / 43 measured by coverage (9,364 LOC),
-847 collected test items across 42 test files, CI/tooling, docs, and test
-architecture.
+**Scope:** all 44 source `.py` files / 43 measured by coverage (9,509 physical
+lines, `wc -l`), 847 collected test items across 42 test files, CI/tooling, docs,
+and test architecture.
 **Measured:** `coverage run --branch -m pytest` via
 `uv run --with coverage --with pytest-timeout` (macOS, Python 3.13). No coverage
 tooling is installed in the repo — this was an out-of-band measurement (see

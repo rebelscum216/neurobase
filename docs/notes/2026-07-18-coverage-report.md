@@ -1,7 +1,8 @@
 # Coverage report — full repo crawl (2026-07-18)
 
-**Scope:** all 41 source modules (9,364 LOC), 551 tests across 42 test files,
-CI/tooling, docs, and test architecture.
+**Scope:** all 44 source `.py` files / 43 measured by coverage (9,364 LOC),
+847 collected test items across 42 test files, CI/tooling, docs, and test
+architecture.
 **Measured:** `coverage run --branch -m pytest` via
 `uv run --with coverage --with pytest-timeout` (macOS, Python 3.13). No coverage
 tooling is installed in the repo — this was an out-of-band measurement (see
@@ -14,19 +15,26 @@ clean `main` will show a slightly different module set.
 
 ## Headline numbers
 
+Three distinct metrics — kept separate deliberately, because conflating them is
+exactly the error an earlier draft of this report made:
+
 | Metric | Value |
 |---|---|
-| Tests collected | **551** (42 files, 0 failures, 0 xfail, 4 platform skips) |
-| Line coverage | **91%** (423 / 4767 stmts missed) |
-| Branch coverage | **89%** (239 partial branches) |
+| Tests collected | **847** items (551 `def test_` functions; the rest are parametrized cases), 42 files, 0 failures, 0 xfail, 4 platform skips |
+| **Statement** coverage | **91%** (4344 / 4767 statements; 423 missed) |
+| **Branch** coverage | **84%** (1347 / 1610 branches taken; 263 branches missed, 239 partial) |
+| coverage.py combined `Cover` (branch mode) | **89%** — the number `coverage report` prints; = (covered stmts + covered branches) / (stmts + branches). **Not** branch coverage. |
 | Coverage enforced in CI | **No — not measured at all** |
 | Documented open defects | 1 ([known-gaps.md](../known-gaps.md) G1) |
 
-The suite is genuinely strong: 89% branch coverage with the misses concentrated
-in defensive/error paths. The gaps below are ranked by what actually matters,
-not by raw percentage.
+The suite is genuinely strong: 91% of statements and 84% of branches exercised,
+with the misses concentrated in defensive/error paths. The gaps below are ranked
+by what actually matters, not by raw percentage.
 
-## Lowest-covered modules (branch coverage)
+## Lowest-covered modules
+
+Ranked by coverage.py's combined `Cover` (branch mode) — the per-file analogue of
+the 89% total above, not pure branch coverage.
 
 | Module | Cover | Stmts miss / branch miss |
 |---|---|---|
@@ -83,21 +91,36 @@ These are the exceptions where **actual logic** is untested:
 | `mcp/server.py` | 85% | Empty-fact guard (`raise ValueError("fact must not be empty")`, **183**), bad-slug skip in scans (**84–85**), the `serve()` stdio entrypoint (**247**). |
 | `recommender/metrics.py` | 80% | Lowest recommender module — reduction/aggregation branches (161, 182–245) partly unexercised. |
 
-## Gap 4 — No integration / end-to-end test [priority: medium]
+## Gap 4 — Integration coverage stops short of the shipped edges [priority: medium]
 
-Every one of the 42 test files is unit-level (no `conftest.py`, no shared
-fixtures, no `tests/__init__.py`). There is **no test that drives the real loop**
-— hook → capture (scribe) → curate → recall/inject → recommend — across a live
-store. The MCP server is tested at the handler level (`tests/test_mcp_server.py`)
-but **not over the stdio protocol** it actually ships on, and neither
-`neurobase mcp serve` nor `cli serve` (`cli/__init__.py:1048–1050`) is exercised
-end to end. Given the cross-agent Claude↔Codex design, a single happy-path
-integration test would catch wiring regressions no unit test can see.
+Integration coverage exists and is real — this is *not* an all-unit suite:
+[`tests/test_cross_agent.py`](../../tests/test_cross_agent.py) drives the real
+Claude *and* Codex scribes → `engine.curate` → CLI `hook … session-start` recall
+across a temp store (both `test_claude_plus_codex_fold_and_both_sessions_recall`
+and `test_codex_raw_alone_curates`), and `tests/test_cli_curate.py` exercises
+curate at the CLI level. So the capture → curate → recall spine *is* covered.
+
+What that spine does **not** reach is the two shipped edges:
+
+1. **MCP over stdio.** `tests/test_mcp_server.py` tests the handlers in-process; no
+   test drives the server over the **stdio protocol** it actually ships on, and
+   `neurobase mcp serve` / `cli serve` (`cli/__init__.py:1048–1050`, `server.run`
+   at `mcp/server.py:247`) is never launched end to end.
+2. **The recommender in the loop.** `test_cross_agent.py` stops at recall; no
+   happy-path test carries a curated store through to a `recommend`/emit step, so
+   the curate → mine → rank → emit wiring is only covered piecewise by the
+   `recommender/*` unit tests, never as one flow.
+
+Both use a `FakeBrain` and trigger curation directly (the auto-spawn is
+monkeypatched off), so brain-invocation and the stale-spawn trigger are also
+outside the integration path. Two targeted tests — a stdio MCP smoke test and a
+curate-through-recommend happy path — would close the real edges without
+re-testing what `test_cross_agent.py` already proves.
 
 ## Gap 5 — Windows lock path is exercised but never proven [priority: low]
 
-`core/locks.py` is the lowest module at **66%** — the entire `msvcrt` Windows
-branch (lines 16–27, 40–44) is dark on this run. CI *does* include
+`core/locks.py` is the lowest module at **66%** combined `Cover` — the entire
+`msvcrt` Windows branch (lines 16–27, 40–44) is dark on this run. CI *does* include
 `windows-latest`, so the code runs there — but because coverage isn't collected
 on any runner (Gap 1), nothing asserts the Windows branch actually executes. It
 is covered by faith, not measurement.
@@ -129,14 +152,18 @@ picture; the doc is authoritative.
 
 1. **Wire coverage into the gate.** Add `coverage`/`pytest-cov` to the `dev`
    group, run `pytest --cov=src/neurobase --cov-branch` in `scripts/ci.py`, and
-   set a `fail_under` (start at the current 89 to ratchet, never regress).
+   set `fail_under`. Note what the number gates: coverage.py's `fail_under`
+   enforces the **combined** `Cover` (89 today), not branch coverage — so seed it
+   at 89 to ratchet the combined figure, or gate statement coverage explicitly at
+   91 if that's the intent. Pick one and state it; don't leave the metric implicit.
 2. **Add `audit_command_redaction.py` to the gate** (or fold it into pytest) so
    the redaction property is checked on every push, not by hand.
 3. **Add branch tests for the two real-logic clusters:** the codex `install.py`
    shell-word parser (207–262) and the `redact.py` `$(…)`/quote scrubbing
    branches.
-4. **Add one happy-path integration test** driving capture→curate→recall against
-   a temp store, plus a stdio-level MCP smoke test.
+4. **Close the two integration edges from Gap 4:** a stdio-level MCP smoke test
+   and a curate→recommend happy path (capture→curate→recall is already covered by
+   `test_cross_agent.py`).
 5. Leave G1 to its ADR; leave the defensive-branch misses alone — chasing them to
    100% is low value.
 
@@ -146,8 +173,19 @@ picture; the doc is authoritative.
 
 ```
 uv run --with coverage --with pytest-timeout coverage run --branch -m pytest -q
-uv run --with coverage coverage report --include='src/*' --show-missing
+uv run --with coverage coverage report --include='src/*' --show-missing   # prints combined Cover
+uv run --with coverage coverage json  --include='src/*' -o - | python -c \
+  'import json,sys; t=json.load(sys.stdin)["totals"]; \
+   print("statement", round(100*t["covered_lines"]/t["num_statements"],1)); \
+   print("branch", round(100*t["covered_branches"]/t["num_branches"],1)); \
+   print("combined", round(t["percent_covered"],1))'
 ```
+
+`coverage report`'s `Cover` column is the combined metric (89%). Statement (91%)
+and branch (84%) coverage come from the JSON totals, as above — that separation
+is the whole point of the headline table. Test-item count is
+`uv run pytest --collect-only -q` (847); `grep -c 'def test_'` gives the 551
+function count.
 
 Measured against the working tree of `fix-curator-runaway-guard-lock` (base
 `main` at `46b2763` + uncommitted work described in the header), macOS

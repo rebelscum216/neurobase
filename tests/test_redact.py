@@ -259,6 +259,34 @@ EXACT: list[tuple[str, str]] = [
     ),
     ('echo "`echo \\`api_token=SECRET ./run\\``"', f'echo "`echo \\`api_token={R} ./run\\``"'),
     ("echo ${OUTER:-api_key=example}", "echo ${OUTER:-api_key=example}"),
+    # An UNQUOTED `$(…)` at the top level of a command. The quoted form
+    # (`echo "$(…)"`) is scrubbed by the double-quote path and so never exercised
+    # this one — but the shell executes both, and both must come back with their
+    # `$(`/`)` delimiters whole.
+    ("echo $(api_token=SECRET ./run)", f"echo $(api_token={R} ./run)"),
+    ("echo $(echo $(api_token=SECRET x))", f"echo $(echo $(api_token={R} x))"),
+    # Arithmetic nested inside an expansion WORD assigns exactly as it does at
+    # the top level, and `$((`/`))` is structure, not part of the value.
+    ("echo ${OUTER:-$((API_TOKEN=SECRET))}", f"echo ${{OUTER:-$((API_TOKEN={R}))}}"),
+    # Quoting inside an expansion WORD follows the shell, checked against bash:
+    # `${X:-'$(echo RAN)'}` and `${X:-\$(echo RAN)}` both PRINT `$(echo RAN)`,
+    # while `${X:-"$(echo RAN)"}` RUNS it. So single quotes and an escaped `$`
+    # are inert data; a double-quoted span is data except for the substitutions
+    # the shell still executes inside it.
+    ("echo ${OUTER:-'$(api_token=example)'}", "echo ${OUTER:-'$(api_token=example)'}"),
+    ("echo ${OUTER:-\\$(api_token=example)}", "echo ${OUTER:-\\$(api_token=example)}"),
+    ('echo ${OUTER:-"api_key=example"}', 'echo ${OUTER:-"api_key=example"}'),
+    # The apostrophe is what discriminates here: mistaken for an opening single
+    # quote it swallows the rest of the word — closing quote, substitution and
+    # all — and the secret rides out in the clear.
+    (
+        'echo ${OUTER:-"it can\'t $(api_token=SECRET ./run)"}',
+        f'echo ${{OUTER:-"it can\'t $(api_token={R} ./run)"}}',
+    ),
+    # A backslash escape in unquoted text is copied through byte for byte, and
+    # the character it escapes belongs to the current word — but an ordinary
+    # separator after it still opens the next one, where an assignment counts.
+    ("echo a\\b api_token=SECRET ./run", f"echo a\\b api_token={R} ./run"),
     # structure around the value survives exactly
     ("echo ok; api_token=SECRET ./run", f"echo ok; api_token={R} ./run"),
     ('echo "$(api_token=SECRET ./run)"', f'echo "$(api_token={R} ./run)"'),
@@ -275,6 +303,21 @@ EXACT: list[tuple[str, str]] = [
     ("export $'api_token\\c@'=SECRET", f"export $'api_token\\c@'={R}"),
     ("export api_$'token\\x00'=SECRET", f"export api_$'token\\x00'={R}"),
     ("export $'api_token\\cA'=SECRET", "export $'api_token\\cA'=SECRET"),
+    # An ANSI-C escape the decoder cannot resolve fails CLOSED. `FOO` is not
+    # secret-shaped, so these are redacted *only* because the name is unknowable
+    # — the decoder implements bash's grammar, not Python's, and where it runs
+    # out of grammar it must assume the value is a credential.
+    ("export $'FOO\\U00110000'=SECRET", f"export $'FOO\\U00110000'={R}"),  # not a code point
+    ("export $'FOO\\u12'=SECRET", f"export $'FOO\\u12'={R}"),  # too few digits
+    ("export $'FOO\\u0000'=SECRET", f"export $'FOO\\u0000'={R}"),  # NUL
+    ("export $'FOO\\xZZ'=SECRET", f"export $'FOO\\xZZ'={R}"),  # `\x` with no hex digit
+    ("export $'FOO\\c'=SECRET", f"export $'FOO\\c'={R}"),  # `\c` with nothing to controlify
+    ("export $'FOO\\q'=SECRET", f"export $'FOO\\q'={R}"),  # not an escape bash defines
+    ("export $'FOO\\'=SECRET", f"export $'FOO\\'={R}"),  # trailing lone backslash
+    # …and the control: a name that DOES decode is judged on its decoded value,
+    # so a non-secret one survives. Fail-closed is the exception, not a blanket.
+    ("export $'API\\tTOKEN'=SECRET", "export $'API\\tTOKEN'=SECRET"),
+    ("export $'FOO\\u0041'=SECRET", "export $'FOO\\u0041'=SECRET"),
     ('export api_"to$(printf ken)"=SECRET', f'export api_"to$(printf ken)"={R}'),  # unknowable
     # a marker in the INPUT is data, and must not shield the text beside it
     ("api_token=[REDACTED:env-secret]SECRET ./run", f"api_token={R} ./run"),
@@ -606,3 +649,61 @@ def test_multiple_patterns_in_one_body() -> None:
     out = redact(text)
     assert "[REDACTED:aws-key]" in out
     assert "[REDACTED:github-token]" in out
+
+
+# ANSI-C escapes the decoder cannot resolve. Every one of these leaves the same
+# decodable stem — `FOO`, which is not secret-shaped — so the escape is the only
+# variable between this list and its control below.
+ANSI_C_UNDECODABLE = [
+    "\\U00110000",  # well-formed hex, but past the last Unicode code point
+    "\\u12",  # too few digits
+    "\\u0000",  # NUL: bash drops it from the effective word, so the name is not `FOO`
+    "\\xZZ",  # `\x` introducing no hex digit at all
+    "\\c",  # `\c` with no character to controlify
+    "\\q",  # not an escape bash defines
+    "\\",  # trailing lone backslash
+]
+
+ANSI_C_DECODABLE = [
+    "\\u0041",  # -> `A`
+    "\\t",  # -> a tab
+    "\\cA",  # -> \x01
+    "\\\\",  # -> a literal backslash
+]
+
+
+@pytest.mark.parametrize("escape", ANSI_C_UNDECODABLE)
+def test_undecodable_ansi_c_name_fails_closed(escape: str) -> None:
+    """An assignment NAME is what decides whether the VALUE is a secret, so a
+    name the decoder cannot resolve is a security decision, not a parse error.
+
+    `_decode_ansi_c` implements bash's grammar rather than Python's
+    (`unicode_escape` leaves bash-valid forms like `\\x0` and `\\c@` literal), and
+    it will meet forms it cannot resolve. When it does it reports `fail_closed`
+    and the caller redacts: not knowing what the name is must mean assuming it is
+    a credential, because the alternative is guessing in the direction that
+    leaks.
+
+    The observable claim — the one worth asserting, as opposed to merely reaching
+    the line — is that the value goes **even though the decodable part of the
+    name (`FOO`) is not secret-shaped**. `test_decodable_ansi_c_name_is_judged_on_
+    the_decoded_name` is the other half: without it, a scrubber that redacted
+    every ANSI-C assignment would satisfy this one.
+    """
+    assert redact_command(f"export $'FOO{escape}'=hunter2") == (
+        f"export $'FOO{escape}'=[REDACTED:env-secret]"
+    )
+
+
+@pytest.mark.parametrize("escape", ANSI_C_DECODABLE)
+def test_decodable_ansi_c_name_is_judged_on_the_decoded_name(escape: str) -> None:
+    """The control for the fail-closed cases above, and the reason they mean
+    something: when the escape DOES decode, the verdict comes from the decoded
+    name, and `FOO`-plus-a-character is not a secret name — so the value stays.
+
+    This is also the line between fail-closed and over-redaction. Fail-closed is
+    cheap only while it stays confined to genuinely unknowable names; if it ever
+    swallowed decodable ones too, the digest would lose real values for nothing.
+    """
+    command = f"export $'FOO{escape}'=hunter2"
+    assert redact_command(command) == command

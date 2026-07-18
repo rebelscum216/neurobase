@@ -408,3 +408,90 @@ def test_merge_config_finds_header_written_with_unicode_escapes() -> None:
     assert out.count("[projects.") == 1
     entry = tomllib.loads(out)["projects"][key]
     assert entry == {"trust_level": "trusted", "hooks": ".codex/hooks.json"}
+
+
+# --- _parse_dotted_key vs tomllib (differential) ---------------------------
+#
+# `_parse_dotted_key` reimplements TOML's dotted-key grammar so the installer can
+# find an existing `[projects."…"]` header no matter how its path segment was
+# quoted or escaped. Any reimplementation can drift from the spec, and hand-written
+# expectations only catch the drift someone thought to write down.
+#
+# So these tests use `tomllib` as the ORACLE: for each key text, our parser must
+# accept exactly what tomllib accepts, and when both accept, must decode to the
+# same segments. That is a much stronger claim than "returns the value I observed",
+# and it is what caught the three divergences these cases now pin.
+
+
+def _tomllib_key_parts(key_text: str) -> list[str] | None:
+    """The decoded segments of `[<key_text>]` per tomllib, or None if it rejects.
+
+    A single table header nests exactly one key per level, so walking down the
+    parsed mapping recovers the segments the spec says the header denotes.
+    """
+    try:
+        parsed = tomllib.loads(f"[{key_text}]\n")
+    except tomllib.TOMLDecodeError:
+        return None
+    parts: list[str] = []
+    node: object = parsed
+    while isinstance(node, dict) and node:
+        (key,) = node.keys()
+        parts.append(key)
+        node = node[key]
+    return parts
+
+
+_KEY_TEXTS = [
+    # --- well-formed: both must accept, and agree on the decoded segments ---
+    "plain_key",
+    "with-dash",
+    "a.b.c",
+    "a . b",
+    "0123",
+    '"quoted"',
+    "'literal'",
+    '"a.b"',  # a quoted dot is one segment, not two
+    "'a.b'",
+    '"caf\\u00e9"',  # 4-digit escape
+    '"\\U0001F600"',  # 8-digit escape, astral
+    '"tab\\there"',
+    '"\\u0041"',
+    "a.\"b\".'c'",  # mixed quoting across segments
+    r"'C:\Users\dev'",  # literal strings do not process escapes
+    '""',  # the empty key is legal TOML
+    # --- malformed: both must reject ---
+    "",
+    "   ",
+    ".",
+    "a.",
+    ".a",
+    "a..b",
+    "a b",  # missing dot between segments
+    '"unterminated',
+    "'unterminated",
+    '"bad\\escape"',
+    '"\\q"',
+    # --- the three divergences this file's fix closed ---
+    '"\\u+123"',  # int(x,16) accepts a leading sign; TOML does not
+    '"\\u1_23"',  # ...and an underscore separator
+    '"\\u 123"',  # ...and leading whitespace
+    '"\\ud800"',  # a lone surrogate is not a Unicode scalar value
+    '"\\U00110000"',  # beyond U+10FFFF
+    '"\\u12"',  # too few digits
+    "café",  # str.isalnum() is Unicode-aware; TOML bare keys are ASCII
+    "中文",
+]
+
+
+@pytest.mark.parametrize("key_text", _KEY_TEXTS, ids=[repr(k) for k in _KEY_TEXTS])
+def test_parse_dotted_key_agrees_with_tomllib(key_text: str) -> None:
+    """Accept/reject and the decoded segments must both match the spec oracle.
+
+    Asserting the decoded parts (not just accept/reject) is what makes this
+    load-bearing: a parser that accepted the right set of keys but decoded
+    `\\U0001F600` as two characters, or dropped a segment, would pass an
+    accept-only check and still corrupt the user's config.toml by rewriting the
+    wrong table.
+    """
+    assert install._parse_dotted_key(key_text) == _tomllib_key_parts(key_text)

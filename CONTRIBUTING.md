@@ -17,7 +17,7 @@ config changes, zero telemetry), and the repo layout.
    needs an [ADR](docs/adr/README.md), not just a code change.
 2. **Run the full local gate before pushing** — not just the tests:
    ```bash
-   make ci                       # ruff check + ruff format --check + mypy + pytest
+   make ci                       # ruff check + ruff format --check + mypy + pytest (w/ coverage floor)
    # or, without make (e.g. on Windows):
    uv run python scripts/ci.py
    ```

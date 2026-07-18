@@ -5,7 +5,7 @@
 # (see .github/workflows/ci.yml). Use `make ci` locally; CI runs the same file.
 .PHONY: ci sync fmt
 
-ci:  ## Run the full CI gate (ruff + format + mypy + pytest), exactly as CI does
+ci:  ## Run the full CI gate (ruff + format + mypy + pytest w/ coverage floor), as CI does
 	uv run python scripts/ci.py
 
 sync:  ## Install/refresh the managed dev environment

@@ -56,6 +56,8 @@ exclude = [".uv-cache/", "PICKUP.md"]
 dev = [
     "pytest>=8",
     "pytest-timeout>=2.3",
+    "pytest-cov>=5.0",
+    "coverage>=7.6",
     "ruff>=0.6",
     "mypy>=1.11",
     "pre-commit>=3.8",
@@ -84,3 +86,45 @@ timeout = 60
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Coverage. Wired into the gate by scripts/ci.py, which runs pytest with
+# `--cov=src/neurobase --cov-branch --cov-report=term-missing`. Before this, the
+# number was real but completely unguarded: any PR could delete a test or add an
+# untested branch and the gate stayed green (2026-07-18 coverage report, Gap 1).
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+branch = true
+source = ["src/neurobase"]
+
+[tool.coverage.report]
+# WHICH METRIC THIS GATES — state it, because the three are easy to conflate and
+# an earlier draft of the coverage report conflated them:
+#
+#   statement coverage  = covered_lines / num_statements
+#   branch coverage     = covered_branches / num_branches
+#   combined `Cover`    = (covered stmts + covered branches) / (stmts + branches)
+#
+# coverage.py's `fail_under` enforces the **combined `Cover`** figure — the one
+# `coverage report` prints in its Cover column and the TOTAL row. It is NOT
+# branch coverage and NOT statement coverage. Anyone raising this number should
+# know they are ratcheting the combined metric.
+#
+# Seeded at the measured floor for this branch so the gate is green on the day it
+# lands and can only ever ratchet upward. Raise it when coverage rises; never
+# lower it to make a red build green — fix the tests instead.
+#
+# Measured before seeding, because the floor has to hold on the LOWEST matrix
+# cell, not on the author's laptop:
+#
+#   macOS   · py3.13  90.33     (also py3.11 — identical, no version variance)
+#   Windows · (sim)   90.17     four POSIX-only seed tests are skipif-ed there;
+#                               simulated by deselecting them locally
+#
+# So 90 is the floor with ~0.17 to spare on the tightest cell. Note the number
+# compared is the RAW percentage, not the rounded one `coverage report` prints:
+# the TOTAL row showed "89%" at 88.57 and pytest-cov still failed it. If a
+# Windows cell ever trips this by a hair, drop to 89 and say so in review —
+# do not "fix" it by loosening what is measured.
+fail_under = 90
+show_missing = true

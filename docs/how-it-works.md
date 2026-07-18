@@ -390,7 +390,7 @@ Steps, per matrix cell:
 1. `actions/checkout@v7` — checks out the repo.
 2. "Install uv" — `astral-sh/setup-uv@v7` with `python-version: ${{ matrix.python }}` and `enable-cache: true` — installs `uv` and the matrix's Python version, with uv's dependency cache enabled for faster repeat runs.
 3. "Sync dependencies" — `uv sync` — installs project + dev dependencies from `pyproject.toml`/the lockfile.
-4. "CI gate (ruff + format + mypy + pytest)" — `uv run python scripts/ci.py` — the CI gate step itself, with an inline comment reiterating that the four checks live in `scripts/ci.py` "so local dev (`make ci`) and CI share one source of truth and can't drift."
+4. "CI gate (ruff + format + mypy + pytest w/ coverage floor)" — `uv run python scripts/ci.py` — the CI gate step itself, with an inline comment reiterating that the four checks live in `scripts/ci.py` "so local dev (`make ci`) and CI share one source of truth and can't drift." The pytest step runs under `--cov=src/neurobase --cov-branch`, so the coverage floor in `pyproject.toml` (`[tool.coverage.report] fail_under`) is enforced on every matrix cell — a PR that drops coverage below the floor turns the gate red exactly like a failing test.
 
 This workflow is intentionally thin: it contains no lint/format/type/test logic of its own — all of that is delegated to `scripts/ci.py`, so a change to the gate's checks never requires touching this YAML file.
 

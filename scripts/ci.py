@@ -7,7 +7,7 @@ is identical whether you invoke it locally or on a GitHub Actions runner:
     ruff check .            # lint
     ruff format --check .   # formatting
     mypy src tests          # types
-    pytest                  # tests
+    pytest --cov …          # tests + coverage (fails under the pyproject floor)
 
 Both local dev (``make ci`` / this script) and every matrix job in
 ``.github/workflows/ci.yml`` call this file, so the two can never drift: add or
@@ -40,7 +40,23 @@ CHECKS: list[tuple[str, list[str]]] = [
     ("ruff check", ["uv", "run", "ruff", "check", "."]),
     ("ruff format --check", ["uv", "run", "ruff", "format", "--check", "."]),
     ("mypy src tests", ["uv", "run", "mypy", "src", "tests"]),
-    ("pytest", ["uv", "run", "pytest"]),
+    # Coverage rides along with the test run rather than being a separate check:
+    # a second pytest invocation would double the slowest step for no new signal.
+    # The floor itself (`fail_under`) lives in pyproject.toml's [tool.coverage.report]
+    # alongside the note on *which* metric it gates — coverage.py enforces the
+    # combined `Cover` figure, not branch or statement coverage. Falling below it
+    # exits non-zero, so this entry fails the gate exactly like a failing test.
+    (
+        "pytest --cov",
+        [
+            "uv",
+            "run",
+            "pytest",
+            "--cov=src/neurobase",
+            "--cov-branch",
+            "--cov-report=term-missing",
+        ],
+    ),
 ]
 
 

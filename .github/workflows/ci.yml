@@ -31,7 +31,8 @@ jobs:
       - name: Sync dependencies
         run: uv sync
 
-      # The four checks (ruff · format · mypy · pytest) live in scripts/ci.py so
-      # local dev (`make ci`) and CI share one source of truth and can't drift.
-      - name: CI gate (ruff + format + mypy + pytest)
+      # The four checks (ruff · format · mypy · pytest-with-coverage) live in
+      # scripts/ci.py so local dev (`make ci`) and CI share one source of truth
+      # and can't drift. The coverage floor is enforced on every matrix cell.
+      - name: CI gate (ruff + format + mypy + pytest w/ coverage floor)
         run: uv run python scripts/ci.py

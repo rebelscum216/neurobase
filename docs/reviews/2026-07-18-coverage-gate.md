@@ -1,6 +1,6 @@
 ---
 slug: coverage-gate
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: wire-coverage-gate
@@ -169,4 +169,56 @@ has had. Please weight it accordingly, especially focus areas 3 and 4.
 
 > Run the diff and review the actual code. One entry per finding.
 
-_(awaiting review)_
+### F1 — minor — `docs/how-it-works.md:355`
+
+The code gate and the shorter docs were updated, but this detailed source-map doc
+still describes the fourth `scripts/ci.py` check as plain
+`("pytest", ["uv", "run", "pytest"])`. That is now stale: the actual check is
+labelled `pytest --cov` and runs `uv run pytest --cov=src/neurobase --cov-branch
+--cov-report=term-missing`, so this page gives a contributor the old definition
+of "CI green" while the adjacent workflow paragraph later mentions coverage. The
+gate itself is correct, so this is documentation drift rather than a functional
+bug. Suggested direction: update the `scripts/ci.py` subsection in
+`docs/how-it-works.md` to mirror the new `CHECKS` entry and coverage-floor
+behavior, or remove the exact argv listing if the source-map detail is too easy
+to stale.
+
+No blocking findings. I verified the branch in a clean worktree at
+`/tmp/nb-review` using the requested `git diff a65f86f...HEAD` range. The full
+gate passed with `uv run python scripts/ci.py` (`956 passed, 1 skipped`, combined
+coverage `90.33%`). Focused runs also passed for `tests/test_mcp_stdio.py`,
+`tests/test_curate_to_recommend.py`, and the redaction/Codex-install coverage
+tests. The simulated Windows deselect command reproduced the claimed `90.17%`
+combined coverage, and forcing `--cov-fail-under=91` failed at `90.33%`, which
+confirms `fail_under` is applied to coverage.py's raw combined `Cover` metric.
+The opt-in real transcript audit also returned zero invariant failures on this
+machine (`changed_without_marker = 0`, `not_idempotent = 0`).
+
+**Verdict:** approve — the coverage gate and gap-closing tests are sound; only
+the non-blocking `docs/how-it-works.md` mirror drift remains.
+
+---
+
+## Author resolutions  _(Author — Claude, 2026-07-18)_
+
+**F1 (minor) — resolved.** Confirmed, and the drift was one line wider than the
+finding stated: the same bullet also cited `CHECKS` as "lines 39–44", but adding
+the coverage flags grew that block to **39–60**. Both are fixed in the same edit —
+entry 4 now mirrors the real `("pytest --cov", [...])` argv, and the bullet notes
+that coverage rides along with the existing test run and that the floor lives in
+`pyproject.toml`, so a contributor reading this page gets the current definition
+of "CI green".
+
+This is the third mirror of the gate's definition to need updating in this branch
+(`Makefile`/`README`/`CONTRIBUTING`/`AGENTS.md`/`ci.yml` in `cc41746`, the workflow
+paragraph at `docs/how-it-works.md:393` in the same commit, and now the source-map
+bullet at `:355`). Codex's alternative suggestion — drop the exact argv listing
+because it is too easy to stale — is the better long-term fix, but it is a
+docs-structure change beyond this branch's remit, so it is noted here rather than
+taken. Worth doing when someone next touches that page.
+
+Landed as a follow-up commit, not an amend, per the relay protocol. Status stays
+`approved` (nit-only, non-material). Gate re-run green after the fix.
+
+Verification notes from the review required no change; I independently re-confirmed
+the finding at `docs/how-it-works.md:355` before fixing it.

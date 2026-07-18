@@ -352,11 +352,11 @@ Note this calls `app()` directly — the full Typer application — **not** `mai
 
 The single source of truth for what "CI green" means, invoked identically by `make ci` and by every job in `.github/workflows/ci.yml`. Per its module docstring: "Both local dev (`make ci` / this script) and every matrix job in `.github/workflows/ci.yml` call this file, so the two can never drift: add or change a check *here* and every runner on every OS picks it up. This is the guardrail against pushing after running only part of the gate locally."
 
-- **`CHECKS: list[tuple[str, list[str]]]`** (module-level constant, lines 39–44) — the ordered list of `(human label, argv)` pairs that constitute the gate:
+- **`CHECKS: list[tuple[str, list[str]]]`** (module-level constant, lines 39–60) — the ordered list of `(human label, argv)` pairs that constitute the gate:
   1. `("ruff check", ["uv", "run", "ruff", "check", "."])` — lint.
   2. `("ruff format --check", ["uv", "run", "ruff", "format", "--check", "."])` — formatting (check-only, does not rewrite files).
   3. `("mypy src tests", ["uv", "run", "mypy", "src", "tests"])` — type checking, run against both source and test code.
-  4. `("pytest", ["uv", "run", "pytest"])` — the test suite.
+  4. `("pytest --cov", ["uv", "run", "pytest", "--cov=src/neurobase", "--cov-branch", "--cov-report=term-missing"])` — the test suite, run under coverage. Coverage rides along with the existing test run rather than adding a second pytest invocation. The floor lives in `pyproject.toml` (`[tool.coverage.report] fail_under`), so dropping below it exits non-zero and fails the gate exactly like a failing test.
 
   Every command is prefixed with `uv run` so it resolves against the `uv`-managed virtualenv and is byte-for-byte identical whether invoked from a developer's shell or a fresh CI runner, without requiring the venv to already be activated.
 

@@ -181,6 +181,21 @@ _TABLE_HEADER_RE = re.compile(r"^\s*\[(?!\[)\s*(.+?)\s*\]\s*(?:#.*)?$")
 _ANY_HEADER_RE = re.compile(r"^\s*\[")
 _ESCAPES = {'"': '"', "\\": "\\", "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}
 
+# TOML 1.0 bare keys are ASCII only: `A-Za-z0-9_-`. Spelled out rather than
+# using `str.isalnum()`, which is Unicode-aware and would accept `café` or `中文`
+# as bare keys that `tomllib` rejects.
+_BARE_KEY_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+# `\uXXXX` / `\UXXXXXXXX` payloads must be exactly that many HEX DIGITS. `int(x, 16)`
+# alone is laxer than TOML: it also accepts Python int-literal syntax (`+123`,
+# `1_23`, ` 123`), which `tomllib` rejects.
+_HEX_DIGITS = re.compile(r"[0-9A-Fa-f]*\Z")
+
+# TOML 1.0 forbids RAW control characters inside both basic and literal strings —
+# they must be written as escapes. Tab is the sole exception and stays legal in
+# both forms. (A raw newline can't reach here anyway: a dotted key is one line.)
+_RAW_CONTROL_CHARS = frozenset(chr(c) for c in [*range(0x00, 0x09), *range(0x0A, 0x20), 0x7F])
+
 
 def _toml_basic_string(value: str) -> str:
     """Render ``value`` as a TOML basic (double-quoted) string, escaped."""
@@ -223,15 +238,22 @@ def _parse_dotted_key(text: str) -> list[str] | None:
                         if esc in ("u", "U"):
                             width = 4 if esc == "u" else 8
                             hexs = text[j + 2 : j + 2 + width]
-                            if len(hexs) != width:
+                            if len(hexs) != width or not _HEX_DIGITS.match(hexs):
+                                return None
+                            value = int(hexs, 16)
+                            # A lone surrogate is not a Unicode scalar value, so
+                            # TOML forbids it — but `chr()` accepts it happily.
+                            if 0xD800 <= value <= 0xDFFF:
                                 return None
                             try:
-                                buf.append(chr(int(hexs, 16)))
+                                buf.append(chr(value))
                             except ValueError:
-                                return None
+                                return None  # beyond U+10FFFF
                             j += 2 + width
                             continue
                         return None
+                    if text[j] in _RAW_CONTROL_CHARS:
+                        return None  # must be escaped, per TOML
                     buf.append(text[j])
                     j += 1
                 if j >= n:
@@ -242,11 +264,13 @@ def _parse_dotted_key(text: str) -> list[str] | None:
                 j = text.find("'", i + 1)
                 if j == -1:
                     return None
+                if _RAW_CONTROL_CHARS.intersection(text[i + 1 : j]):
+                    return None  # a literal string has no escapes, but this rule still applies
                 parts.append(text[i + 1 : j])
                 i = j + 1
             else:
                 j = i
-                while j < n and (text[j].isalnum() or text[j] in "_-"):
+                while j < n and text[j] in _BARE_KEY_CHARS:
                     j += 1
                 if j == i:
                     return None

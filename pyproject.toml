@@ -118,10 +118,14 @@ source = ["src/neurobase"]
 # cell, not on the author's laptop:
 #
 #   macOS   · py3.13  90.33     (also py3.11 — identical, no version variance)
-#   Windows · (sim)   90.17     four POSIX-only seed tests are skipif-ed there;
-#                               simulated by deselecting them locally
+#   Windows · py3.11  90.26     (also py3.13 — identical) four POSIX-only seed
+#                               tests are skipif-ed there: 995 passed, 5 skipped
 #
-# So 90 is the floor with ~0.17 to spare on the tightest cell. Note the number
+# The Windows figure was originally simulated at 90.17 by deselecting those four
+# tests locally; the first real runner (run 29668627676, 2026-07-19) measured
+# 90.26, so the simulation erred low. Both Windows cells passed.
+#
+# So 90 is the floor with ~0.26 to spare on the tightest cell. Note the number
 # compared is the RAW percentage, not the rounded one `coverage report` prints:
 # the TOTAL row showed "89%" at 88.57 and pytest-cov still failed it. If a
 # Windows cell ever trips this by a hair, drop to 89 and say so in review —

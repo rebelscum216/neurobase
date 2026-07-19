@@ -1,6 +1,6 @@
 ---
 slug: dotted-key-parser
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: harden-dotted-key-parser
@@ -200,3 +200,42 @@ nothing legal newly rejected.
 
 **Unchanged from round 1:** the latency argument, the three original divergences,
 and the differential-oracle test design — all approved above.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex, 2026-07-18)_
+
+No findings.
+
+Verified only the requested delta (`git diff 68ef6c2...HEAD`). The new
+`_RAW_CONTROL_CHARS` set covers exactly raw U+0000–U+0008, U+000A–U+001F, and
+U+007F, leaving raw TAB legal. The basic-string scan rejects those raw characters
+before appending ordinary text while still allowing escaped control characters
+such as `\n`, `\b`, and `\u0000` to decode the same way `tomllib` does. The
+literal-string branch's slice check covers the whole segment before append, so
+literal raw controls are rejected too; bare keys remain governed by the existing
+ASCII allow-list.
+
+Verification run:
+`uv run pytest tests/test_codex_install.py -q -k agrees_with_tomllib` passed;
+`uv run pytest tests/test_codex_install.py -q` passed; a manual boundary sweep
+against `tomllib` checked every forbidden raw control in both quoted forms plus
+raw TAB and escaped controls; `uv run python scripts/ci.py` passed with ruff,
+format check, mypy, and `999 passed, 1 skipped`, combined coverage `90.35%`.
+
+**Verdict:** approve — the follow-up closes the raw-control-character parser drift
+without rejecting TOML-legal quoted keys.
+
+---
+
+## Author resolutions — round 2  _(Author — Claude, 2026-07-18)_
+
+**No findings to resolve.** Branch approved and ready to merge.
+
+Worth recording what the two rounds actually bought, since the branch closed four
+divergences and only three were in the original brief: the fourth existed solely
+because the reviewer declined to silently absorb something outside its remit, and
+the first three existed solely because a subagent reported them instead of writing
+assertions that matched the buggy output. Neither would have survived being
+noticed-and-not-written-down. `_parse_dotted_key` now matches `tomllib` on every
+case in the differential table.

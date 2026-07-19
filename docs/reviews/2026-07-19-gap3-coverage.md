@@ -1,6 +1,6 @@
 ---
 slug: gap3-coverage
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: close-gap3-coverage
@@ -126,4 +126,35 @@ line is the unreachable one discussed above, not an oversight.
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+No findings.
+
+Verified the requested diff range (`git diff aef895f...HEAD`) in the clean
+`/tmp/nb-gap3` worktree. The branch is test-only: `tests/test_metrics.py` and
+`tests/test_mcp_server.py` are the only non-baton files changed. The new metrics
+tests exercise the intended survival fallback branches and the
+`_recurrence_reduction` before/after arithmetic without depending on mocked
+internals; the recurrence fixtures intentionally keep raw captures inside the
+default 30-day lookback, which matches the brief's explicit scope. The MCP tests
+cover the bad-registry-slug skip paths and the `memory_remember` empty-fact hard
+error, including the ordering of the empty check before project resolution and
+the no-write guarantee.
+
+I also checked the two source observations in the brief. `metrics.py:185` is
+indeed unreachable with the current `_latest_accepted_event` shape, and
+`_recurrence_reduction` still does not receive an injected `RecommendConfig`.
+Those are real follow-up candidates, but they are pre-existing source issues and
+not regressions in this tests-only delta; the normal CLI path calls
+`compute_metrics(root)` without an injected config, so the config inconsistency is
+limited to explicit injection/test-style callers.
+
+Verification run:
+`uv run pytest tests/test_metrics.py tests/test_mcp_server.py -q` passed;
+`uv run pytest tests/ -q --cov=neurobase.recommender.metrics
+--cov=neurobase.mcp.server --cov-report=term-missing --cov-branch` reproduced
+`metrics.py` at `99%` with only line `185` missing and `mcp/server.py` at `90%`;
+`uv run python scripts/ci.py` passed with ruff, format check, mypy, and
+`1014 passed, 1 skipped`, combined coverage `90.85%`.
+
+**Verdict:** approve — the Gap 3 coverage tests constrain the intended behavior
+and I did not find a blocking correctness, spec, security, or coverage issue in
+this diff.

@@ -15,10 +15,12 @@ Covers the named workstream-H tests:
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from neurobase.core import projects as core_projects
 from neurobase.core import store as core_store
 from neurobase.core.config import RecommendConfig
 from neurobase.recommender import metrics, proposals
@@ -69,6 +71,53 @@ def _accept(
         installed_path=installed_path,
         now=now,
         installed_hash=installed_hash,
+    )
+
+
+_DROP = object()  # sentinel: remove the key entirely rather than setting it
+
+
+def _rewrite_ledger_event(root: Path, slug: str, event: str, **changes: Any) -> None:
+    """Rewrite one ledger event's fields in place. Used to reproduce ledgers
+    this codebase no longer writes but must still read fail-soft: a legacy
+    event predating a field, or one whose timestamp is unparseable. Pass
+    ``_DROP`` as a value to remove that key rather than overwrite it."""
+    path = ledger_path(root)
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        if record.get("slug") == slug and record.get("event") == event:
+            for key, value in changes.items():
+                if value is _DROP:
+                    record.pop(key, None)
+                else:
+                    record[key] = value
+        out.append(json.dumps(record, ensure_ascii=False))
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def _seed_project(root: Path, tmp_path: Path, project: str = "neurobase") -> None:
+    core_store.ensure_tree(project, root)
+    core_projects.register_project(root, tmp_path / project, slug=project)
+
+
+def _seed_raw(
+    root: Path,
+    project: str,
+    *,
+    session_id: str,
+    captured_at: datetime,
+    body: str,
+) -> None:
+    core_store.write_raw(
+        root,
+        project,
+        agent="claude",
+        session_id=session_id,
+        cwd="/repo",
+        branch="main",
+        captured_at=captured_at,
+        body=body,
     )
 
 
@@ -274,3 +323,234 @@ def test_edited_three_times_then_accepted_counts_once_in_decided(tmp_path: Path)
     assert result.precision == 1.0
     assert result.edited_rate == 1.0
     assert result.reviewed_events == 4
+
+
+# --- survival: the remaining fallback branches (§12.9) -----------------------
+#
+# Each case below is a ledger/proposal shape that resolves to a documented
+# fallback rather than a crash. The first two reproduce ledgers this codebase
+# no longer writes but must still read: an unparseable timestamp, and a legacy
+# accepted event predating `installed_hash` (D2).
+
+
+def test_survival_insufficient_data_when_accepted_timestamp_unparseable(tmp_path: Path) -> None:
+    """An `accepted` event whose `at` will not parse yields no resolvable
+    acceptance time, so survival is "insufficient_data" — never
+    "not_survived", which would blame an artifact for a bad clock stamp. The
+    proposal still counts as decided: `compute_metrics` matches on the event's
+    presence, which does not depend on the timestamp parsing."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW)
+    installed_path = tmp_path / "AGENTS.md"
+    _accept(root, "prefer-uv-run", installed_path=installed_path, now=NOW)
+    _rewrite_ledger_event(root, "prefer-uv-run", "accepted", at="not-a-timestamp")
+    installed_path.unlink()  # gone, and still not reported as not_survived
+
+    result = metrics.compute_metrics(root, now=NOW + timedelta(days=365))
+
+    assert result.decided == 1
+    assert result.accepted == 1
+    assert result.survival["prefer-uv-run"] == "insufficient_data"
+
+
+def test_legacy_accepted_event_without_hash_falls_back_to_existence(tmp_path: Path) -> None:
+    """A legacy `accepted` event with no stored `installed_hash` (D2) cannot
+    detect modification, only presence: past the window an existing artifact
+    reports "survived" even though its bytes have since changed."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW)
+    installed_path = tmp_path / "AGENTS.md"
+    _accept(root, "prefer-uv-run", installed_path=installed_path, now=NOW)
+    _rewrite_ledger_event(root, "prefer-uv-run", "accepted", installed_hash=_DROP)
+    installed_path.write_text("hand-edited since acceptance", encoding="utf-8")
+
+    result = metrics.compute_metrics(root, now=NOW + timedelta(days=31))
+
+    # Existence-only: the edit is invisible without a recorded hash to compare.
+    assert result.survival["prefer-uv-run"] == "survived"
+
+
+def test_survival_insufficient_data_when_installed_path_absent(tmp_path: Path) -> None:
+    """A proposal accepted in the ledger but carrying no `installed_path`
+    gives nothing to check, so survival is "insufficient_data" rather than a
+    not_survived verdict drawn from a path that was never recorded.
+
+    The key is dropped, not blanked: the proposal schema admits `installed_path`
+    only as null or an **absolute** path string, so an empty string would fail
+    validation and drop the whole proposal from `load_all_proposals` — never
+    reaching the survival check at all."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW)
+    _accept(root, "prefer-uv-run", installed_path=tmp_path / "AGENTS.md", now=NOW)
+
+    doc = proposals.load_proposal(root, "prefer-uv-run")
+    assert doc is not None
+    frontmatter = dict(doc.frontmatter)
+    del frontmatter["installed_path"]
+    core_store.write_doc(doc.file_path, frontmatter, doc.body)
+
+    result = metrics.compute_metrics(root, now=NOW + timedelta(days=31))
+
+    assert result.decided == 1  # still decided — only the artifact is unknown
+    assert result.survival["prefer-uv-run"] == "insufficient_data"
+
+
+def test_survival_not_survived_when_artifact_cannot_be_read(tmp_path: Path) -> None:
+    """The artifact path exists but reading its bytes raises OSError (here: it
+    is a directory, not a file). A hash comparison is impossible, so the
+    verdict is "not_survived" — the artifact is provably not intact."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW)
+    installed_path = tmp_path / "AGENTS.md"
+    _accept(root, "prefer-uv-run", installed_path=installed_path, now=NOW)
+    installed_path.unlink()
+    installed_path.mkdir()  # same path, now unreadable as bytes
+
+    result = metrics.compute_metrics(root, now=NOW + timedelta(days=31))
+
+    assert result.survival["prefer-uv-run"] == "not_survived"
+
+
+# --- recurrence reduction (advisory, §12.9 / D19) ----------------------------
+#
+# The aggregate `after / before` ratio over near-duplicate raw captures. Note
+# `_recurrence_reduction` loads the corpus with the DEFAULT config rather than
+# the injected one, so raw captures here stay inside the default 30-day
+# lookback relative to `now`; widening `raw_lookback_days` via `config=` would
+# not reach it.
+
+
+def _duplicate_capture_body(root: Path, slug: str) -> str:
+    """The proposal's own rendered body — reused verbatim as a raw capture so
+    the Jaccard near-duplicate test is unambiguously satisfied, isolating what
+    these tests actually exercise: the before/after partition and the ratio."""
+    doc = proposals.load_proposal(root, slug)
+    assert doc is not None
+    return doc.body
+
+
+def test_recurrence_reduction_ratio_partitions_captures_around_acceptance(
+    tmp_path: Path,
+) -> None:
+    """Near-duplicate captures are split by the acceptance timestamp and
+    reported as `after / before`: two before and one after gives 0.5. A
+    capture that is not a near-duplicate is excluded from both sides."""
+    root = tmp_path / "store"
+    _seed_project(root, tmp_path)
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW - timedelta(days=5))
+    _accept(root, "prefer-uv-run", installed_path=tmp_path / "AGENTS.md", now=NOW)
+    recurring = _duplicate_capture_body(root, "prefer-uv-run")
+
+    _seed_raw(
+        root,
+        "neurobase",
+        session_id="before01",
+        captured_at=NOW - timedelta(days=3),
+        body=recurring,
+    )
+    _seed_raw(
+        root,
+        "neurobase",
+        session_id="before02",
+        captured_at=NOW - timedelta(days=2),
+        body=recurring,
+    )
+    _seed_raw(
+        root,
+        "neurobase",
+        session_id="after001",
+        captured_at=NOW + timedelta(days=1),
+        body=recurring,
+    )
+    _seed_raw(
+        root,
+        "neurobase",
+        session_id="unrelate",
+        captured_at=NOW - timedelta(days=1),
+        body="Postgres index bloat and the query planner's cost estimates.",
+    )
+
+    result = metrics.compute_metrics(root, now=NOW + timedelta(days=2))
+
+    assert result.recurrence_reduction == 0.5
+
+
+def test_recurrence_reduction_none_when_no_captures_precede_acceptance(tmp_path: Path) -> None:
+    """With zero "before" occurrences there is nothing to compare against, so
+    the ratio is None ("insufficient data") rather than a misleading 0 or a
+    divide-by-zero — even though "after" captures exist."""
+    root = tmp_path / "store"
+    _seed_project(root, tmp_path)
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW - timedelta(days=5))
+    _accept(root, "prefer-uv-run", installed_path=tmp_path / "AGENTS.md", now=NOW)
+    recurring = _duplicate_capture_body(root, "prefer-uv-run")
+
+    _seed_raw(
+        root,
+        "neurobase",
+        session_id="after001",
+        captured_at=NOW + timedelta(days=1),
+        body=recurring,
+    )
+
+    result = metrics.compute_metrics(root, now=NOW + timedelta(days=2))
+
+    assert result.recurrence_reduction is None
+
+
+def test_recurrence_reduction_counts_a_capture_at_the_acceptance_instant_as_after(
+    tmp_path: Path,
+) -> None:
+    """The partition is `when < accepted_at`, so a capture stamped at exactly
+    the acceptance instant counts as "after", not "before"."""
+    root = tmp_path / "store"
+    _seed_project(root, tmp_path)
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW - timedelta(days=5))
+    _accept(root, "prefer-uv-run", installed_path=tmp_path / "AGENTS.md", now=NOW)
+    recurring = _duplicate_capture_body(root, "prefer-uv-run")
+
+    _seed_raw(
+        root,
+        "neurobase",
+        session_id="before01",
+        captured_at=NOW - timedelta(days=1),
+        body=recurring,
+    )
+    _seed_raw(root, "neurobase", session_id="exactly1", captured_at=NOW, body=recurring)
+
+    result = metrics.compute_metrics(root, now=NOW + timedelta(days=2))
+
+    # 1 after / 1 before — the boundary capture landed on the "after" side.
+    assert result.recurrence_reduction == 1.0
+
+
+def test_recurrence_reduction_skips_proposal_with_unparseable_acceptance(tmp_path: Path) -> None:
+    """A proposal whose acceptance time will not parse is skipped entirely:
+    its captures join neither side, so with no other accepted proposal the
+    ratio is None rather than being computed against an unknown boundary."""
+    root = tmp_path / "store"
+    _seed_project(root, tmp_path)
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW - timedelta(days=5))
+    _accept(root, "prefer-uv-run", installed_path=tmp_path / "AGENTS.md", now=NOW)
+    recurring = _duplicate_capture_body(root, "prefer-uv-run")
+    _rewrite_ledger_event(root, "prefer-uv-run", "accepted", at="not-a-timestamp")
+
+    _seed_raw(
+        root,
+        "neurobase",
+        session_id="before01",
+        captured_at=NOW - timedelta(days=2),
+        body=recurring,
+    )
+    _seed_raw(
+        root,
+        "neurobase",
+        session_id="after001",
+        captured_at=NOW + timedelta(days=1),
+        body=recurring,
+    )
+
+    result = metrics.compute_metrics(root, now=NOW + timedelta(days=2))
+
+    assert result.decided == 1  # still decided; only the timestamp is unusable
+    assert result.recurrence_reduction is None

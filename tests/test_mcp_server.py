@@ -264,6 +264,88 @@ def test_search_and_list_projects_fail_soft_on_corrupt_registry(root: Path) -> N
     assert _result(srv, "memory_list_projects") == []
 
 
+# --- a bad slug in the registry is skipped, not fatal --------------------
+#
+# `projects.load_registry` deliberately does not validate slugs — it returns
+# whatever keys the TOML holds. So a registry hand-edited (or written by some
+# other tool) with an invalid project key reaches `store.memory_dir`, which
+# raises InvalidSlugError. Both scans below must skip that one entry and still
+# serve the valid projects, rather than sinking the whole pass.
+
+
+def _registry_with_bad_slug(root: Path, tmp_path: Path) -> None:
+    """A registry holding one valid project and one invalid-slug project,
+    written directly because `register_project` would reject the bad one."""
+    _register(root, tmp_path, "alpha")
+    (root / "registry.toml").write_text(
+        '[projects.alpha]\nroots = ["/repos/alpha"]\n'
+        '[projects."Bad Slug!"]\nroots = ["/repos/bad"]\n',
+        encoding="utf-8",
+    )
+
+
+def test_bad_slug_in_registry_does_not_sink_the_node_scan(root: Path, tmp_path: Path) -> None:
+    """The invalid-slug entry is skipped and the valid project's node is still
+    exposed — the resources/list invariant holds against a registry that
+    `load_registry` happily returns but `memory_dir` refuses."""
+    _registry_with_bad_slug(root, tmp_path)
+    store.write_node(root, "alpha", "alpha-status", "content")
+
+    resources = anyio.run(_server(root, expose=True).list_resources)
+
+    assert [str(r.uri) for r in resources] == ["neurobase://node/alpha/alpha-status"]
+
+
+def test_bad_slug_in_registry_is_skipped_by_list_projects(root: Path, tmp_path: Path) -> None:
+    """`memory_list_projects` skips the invalid-slug entry the same way, and
+    still reports the valid project — not an empty list, not an error."""
+    _registry_with_bad_slug(root, tmp_path)
+
+    listed = _result(_server(root), "memory_list_projects")
+
+    assert [entry["project"] for entry in listed] == ["alpha"]
+
+
+# --- memory_remember: the empty-fact guard -------------------------------
+
+
+@pytest.mark.parametrize("fact", ["", "   ", "\n\t  \n"])
+def test_memory_remember_rejects_empty_fact(root: Path, tmp_path: Path, fact: str) -> None:
+    """An empty or whitespace-only fact is refused rather than saved as a
+    blank curated file. Asserted with a resolvable project registered, so the
+    failure is provably the empty-fact guard and not the no-project error."""
+    _register(root, tmp_path, "alpha")
+    srv = _server(root, cwd=tmp_path / "alpha")
+
+    with pytest.raises(Exception) as exc:  # noqa: B017 - FastMCP surfaces a tool error
+        anyio.run(srv.call_tool, "memory_remember", {"fact": fact})
+
+    assert "must not be empty" in str(exc.value)
+
+
+def test_memory_remember_empty_fact_guard_precedes_project_resolution(root: Path) -> None:
+    """The empty-fact check fires before the target project is resolved: an
+    empty fact with no resolvable project reports emptiness, not the
+    "available projects" no-project error."""
+    srv = _server(root, cwd=root / "unregistered")
+
+    with pytest.raises(Exception) as exc:  # noqa: B017
+        anyio.run(srv.call_tool, "memory_remember", {"fact": "  "})
+
+    assert "must not be empty" in str(exc.value)
+
+
+def test_memory_remember_writes_nothing_when_the_fact_is_empty(root: Path, tmp_path: Path) -> None:
+    """The rejection leaves no trace — no curated file is created."""
+    _register(root, tmp_path, "alpha")
+    srv = _server(root, cwd=tmp_path / "alpha")
+
+    with pytest.raises(Exception):  # noqa: B017
+        anyio.run(srv.call_tool, "memory_remember", {"fact": ""})
+
+    assert store.list_curated(root, "alpha") == []
+
+
 # --- recall prompt (Claude sugar) ----------------------------------------
 
 

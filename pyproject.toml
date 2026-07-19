@@ -110,25 +110,32 @@ source = ["src/neurobase"]
 # branch coverage and NOT statement coverage. Anyone raising this number should
 # know they are ratcheting the combined metric.
 #
-# Seeded at the measured floor for this branch so the gate is green on the day it
-# lands and can only ever ratchet upward. Raise it when coverage rises; never
-# lower it to make a red build green — fix the tests instead.
+# Seeded at the measured floor so the gate is green on the day it lands, and it
+# can only ever ratchet upward. Raise it when coverage rises; never lower it to
+# make a red build green — fix the tests instead.
 #
-# Measured before seeding, because the floor has to hold on the LOWEST matrix
-# cell, not on the author's laptop:
+# The floor has to hold on the LOWEST matrix cell, not on the author's laptop.
+# Measured on run 29699164431 (2026-07-19), every cell:
 #
-#   macOS   · py3.13  90.33     (also py3.11 — identical, no version variance)
-#   Windows · py3.11  90.26     (also py3.13 — identical) four POSIX-only seed
-#                               tests are skipif-ed there: 995 passed, 5 skipped
+#   ubuntu  · py3.11 / py3.13   90.88     1014 passed, 1 skipped
+#   macOS   · py3.11 / py3.13   90.88     1014 passed, 1 skipped
+#   Windows · py3.11 / py3.13   90.75     1010 passed, 5 skipped   <- the floor
 #
-# The Windows figure was originally simulated at 90.17 by deselecting those four
-# tests locally; the first real runner (run 29668627676, 2026-07-19) measured
-# 90.26, so the simulation erred low. Both Windows cells passed.
+# No version variance on any OS. Windows sits 0.13 below the rest because four
+# POSIX-only seed tests are skipif-ed there (its 5th skip is the opt-in
+# real-transcript audit, skipped everywhere).
 #
-# So 90 is the floor with ~0.26 to spare on the tightest cell. Note the number
-# compared is the RAW percentage, not the rounded one `coverage report` prints:
-# the TOTAL row showed "89%" at 88.57 and pytest-cov still failed it. If a
-# Windows cell ever trips this by a hair, drop to 89 and say so in review —
-# do not "fix" it by loosening what is measured.
-fail_under = 90
+# So 90.5 is the floor with ~0.25 to spare on the tightest cell — the same
+# margin the original seeding held. History: seeded at 90 against a simulated
+# Windows 90.17; the first real runner (29668627676) measured 90.26, so the
+# simulation erred low; the Gap 3 tests then took every cell up ~0.5.
+#
+# Note the number compared is the RAW percentage, not the rounded one
+# `coverage report` prints: the TOTAL row showed "89%" at 88.57 and pytest-cov
+# still failed it. A local `make ci` on a newer interpreter than the matrix
+# uses can also read a few hundredths off (python3.14 locally reported 90.85
+# against the matrix's 90.88) — trust the matrix, not the laptop. If a Windows
+# cell ever trips this by a hair, drop back to 90 and say so in review — do not
+# "fix" it by loosening what is measured.
+fail_under = 90.5
 show_missing = true

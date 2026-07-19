@@ -38,13 +38,21 @@ Method (so the numbers are reproducible rather than asserted):
 Output is aggregate counts only — no command text is ever printed.
 
     uv run python scripts/audit_command_redaction.py
+
+The two counters that ARE invariants (`changed_without_marker`, `not_idempotent`)
+are checked on every push by `tests/test_redact_audit.py`, which runs
+`audit_commands` over the in-repo fixture tables. This corpus — real transcripts
+under ``~/.claude/projects`` — exists on one developer's machine and on no CI
+runner, which is why the gate cannot be this script and has to be that test.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
+from typing import NamedTuple
 
 from neurobase.core.redact import redact_command
 
@@ -83,14 +91,40 @@ def bash_commands(root: Path) -> tuple[list[str], int]:
     return commands, skipped
 
 
-def main() -> int:
-    root = Path.home() / ".claude" / "projects"
-    if not root.exists():
-        print(f"no transcripts at {root} — nothing to audit")
-        return 0
+class AuditResult(NamedTuple):
+    """Aggregate counts over an audited corpus. No command text, by construction.
 
-    raw, skipped = bash_commands(root)
-    unique = sorted(set(raw))
+    Only two of these fields are assertable without an oracle — see
+    `audit_commands`. The rest are descriptive.
+    """
+
+    unique: int
+    secret_shaped: int
+    redacted: int
+    changed_without_marker: int
+    not_idempotent: int
+
+
+def audit_commands(commands: Iterable[str]) -> AuditResult:
+    """Run the audit's counters over any corpus of shell commands.
+
+    Corpus-agnostic on purpose: `main()` feeds it the developer's real
+    transcripts, and `tests/test_redact_audit.py` feeds it the in-repo fixture
+    tables so the two properties below are checked on every push and every OS,
+    rather than by hand on one machine. There is exactly one implementation.
+
+    Of the five counters, exactly two are real invariants — the rest are
+    telemetry with no oracle (see the module docstring):
+
+    - `changed_without_marker` MUST be 0. Redaction that alters a command
+      without leaving a marker is deleting captured input, not scrubbing it.
+    - `not_idempotent` MUST be 0. Redaction runs more than once over the same
+      text, so a second pass must be a no-op.
+
+    Commands are deduplicated exactly, because sessions repeat commands and
+    duplicates would weight any rate arbitrarily.
+    """
+    unique = sorted(set(commands))
 
     redacted = changed_without_marker = secret_shaped = not_idempotent = 0
     for command in unique:
@@ -106,20 +140,38 @@ def main() -> int:
         else:
             changed_without_marker += 1
 
-    total = len(unique) or 1
-    print(f"transcripts skipped (not valid UTF-8) : {skipped}")
-    print(f"unique commands audited              : {len(unique)}")
-    print(
-        f"  carrying a secret-named assignment : {secret_shaped} "
-        f"({100 * secret_shaped / total:.2f}%)   [descriptive only]"
+    return AuditResult(
+        unique=len(unique),
+        secret_shaped=secret_shaped,
+        redacted=redacted,
+        changed_without_marker=changed_without_marker,
+        not_idempotent=not_idempotent,
     )
-    print(f"  redacted (a marker appeared)       : {redacted}   [NOT proof it is correct]")
-    print(f"  changed with NO marker             : {changed_without_marker}   [must be 0]")
-    print(f"  not idempotent                     : {not_idempotent}   [must be 0]")
+
+
+def main() -> int:
+    root = Path.home() / ".claude" / "projects"
+    if not root.exists():
+        print(f"no transcripts at {root} — nothing to audit")
+        return 0
+
+    raw, skipped = bash_commands(root)
+    result = audit_commands(raw)
+
+    total = result.unique or 1
+    print(f"transcripts skipped (not valid UTF-8) : {skipped}")
+    print(f"unique commands audited              : {result.unique}")
+    print(
+        f"  carrying a secret-named assignment : {result.secret_shaped} "
+        f"({100 * result.secret_shaped / total:.2f}%)   [descriptive only]"
+    )
+    print(f"  redacted (a marker appeared)       : {result.redacted}   [NOT proof it is correct]")
+    print(f"  changed with NO marker             : {result.changed_without_marker}   [must be 0]")
+    print(f"  not idempotent                     : {result.not_idempotent}   [must be 0]")
     print()
     print("This is telemetry, not verification — see the module docstring.")
     print("The oracle is tests/test_redact.py::test_command_redaction_exact_output.")
-    return 1 if (changed_without_marker or not_idempotent) else 0
+    return 1 if (result.changed_without_marker or result.not_idempotent) else 0
 
 
 if __name__ == "__main__":

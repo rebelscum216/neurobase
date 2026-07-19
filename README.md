@@ -195,7 +195,7 @@ non-trivial changes. Before every push, run the full local gate — not just
 the tests:
 
 ```bash
-make ci                       # ruff check + ruff format --check + mypy + pytest
+make ci                       # ruff check + ruff format --check + mypy + pytest (w/ coverage floor)
 # or, without make (e.g. on Windows):
 uv run python scripts/ci.py
 ```

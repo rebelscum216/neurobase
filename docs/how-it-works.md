@@ -352,11 +352,11 @@ Note this calls `app()` directly — the full Typer application — **not** `mai
 
 The single source of truth for what "CI green" means, invoked identically by `make ci` and by every job in `.github/workflows/ci.yml`. Per its module docstring: "Both local dev (`make ci` / this script) and every matrix job in `.github/workflows/ci.yml` call this file, so the two can never drift: add or change a check *here* and every runner on every OS picks it up. This is the guardrail against pushing after running only part of the gate locally."
 
-- **`CHECKS: list[tuple[str, list[str]]]`** (module-level constant, lines 39–44) — the ordered list of `(human label, argv)` pairs that constitute the gate:
+- **`CHECKS: list[tuple[str, list[str]]]`** (module-level constant, lines 39–60) — the ordered list of `(human label, argv)` pairs that constitute the gate:
   1. `("ruff check", ["uv", "run", "ruff", "check", "."])` — lint.
   2. `("ruff format --check", ["uv", "run", "ruff", "format", "--check", "."])` — formatting (check-only, does not rewrite files).
   3. `("mypy src tests", ["uv", "run", "mypy", "src", "tests"])` — type checking, run against both source and test code.
-  4. `("pytest", ["uv", "run", "pytest"])` — the test suite.
+  4. `("pytest --cov", ["uv", "run", "pytest", "--cov=src/neurobase", "--cov-branch", "--cov-report=term-missing"])` — the test suite, run under coverage. Coverage rides along with the existing test run rather than adding a second pytest invocation. The floor lives in `pyproject.toml` (`[tool.coverage.report] fail_under`), so dropping below it exits non-zero and fails the gate exactly like a failing test.
 
   Every command is prefixed with `uv run` so it resolves against the `uv`-managed virtualenv and is byte-for-byte identical whether invoked from a developer's shell or a fresh CI runner, without requiring the venv to already be activated.
 
@@ -390,7 +390,7 @@ Steps, per matrix cell:
 1. `actions/checkout@v7` — checks out the repo.
 2. "Install uv" — `astral-sh/setup-uv@v7` with `python-version: ${{ matrix.python }}` and `enable-cache: true` — installs `uv` and the matrix's Python version, with uv's dependency cache enabled for faster repeat runs.
 3. "Sync dependencies" — `uv sync` — installs project + dev dependencies from `pyproject.toml`/the lockfile.
-4. "CI gate (ruff + format + mypy + pytest)" — `uv run python scripts/ci.py` — the CI gate step itself, with an inline comment reiterating that the four checks live in `scripts/ci.py` "so local dev (`make ci`) and CI share one source of truth and can't drift."
+4. "CI gate (ruff + format + mypy + pytest w/ coverage floor)" — `uv run python scripts/ci.py` — the CI gate step itself, with an inline comment reiterating that the four checks live in `scripts/ci.py` "so local dev (`make ci`) and CI share one source of truth and can't drift." The pytest step runs under `--cov=src/neurobase --cov-branch`, so the coverage floor in `pyproject.toml` (`[tool.coverage.report] fail_under`) is enforced on every matrix cell — a PR that drops coverage below the floor turns the gate red exactly like a failing test.
 
 This workflow is intentionally thin: it contains no lint/format/type/test logic of its own — all of that is delegated to `scripts/ci.py`, so a change to the gate's checks never requires touching this YAML file.
 

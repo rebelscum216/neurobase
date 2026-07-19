@@ -234,17 +234,29 @@ uv run ruff check .         # lint
 uv run ruff format .        # format
 uv run mypy src tests       # types (lenient to start)
 uv run pre-commit install   # optional: enable the pre-commit hooks
+
+# The gate runs pytest under coverage and enforces a floor; to reproduce it:
+uv run pytest --cov=src/neurobase --cov-branch --cov-report=term-missing
 ```
 
 **Run the full gate before every push — not just `pytest`.** [`scripts/ci.py`](scripts/ci.py)
 is the single source of truth for the four checks (`ruff check` · `ruff format
---check` · `mypy src tests` · `pytest`); CI invokes that *same* script on the
-3-OS × 2-Python matrix, so local and CI can't drift. Opt into the committed
-pre-push hook to have Git enforce it automatically:
+--check` · `mypy src tests` · `pytest` under coverage); CI invokes that *same*
+script on the 3-OS × 2-Python matrix, so local and CI can't drift. Opt into the
+committed pre-push hook to have Git enforce it automatically:
 
 ```bash
 git config core.hooksPath .githooks   # once per clone; runs scripts/ci.py on push
 ```
+
+**The coverage floor ratchets, it never slips.** `pytest` runs under
+`--cov=src/neurobase --cov-branch`, and `[tool.coverage.report] fail_under` in
+[`pyproject.toml`](pyproject.toml) turns the gate red if coverage drops below the
+floor. That knob enforces coverage.py's **combined `Cover`** figure — not branch
+coverage and not statement coverage; the three differ by several points and are
+easy to conflate. Raise the floor when coverage rises. Never lower it to make a
+red build green: add the missing test instead, or say plainly in review why the
+uncovered branch is not worth a test.
 
 After pushing, watch `gh run watch` until every matrix job is green before
 calling the work done. To validate the installed shim (not just the dev env):

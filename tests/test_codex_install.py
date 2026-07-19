@@ -233,3 +233,178 @@ def test_load_config_text_malformed_raises(tmp_path: Path) -> None:
     path.write_text("[unterminated\n", encoding="utf-8")
     with pytest.raises(install.ConfigParseError):
         install.load_config_text(path)
+
+
+# --- _parse_dotted_key (TOML dotted-key tokenizer) -------------------------
+#
+# This tokenizer is how the surgical config editor recognises the *header line*
+# of the table it is about to rewrite (``_find_table_header``). If it decodes a
+# segment differently from tomllib the editor rewrites the wrong table; if it
+# fails on a header tomllib accepts, ``merge_config`` cannot locate a table it
+# can see in the parse tree and aborts with ``ConfigParseError`` — init then
+# refuses to install. So the unit under test is decoding *correctness*, not
+# merely "did it return something".
+
+# Well-formed dotted keys → their decoded segments. Expectations come from the
+# TOML 1.0 key grammar (bare / basic-string / literal-string segments joined by
+# dots, with optional whitespace around the dots).
+_WELL_FORMED_KEYS: list[tuple[str, list[str]]] = [
+    ("projects", ["projects"]),
+    ("A-z_0-9", ["A-z_0-9"]),  # every character class a bare key may use
+    ("projects.hooks.trust", ["projects", "hooks", "trust"]),
+    ('projects."/Users/dev/repo"', ["projects", "/Users/dev/repo"]),
+    ("projects.'/Users/dev/repo'", ["projects", "/Users/dev/repo"]),
+    (' projects . "/x" ', ["projects", "/x"]),  # whitespace around dots and at both ends
+    ('"a.b"', ["a.b"]),  # a dot inside a quoted segment is not a separator
+    ('"a.b".c', ["a.b", "c"]),
+    ("'a.b'.c", ["a.b", "c"]),
+    ('""', [""]),  # the empty key is legal TOML, however odd
+    ("''", [""]),
+    ('"a\\"b"', ['a"b']),  # an escaped quote must not terminate the segment
+    ('"\'"', ["'"]),  # a bare single quote inside a basic string
+    ("'\"'", ['"']),  # a bare double quote inside a literal string
+    ("mixed.'lit'.\"basic\"", ["mixed", "lit", "basic"]),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), _WELL_FORMED_KEYS)
+def test_parse_dotted_key_well_formed(text: str, expected: list[str]) -> None:
+    """Every shape a real ``[projects.*]`` header can take must round-trip to the
+    same segments tomllib would produce, so the editor targets the right table."""
+    assert install._parse_dotted_key(text) == expected
+
+
+def test_escapes_table_matches_toml_1_0() -> None:
+    """TOML 1.0 defines exactly these compact escapes. A *missing* entry makes a
+    legitimate header unparseable, so init aborts on a config it should handle; a
+    *spurious* one decodes a sequence TOML itself would have rejected."""
+    assert install._ESCAPES == {
+        "b": "\b",
+        "t": "\t",
+        "n": "\n",
+        "f": "\f",
+        "r": "\r",
+        '"': '"',
+        "\\": "\\",
+    }
+
+
+@pytest.mark.parametrize(("escape", "decoded"), sorted(install._ESCAPES.items()))
+def test_parse_dotted_key_decodes_simple_escapes(escape: str, decoded: str) -> None:
+    """Each compact escape collapses to one character and the scan resumes *after*
+    the two-character sequence — an off-by-one would leak the escape letter."""
+    assert install._parse_dotted_key('"a\\' + escape + 'b"') == ["a" + decoded + "b"]
+
+
+# Unicode escapes → decoded segments. The widths are load-bearing: ``\u`` takes
+# exactly 4 hex digits and ``\U`` exactly 8, so hex digits that merely *follow* a
+# complete escape are literal text.
+_UNICODE_ESCAPES: list[tuple[str, list[str]]] = [
+    (r'"\u00e9"', ["\N{LATIN SMALL LETTER E WITH ACUTE}"]),
+    (r'"caf\u00e9"', ["caf\N{LATIN SMALL LETTER E WITH ACUTE}"]),
+    (r'"\u0041\u0042"', ["AB"]),  # back-to-back escapes
+    (r'"\u0041BCD"', ["ABCD"]),  # \u stops at 4 digits; BCD stays literal
+    (r'"\U0001F600"', ["\N{GRINNING FACE}"]),  # astral plane needs all 8 digits
+    (r'"\U0001F600!"', ["\N{GRINNING FACE}!"]),
+    (r'"\U000000e9"', ["\N{LATIN SMALL LETTER E WITH ACUTE}"]),  # 8-digit form of a BMP char
+    (r'"\u0041".b', ["A", "b"]),  # decoding leaves the dotted scan intact
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), _UNICODE_ESCAPES)
+def test_parse_dotted_key_decodes_unicode_escapes(text: str, expected: list[str]) -> None:
+    """A wrong escape width silently yields a *different* key — 4 digits read for
+    ``\\U`` would turn an astral character into a control char plus stray digits,
+    and the editor would then rewrite the wrong table."""
+    assert install._parse_dotted_key(text) == expected
+
+
+def test_parse_dotted_key_literal_string_does_not_process_escapes() -> None:
+    """TOML literal (single-quoted) strings have no escape sequences at all. A
+    Windows path is the case that bites: ``\\Users`` would otherwise be read as a
+    truncated 8-digit ``\\U`` escape and reject a perfectly valid header."""
+    assert install._parse_dotted_key(r"'C:\Users\dev'") == [r"C:\Users\dev"]
+    assert install._parse_dotted_key(r"'a\nb'") == [r"a\nb"]
+
+
+# Escape sequences that are not valid TOML → None. The parser must refuse rather
+# than guess, because a guessed decoding aims the editor at the wrong table.
+_BAD_ESCAPES: list[str] = [
+    r'"\q"',  # unrecognised escape character
+    r'"\e"',  # \e is TOML 1.1 only; this parser targets 1.0
+    r'"\u12"',  # \u truncated: only 3 characters before the closing quote
+    r'"\U0001F6',  # \U truncated at end of input
+    r'"\uZZZZ"',  # 4 characters but not hex
+    r'"\Ugarbage"',  # 8 characters but not hex
+    r'"a\"',  # the escaped quote is consumed, leaving the string unterminated
+]
+
+
+@pytest.mark.parametrize("text", _BAD_ESCAPES)
+def test_parse_dotted_key_rejects_bad_escapes(text: str) -> None:
+    """Truncated, non-hex and unrecognised escapes are rejected outright — the
+    caller then raises rather than silently editing some other table."""
+    assert install._parse_dotted_key(text) is None
+
+
+def test_parse_dotted_key_rejects_single_quote_escape_in_basic_string() -> None:
+    """``\\'`` is *not* a TOML escape (only ``\\"`` is). Accepting it would mean
+    accepting a header tomllib already rejected."""
+    assert install._parse_dotted_key('"a\\\'b"') is None
+
+
+# Malformed dotted keys → None. Each entry names the shape it guards.
+_MALFORMED_KEYS: list[str] = [
+    "",  # empty input
+    "   ",  # whitespace only
+    "a.",  # trailing dot
+    ".a",  # leading dot
+    "a..b",  # doubled dot
+    "a b",  # missing dot between bare segments
+    '"a"b',  # missing dot after a quoted segment
+    "a.$",  # segment starts with a character no bare key may contain
+    "[a]",  # a nested header, not a key
+    '"unterminated',  # unterminated basic string
+    "'unterminated",  # unterminated literal string
+    'projects."x',  # unterminated basic string in a later segment
+]
+
+
+@pytest.mark.parametrize("text", _MALFORMED_KEYS)
+def test_parse_dotted_key_malformed_returns_none(text: str) -> None:
+    """Anything that is not a well-formed dotted key must return ``None`` so
+    ``_find_table_header`` reports "no header here" instead of half-matching."""
+    assert install._parse_dotted_key(text) is None
+
+
+def test_parse_dotted_key_trailing_whitespace_is_not_a_missing_segment() -> None:
+    """Trailing whitespace ends the scan cleanly; it must not be mistaken for a
+    dangling dot (which would reject a header the regex already matched)."""
+    assert install._parse_dotted_key("a  ") == ["a"]
+    assert install._parse_dotted_key('"a" \t') == ["a"]
+
+
+# --- parser correctness as the caller sees it -------------------------------
+
+
+def test_merge_config_finds_header_quoted_as_a_literal_string() -> None:
+    """A user may have written the project table with single quotes. The editor
+    must recognise it as the same table and update in place. If the tokenizer
+    missed the literal-string form, ``merge_config`` would see the key in the
+    parse tree but find no header line and raise ``ConfigParseError`` — init
+    would refuse to install against a perfectly valid config."""
+    existing = f"[projects.'{KEY}']\n" + 'trust_level = "trusted"\n'
+    out = install.merge_config(existing, KEY)
+    assert out.count("[projects.") == 1
+    assert _project(out) == {"trust_level": "trusted", "hooks": ".codex/hooks.json"}
+
+
+def test_merge_config_finds_header_written_with_unicode_escapes() -> None:
+    """Escaped non-ASCII in the header decodes to the same key tomllib sees, so
+    the table is updated in place rather than duplicated."""
+    key = "/Users/dev/caf\N{LATIN SMALL LETTER E WITH ACUTE}"
+    existing = '[projects."/Users/dev/caf\\u00e9"]\ntrust_level = "trusted"\n'
+    out = install.merge_config(existing, key)
+    assert out.count("[projects.") == 1
+    entry = tomllib.loads(out)["projects"][key]
+    assert entry == {"trust_level": "trusted", "hooks": ".codex/hooks.json"}

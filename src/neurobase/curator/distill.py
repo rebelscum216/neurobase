@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from neurobase.brain.base import Brain
+from neurobase.brain.base import Brain, BrainError
 from neurobase.core import store
 from neurobase.core.redact import redact, redact_command
 
@@ -302,7 +302,11 @@ def _distill_one(
     write_cache: bool,
 ) -> str | None:
     """Return a digest body for one raw, or ``None`` to fall back to its skim.
-    Catches every error (D16: distill never aborts the pass)."""
+
+    Document-local errors are caught here. ``BrainError`` reaches
+    ``distill_docs`` so one systemic backend failure can stop later brain calls;
+    the outer function still degrades every affected raw to its skim (D16).
+    """
     agent = str(doc.get("agent", ""))
     transcript_raw = doc.get("transcript_path")
     if not isinstance(transcript_raw, str) or not transcript_raw:
@@ -343,7 +347,12 @@ def _distill_one(
         if write_cache:
             _cache_write(cache_path, fingerprint, digest)
         return digest
-    except Exception:  # noqa: BLE001 — D16: any distill error degrades to skim
+    except BrainError:
+        # Backend failures are systemic, not document-local. Let distill_docs
+        # trip its pass-local breaker so a quota/auth/outage failure does not
+        # launch the same doomed agent CLI call once per remaining raw.
+        raise
+    except Exception:  # noqa: BLE001 — D16: document-local errors degrade to skim
         return None
 
 
@@ -370,16 +379,23 @@ def distill_docs(
 
     out: list[store.Document] = []
     distilled = 0
-    for doc in docs:
-        digest = _distill_one(
-            doc,
-            brain,
-            chunk_chars=chunk_chars,
-            extra_patterns=extra_patterns,
-            root=root,
-            project=project,
-            write_cache=write_cache,
-        )
+    for index, doc in enumerate(docs):
+        try:
+            digest = _distill_one(
+                doc,
+                brain,
+                chunk_chars=chunk_chars,
+                extra_patterns=extra_patterns,
+                root=root,
+                project=project,
+                write_cache=write_cache,
+            )
+        except BrainError:
+            # Every remaining raw falls back to its deterministic skim. The
+            # curator may still attempt its plan call, which reports the backend
+            # failure through the existing unconsumed-on-error path.
+            out.extend(docs[index:])
+            break
         if digest is None:
             out.append(doc)
         else:

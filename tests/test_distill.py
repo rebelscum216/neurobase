@@ -153,6 +153,28 @@ def test_brain_error_falls_back(root: Path, tmp_path: Path) -> None:
     assert out[0].body == "skim"
 
 
+def test_brain_error_stops_distilling_remaining_raws(root: Path, tmp_path: Path) -> None:
+    docs = []
+    for index in range(3):
+        transcript = _write_transcript(tmp_path / f"t{index}.jsonl", _claude_events())
+        docs.append(
+            _write_raw(
+                root,
+                "proj",
+                f"r{index}.md",
+                body=f"skim {index}",
+                transcript_path=str(transcript),
+            )
+        )
+    brain = DistillBrain(digest=BrainError("backend unavailable"))
+
+    out, counts = distill.distill_docs(root, "proj", docs, brain)
+
+    assert brain.distill_calls == 1
+    assert counts == {"distilled": 0, "fallback": 3}
+    assert [doc.body for doc in out] == ["skim 0", "skim 1", "skim 2"]
+
+
 def test_refusal_shaped_output_falls_back(root: Path, tmp_path: Path) -> None:
     """The S-cf5 role-hijack: a conversational reply with no expected heading is
     a distill failure ⇒ skim (D16/F3)."""

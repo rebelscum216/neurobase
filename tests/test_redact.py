@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 
 import pytest
 
-from neurobase.core.redact import redact, redact_command
+from neurobase.core.redact import _decode_ansi_c, redact, redact_command
 
 
 def test_private_key_block() -> None:
@@ -651,6 +651,75 @@ def test_multiple_patterns_in_one_body() -> None:
     assert "[REDACTED:github-token]" in out
 
 
+# --- ANSI-C ($'…') name decoding -----------------------------------------------
+# Two complementary layers, and both are wanted. This first block unit-tests
+# `_decode_ansi_c` directly, pinning every fail-closed branch and its well-formed
+# counterpart; the second block below drives the same machinery only through
+# `redact_command`, asserting the observable outcome rather than reaching a line.
+# Their escape lists differ on purpose and neither is a superset: this one covers
+# `\x00`, `\c@` and octal `\0`, the other covers `\U00110000` (past the last
+# Unicode code point). Dropping either loses real cases.
+#
+# The decoder feeds assignment-name recognition: a well-formed escape yields the
+# literal char so a benign name stays known; anything malformed or NUL-producing
+# must fail *closed* (return ``fail_closed=True``) so the caller treats the name
+# as unknowable and redacts the value rather than guessing.
+
+
+@pytest.mark.parametrize(
+    ("fragment", "expected"),
+    [
+        ("abc", "abc"),  # no escapes at all
+        (r"a\nb", "a\nb"),  # simple escape table
+        (r"a\tb", "a\tb"),
+        (r"a\\b", "a\\b"),
+        (r"a\101b", "aAb"),  # octal, nonzero
+        (r"a\x41b", "aAb"),  # hex, nonzero
+        (r"a\u0041b", "aAb"),  # \u, four hex digits
+        (r"a\U00000041b", "aAb"),  # \U, eight hex digits
+        (r"a\cAb", "a\x01b"),  # control char, ctrl-A
+    ],
+)
+def test_decode_ansi_c_wellformed_never_fails_closed(fragment: str, expected: str) -> None:
+    decoded, fail_closed = _decode_ansi_c(fragment)
+    assert decoded == expected
+    assert fail_closed is False
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "a\\",  # trailing backslash — nothing to escape
+        r"a\0b",  # octal NUL
+        r"a\xz",  # \x with no hex digit
+        r"a\x00b",  # hex NUL
+        r"a\uzz",  # \u with too few / non-hex digits
+        r"a\u0000b",  # unicode NUL
+        "a\\c",  # \c at end of fragment
+        r"a\c@",  # \c@ → control NUL
+        r"a\q",  # unrecognized escape
+    ],
+)
+def test_decode_ansi_c_malformed_fails_closed(fragment: str) -> None:
+    _decoded, fail_closed = _decode_ansi_c(fragment)
+    assert fail_closed is True
+
+
+def test_ansi_c_named_assignment_benign_name_keeps_value() -> None:
+    """A well-formed ANSI-C name that is *not* a secret leaves its value alone —
+    the baseline the fail-closed case below is contrasted against."""
+    assert redact_command("$'color'=hello") == "$'color'=hello"
+
+
+def test_ansi_c_named_assignment_malformed_escape_redacts_value() -> None:
+    """A malformed escape in the name makes it unknowable, so the value is
+    redacted even though the decoded characters spell a non-secret name."""
+    out = redact_command(r"$'colo\q'=hello")
+    assert "[REDACTED:env-secret]" in out
+    assert "hello" not in out
+
+
+# --- the same machinery, asserted through the public API only ------------------
 # ANSI-C escapes the decoder cannot resolve. Every one of these leaves the same
 # decodable stem — `FOO`, which is not secret-shaped — so the escape is the only
 # variable between this list and its control below.

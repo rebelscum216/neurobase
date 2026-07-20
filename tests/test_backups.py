@@ -6,6 +6,7 @@ and rollback silently loses a touched file."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -124,10 +125,13 @@ def test_restore_rejects_missing_backed_up_file(tmp_path: Path) -> None:
     root = tmp_path / "store"
     original = tmp_path / "orig.md"
     gone = tmp_path / "backups" / "ts" / "orig.md"  # never created
+    # json.dumps, not an f-string: a raw Windows path's backslashes are not
+    # valid JSON escapes embedded directly in a string literal, which broke
+    # this test's own manifest on Windows CI rather than the code under test.
     _write_manifest(
         root,
         "ts",
-        f'[{{"original_abs_path": "{original}", "stored_as": "{gone}"}}]',
+        json.dumps([{"original_abs_path": str(original), "stored_as": str(gone)}]),
     )
     with pytest.raises(BackupRestoreError, match="backed-up file is missing"):
         backups.restore_backup(root, "ts")

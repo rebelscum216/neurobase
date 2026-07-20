@@ -119,23 +119,25 @@ source = ["src/neurobase"]
 #
 #   ubuntu  · py3.11 / py3.13   90.88     1014 passed, 1 skipped
 #   macOS   · py3.11 / py3.13   90.88     1014 passed, 1 skipped
-#   Windows · py3.11 / py3.13   90.75     1010 passed, 5 skipped   <- the floor
+#   Windows · py3.11 / py3.13   90.75     1010 passed, 5 skipped   <- was the floor
 #
-# No version variance on any OS. Windows sits 0.13 below the rest because four
-# POSIX-only seed tests are skipif-ed there (its 5th skip is the opt-in
-# real-transcript audit, skipped everywhere).
+# Windows was PARKED (2026-07-20, .github/workflows/ci.yml) — the app targets
+# macOS for now — so it's no longer in the matrix and no longer what "lowest
+# cell" means; kept above as history, since it's still why 90.5 has the margin
+# it does. Re-measure this comment if Windows returns to the matrix rather than
+# assuming these numbers still hold: coverage has moved since 2026-07-19.
 #
-# So 90.5 is the floor with ~0.25 to spare on the tightest cell — the same
-# margin the original seeding held. History: seeded at 90 against a simulated
-# Windows 90.17; the first real runner (29668627676) measured 90.26, so the
-# simulation erred low; the Gap 3 tests then took every cell up ~0.5.
+# So 90.5 is the floor with ~0.25 to spare on the (then-)tightest cell — the
+# same margin the original seeding held. History: seeded at 90 against a
+# simulated Windows 90.17; the first real runner (29668627676) measured 90.26,
+# so the simulation erred low; the Gap 3 tests then took every cell up ~0.5.
 #
 # Note the number compared is the RAW percentage, not the rounded one
 # `coverage report` prints: the TOTAL row showed "89%" at 88.57 and pytest-cov
 # still failed it. A local `make ci` on a newer interpreter than the matrix
 # uses can also read a few hundredths off (python3.14 locally reported 90.85
-# against the matrix's 90.88) — trust the matrix, not the laptop. If a Windows
-# cell ever trips this by a hair, drop back to 90 and say so in review — do not
+# against the matrix's 90.88) — trust the matrix, not the laptop. If a matrix
+# cell ever trips this by a hair, drop the floor and say so in review — do not
 # "fix" it by loosening what is measured.
 fail_under = 90.5
 show_missing = true

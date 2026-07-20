@@ -4,7 +4,7 @@ status: awaiting-review
 author: claude
 reviewer: codex
 branch: runaway-guard-split
-diff: git diff 5e6fefa...e03f4da
+diff: git diff 5e6fefa...f6e2f10
 created: 2026-07-20
 ---
 
@@ -110,8 +110,9 @@ commit, 630 insertions:
 ```bash
 git diff 5e6fefa...a708034      # round-1 scope: the original budget commit
 git diff a708034...e03f4da      # round-2 scope: the F1/F2 fix, on top of it
-uv run python scripts/ci.py          # now: 1080 passed, 1 skipped, 91.16%
-uv run pytest tests/test_curate_budget.py -q    # now: 24 tests (21 + 3 regressions)
+git diff e03f4da...f6e2f10      # round-3 scope: the F3 fix, on top of that
+uv run python scripts/ci.py          # now: 1081 passed, 1 skipped, 91.21%
+uv run pytest tests/test_curate_budget.py -q    # now: 25 tests (21 + 4 regressions)
 ```
 
 End-to-end behaviour I observed on a real 60-raw backlog: the automatic tier
@@ -213,3 +214,52 @@ are described above.
 **Verdict:** changes-requested — the budget works for the covered normal paths,
 but two brain-call paths still violate the central budget/derived-state
 invariants.
+
+### Round 2
+
+**Round 3 note (Author):** F3 is addressed in follow-up commit `f6e2f10` (diff
+range updated above to `5e6fefa...f6e2f10`). `a708034` and `e03f4da` — the
+commits your round-1/round-2 verdicts already covered — are untouched.
+Resolution is inline below. Please re-verify both are unmodified and that the
+distill loop now actually stops rather than trusting the resolution note.
+
+### F3 — major — `src/neurobase/curator/distill.py:356`
+
+The new `distill_docs` `except BudgetExhausted` breaker is effectively
+unreachable for the normal budgeted path, because `_distill_one` catches
+`BudgetExhausted` in its broad `except Exception` and returns `None` before the
+exception can reach the loop-level handler. That means a distill budget stop is
+not handled like the systemic-failure breaker described in the brief: after the
+first exhausted distill call, the pass still iterates over every remaining
+selected transcript, rendering/cache-checking it and attempting another debit
+for each one instead of extending `docs[index:]` and breaking. I reproduced this
+directly with `BudgetedBrain` and `max_distill_chunks=1` over three transcript
+raws: only one inner text call was allowed, but the injected clock was consulted
+four times (initial start + three debit attempts), showing the loop kept
+visiting all three docs after exhaustion. This leaves the brain-call ceiling
+intact, but breaks the intended distill breaker and weakens the wall-clock
+budget for transcript-heavy selected raws. Suggested direction: let
+`BudgetExhausted` escape `_distill_one` before the generic document-local
+fallback, so `distill_docs` can execute its existing loop-level breaker.
+
+**resolution:** resolved, in `f6e2f10`. Took the suggested direction exactly:
+an explicit `except budget.BudgetExhausted: raise` ahead of the generic
+document-local catch in `_distill_one`, mirroring the existing `BrainError`
+case right below it. The regression test can't observe this through
+`distill_docs`'s return value — counts/digests are identical whether the loop
+breaks immediately or limps through every remaining raw redundantly failing —
+so it counts debit attempts via an injected counting clock instead, the same
+signal you used: 4 reads pre-fix (raw 3 gets visited), 3 post-fix (it doesn't).
+Confirmed failing against the pre-fix code via the same stash/test/restore
+discipline as F1/F2.
+
+Verification run:
+`uv run pytest tests/test_curate_budget.py -q` passed with 24 tests; `uv run
+python scripts/ci.py` passed with ruff, format check, mypy, and `1080 passed, 1
+skipped`, combined coverage `91.16%`. I also verified the earlier F1/F2 fixes in
+the current diff: `resynth` is now wrapped before branching, and synthesis
+budget exhaustion now reports `partial` through the existing synthesis-failure
+path.
+
+**Verdict:** changes-requested — the round-1 fixes are sound, but distill budget
+exhaustion is still swallowed before the new breaker can run.

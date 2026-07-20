@@ -4,7 +4,7 @@ status: awaiting-review
 author: claude
 reviewer: codex
 branch: runaway-guard-split
-diff: git diff 5e6fefa...a708034
+diff: git diff 5e6fefa...e03f4da
 created: 2026-07-20
 ---
 
@@ -108,9 +108,10 @@ commit, 630 insertions:
 **How to verify.**
 
 ```bash
-git diff 5e6fefa...a708034
-uv run python scripts/ci.py          # 1077 passed, 1 skipped, 91.14%
-uv run pytest tests/test_curate_budget.py -q    # 21 tests
+git diff 5e6fefa...a708034      # round-1 scope: the original budget commit
+git diff a708034...e03f4da      # round-2 scope: the F1/F2 fix, on top of it
+uv run python scripts/ci.py          # now: 1080 passed, 1 skipped, 91.16%
+uv run pytest tests/test_curate_budget.py -q    # now: 24 tests (21 + 3 regressions)
 ```
 
 End-to-end behaviour I observed on a real 60-raw backlog: the automatic tier
@@ -134,4 +135,81 @@ hook still exits 0); the explicit tier drains all 60.
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+**Round 2 note (Author):** both round-1 findings are addressed in follow-up
+commit `e03f4da` (diff range updated above to `5e6fefa...e03f4da` to include
+it). The originally reviewed commit `a708034` is untouched, per the relay
+protocol. Resolutions are inline under each finding below. Three new
+regression tests reproduce your exact repro steps and were confirmed to fail
+against the pre-fix code before I restored the fix (stash/test/pop, not just
+asserted). Please re-verify `a708034` is unmodified and check the fixes and
+new tests actually close what you found, rather than trusting the resolution
+notes.
+
+### F1 — major — `src/neurobase/curator/engine.py:276`
+
+`resynth` returns before the budget wrapper is installed, so `neurobase curate
+--resynth` still reaches `_synthesize(root, project, brain)` with the original
+unbudgeted brain. That contradicts the load-bearing claim that rebinding to
+`BudgetedBrain` makes every curation brain call debit the ledger, and it is one
+of the paths the brief explicitly asked us to attack. I confirmed this with a
+small reproducer: passing a valid `PassBudget` into `engine.curate(...,
+resynth=True)` left `budget.calls == 0` while the fake brain's `text()` was
+called once. The normal backend timeout still limits that single call, so this is
+not the original runaway shape, but it means the "no unbounded path" invariant is
+false. Suggested direction: construct/rebind the `BudgetedBrain` before the
+`resynth` branch and handle `BudgetExhausted` there as a bounded resynth stop, or
+explicitly exclude `resynth` from this contract and tests.
+
+**resolution:** resolved, in `e03f4da`. Took the first suggested direction: the
+wrap now happens once, immediately after `pass_budget` is resolved, before
+either the `resynth` or raw-processing branch — the old second rebind further
+down (which would otherwise have double-wrapped) is deleted. `resynth` hitting
+`BudgetExhausted` now reports `status: "partial"` rather than the misleading
+`"resynth"` or an `"error"` that would trip the CLI's exit-1 path.
+`test_resynth_brain_call_is_budgeted` reproduces your exact repro (a budgeted
+resynth spends exactly one call) and fails against the pre-fix code; I confirmed
+that by stashing the fix and re-running it before restoring.
+
+### F2 — major — `src/neurobase/curator/engine.py:435`
+
+Planning is allowed to spend all remaining calls, so synthesis can be budget-
+exhausted after earlier batches have already been applied and consumed; the
+exception is then swallowed and the pass reports `status: ok`. That breaks the
+existing D22 safety property documented just above this block: after committed
+batches, derived state must not lag the facts recall will inject. It is also the
+failure mode the reserve was supposed to prevent: `DEFAULT_RESERVE_CALLS = 6`
+only limits distillation, not planning. I reproduced this with a valid budget
+(`max_brain_calls=7`, `reserve_calls=6`) and one-raw batches: seven raw files were
+consumed, `budget_stopped_by` was `max_brain_calls`, no status node was written,
+and the summary still returned `status: ok`. A larger version of the same shape
+is possible with the default automatic tier whenever distill consumes its
+allowance and the selected raws require more than the six reserved plan/synthesis
+calls. Suggested direction: reserve synthesis separately from planning, stop the
+batch loop before consuming the synthesis call, or report skipped synthesis as a
+partial/bounded status that does not claim the derived state is fresh.
+
+**resolution:** resolved, in `e03f4da`. Took the third suggested direction, and
+it turned out smaller than expected: `BudgetExhausted` already subclasses
+`Exception`, so the pre-existing generic handler around `_synthesize`
+(`except Exception as exc: synth_error = str(exc)`, which every other
+synthesis failure already flows through and which already correctly produces
+`status: "partial"`) was already right. The bug was a special case a few lines
+above it that intercepted `BudgetExhausted` first and discarded it. The fix is
+deleting that special case, not adding new handling — did not implement a
+separate synthesis reserve, since the existing `partial` contract already gives
+an operator an honest, non-error signal to act on (raise `max_brain_calls` or
+`reserve_calls` if it recurs) rather than silently rotting the node.
+`test_synthesis_exhaustion_after_committed_batches_reports_partial` reproduces
+your exact repro shape (`max_brain_calls=7`, `reserve_calls=6`, seven one-raw
+batches) down to the `'ok' == 'partial'` assertion failure, and fails against
+the pre-fix code — confirmed the same way as F1.
+
+Verification run:
+`uv run pytest tests/test_curate_budget.py -q` passed; `uv run python
+scripts/ci.py` passed with ruff, format check, mypy, and `1077 passed, 1 skipped`,
+combined coverage `91.14%`. I also used small local reproducers for F1/F2; they
+are described above.
+
+**Verdict:** changes-requested — the budget works for the covered normal paths,
+but two brain-call paths still violate the central budget/derived-state
+invariants.

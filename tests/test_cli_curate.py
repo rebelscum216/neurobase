@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 import neurobase.cli as cli
 from neurobase.brain.base import Brain
 from neurobase.cli import app
-from neurobase.core import store
+from neurobase.core import locks, store
 
 runner = CliRunner()
 
@@ -110,6 +110,24 @@ def test_curate_if_stale_skips_recent(enabled: tuple[Path, Path], monkeypatch) -
     result = runner.invoke(app, ["curate", "--root", str(root), "--cwd", str(repo), "--if-stale"])
     assert result.exit_code == 0
     assert "Not stale" in result.output
+    assert not (store.memory_dir("myrepo", root) / "curated" / "fact-a.md").exists()
+
+
+def test_curate_busy_lock_skips_before_brain(
+    enabled: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, repo = enabled
+    _write_raw(root)
+
+    def fail_if_resolved(config):
+        raise AssertionError("a lock loser must not resolve or invoke a brain")
+
+    monkeypatch.setattr(cli, "resolve_brain", fail_if_resolved)
+    with locks.try_curate_lock(root, "myrepo") as acquired:
+        assert acquired
+        result = runner.invoke(app, ["curate", "--root", str(root), "--cwd", str(repo)])
+    assert result.exit_code == 0
+    assert "already running" in result.output
     assert not (store.memory_dir("myrepo", root) / "curated" / "fact-a.md").exists()
 
 

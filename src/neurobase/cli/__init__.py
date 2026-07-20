@@ -27,7 +27,7 @@ from neurobase.adapters.codex import recall as codex_recall
 from neurobase.adapters.codex import scribe as codex_scribe
 from neurobase.brain import resolve_brain
 from neurobase.cli import diagnostics
-from neurobase.core import backups, projects, store
+from neurobase.core import backups, locks, projects, store
 from neurobase.core.config import load_config
 from neurobase.core.process_guard import is_internal_call
 from neurobase.curator import curate as run_curate
@@ -199,40 +199,49 @@ def curate(
         raise typer.Exit(code=1)
     _check_store_schema(resolved_root)
 
-    checking_staleness = if_stale and not resynth
-    if checking_staleness and not is_stale(resolved_root, project_slug, config.curate.stale_hours):
-        typer.echo("Not stale — nothing to curate.")
-        return
+    with locks.try_curate_lock(resolved_root, project_slug) as acquired:
+        if not acquired:
+            typer.echo(f"Curate already running for project {project_slug!r}; skipping.")
+            return
 
-    brain, resolution = resolve_brain(config)
-    if brain is None:
-        typer.secho(
-            f"No brain backend available ({resolution.reason}); run `neurobase doctor`.",
-            fg=typer.colors.RED,
-            err=True,
+        checking_staleness = if_stale and not resynth
+        if checking_staleness and not is_stale(
+            resolved_root, project_slug, config.curate.stale_hours
+        ):
+            typer.echo("Not stale — nothing to curate.")
+            return
+
+        brain, resolution = resolve_brain(config)
+        if brain is None:
+            typer.secho(
+                f"No brain backend available ({resolution.reason}); run `neurobase doctor`.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        summary = run_curate(
+            resolved_root,
+            project_slug,
+            brain,
+            dry_run=dry_run,
+            resynth=resynth,
+            tombstone_grace_days=config.curate.tombstone_grace_days,
+            plan_payload_max_bytes=config.curate.plan_payload_max_bytes,
+            distill=config.curate.distill,
+            distill_chunk_chars=config.curate.distill_chunk_chars,
+            redact_patterns=tuple(config.redact.extra_patterns),
         )
-        raise typer.Exit(code=1)
 
-    summary = run_curate(
-        resolved_root,
-        project_slug,
-        brain,
-        dry_run=dry_run,
-        resynth=resynth,
-        tombstone_grace_days=config.curate.tombstone_grace_days,
-        plan_payload_max_bytes=config.curate.plan_payload_max_bytes,
-        distill=config.curate.distill,
-        distill_chunk_chars=config.curate.distill_chunk_chars,
-        redact_patterns=tuple(config.redact.extra_patterns),
-    )
-
-    if dry_run:
-        preview = summary.get("plans", summary.get("plan", {}))
-        typer.echo(json.dumps(preview, indent=2, ensure_ascii=False))
-        return
-    typer.echo(json.dumps({k: v for k, v in summary.items() if k != "plan"}, ensure_ascii=False))
-    if summary.get("status") == "error":
-        raise typer.Exit(code=1)
+        if dry_run:
+            preview = summary.get("plans", summary.get("plan", {}))
+            typer.echo(json.dumps(preview, indent=2, ensure_ascii=False))
+            return
+        typer.echo(
+            json.dumps({k: v for k, v in summary.items() if k != "plan"}, ensure_ascii=False)
+        )
+        if summary.get("status") == "error":
+            raise typer.Exit(code=1)
 
 
 @app.command()

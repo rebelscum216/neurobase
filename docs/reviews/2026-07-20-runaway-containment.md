@@ -1,6 +1,6 @@
 ---
 slug: runaway-containment
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: runaway-guard-split
@@ -143,4 +143,35 @@ git log --oneline --grep='^fix: ' -- src/neurobase/core/locks.py \
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+No findings.
+
+Verified the requested packet-1 range (`git diff ae025ad...5e6fefa`) in a
+detached worktree at `/tmp/nb-runaway-packet1`, so the later pass-budget commit
+was not mixed into the code review. The internal-call marker is applied to the
+Claude/Codex CLI subprocess runners and to CLI version detection, and
+`run_hook()` checks it before argument parsing, stdin reads, capture, recall
+injection, or detached curate spawning. The curate single-flight lock is taken
+before staleness checks and brain resolution, releases on normal and exceptional
+paths, and the losing path exits 0 without resolving a brain. The distill breaker
+lets document-local failures keep falling back per raw, while a `BrainError`
+from the backend stops later distill brain calls and still hands skims to the
+curator so D16 and the existing D9 unconsumed-on-plan-failure path remain intact.
+
+The incident note's lookup command returned exactly the three fix commits:
+`9b99651`, `eacd76f`, and `5e6fefa`. I did find a non-code verification mismatch:
+the exact `5e6fefa` packet gate passed as `1056 passed, 1 skipped`, combined
+coverage `91.01%`; the brief's `1077 passed, 1 skipped`, `91.14%` appears to be
+from the later branch HEAD that includes packet 2. That does not affect the
+reviewed code, but it is worth keeping straight when relaying results.
+
+Verification run:
+`uv run pytest tests/test_cli_hook.py tests/test_cli_curate.py tests/test_distill.py
+tests/test_locks.py tests/test_brain_claude_cli.py tests/test_brain_codex_cli.py
+tests/test_brain_select.py -q` passed; each packet commit (`dc888fb`, `9b99651`,
+`eacd76f`, `5e6fefa`) passed `uv run pytest tests/ -q`; `uv run python
+scripts/ci.py` passed at `5e6fefa` with ruff, format check, mypy, and
+coverage-backed pytest.
+
+**Verdict:** approve — the layer-one runaway containment patch matches the brief
+and I did not find a blocking correctness, spec, safety, or test issue in this
+diff.

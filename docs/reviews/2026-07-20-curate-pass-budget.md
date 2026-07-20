@@ -1,6 +1,6 @@
 ---
 slug: curate-pass-budget
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: runaway-guard-split
@@ -263,3 +263,25 @@ path.
 
 **Verdict:** changes-requested — the round-1 fixes are sound, but distill budget
 exhaustion is still swallowed before the new breaker can run.
+
+### Round 3 Review
+
+No findings. I re-reviewed the full requested range
+`git diff 5e6fefa...f6e2f10`, with extra attention on the incremental F3 fix
+`e03f4da...f6e2f10`. The new `except budget.BudgetExhausted: raise` in
+`_distill_one` sits before the broad document-local `except Exception`, so
+budget exhaustion now reaches `distill_docs`'s loop-level breaker. I also
+re-ran the F3 repro shape directly: with three transcript raws and
+`max_distill_chunks=1`, the injected clock was read exactly three times
+(`PassBudget` start, raw 1 successful debit, raw 2 failed debit), confirming raw
+3 was not visited after exhaustion. The prior F1/F2 fixes remain in place:
+`resynth` is wrapped before branching, and synthesis budget exhaustion reports
+`partial` through the existing synthesis-failure path.
+
+Verification run:
+`uv run pytest tests/test_curate_budget.py -q` passed with 25 tests; `uv run
+python scripts/ci.py` passed with ruff, format check, mypy, and `1081 passed, 1
+skipped`, combined coverage `91.21%`.
+
+**Verdict:** approve — the reviewed budget, resynth, synthesis-exhaustion, and
+distill-breaker paths now satisfy the packet's containment claims.

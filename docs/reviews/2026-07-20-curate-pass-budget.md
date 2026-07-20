@@ -1,6 +1,6 @@
 ---
 slug: curate-pass-budget
-status: draft
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: runaway-guard-split
@@ -15,8 +15,9 @@ created: 2026-07-20
 **Read packet 1 first.** This is **packet 2 of 2**, and it builds directly on the
 containment reviewed in `2026-07-20-runaway-containment.md`. Its whole premise is
 that those three guards are *not enough*, so it is hard to judge in isolation.
-Status stays `draft` until packet 1 has a verdict; flip it to `awaiting-review`
-then.
+Packet 1 is now **approved, round 1, no findings** — the marker/lock/breaker
+stack is sound. This review is scoped to the budget commit alone
+(`5e6fefa...a708034`); please don't re-review packet 1's code here.
 
 **Intent.** The three guards in packet 1 all bound **pathological** behaviour —
 recursion, concurrency, retry-after-failure. None of them bounds a **healthy**

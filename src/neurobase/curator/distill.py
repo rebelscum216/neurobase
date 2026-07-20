@@ -29,6 +29,7 @@ from typing import Any
 from neurobase.brain.base import Brain, BrainError
 from neurobase.core import store
 from neurobase.core.redact import redact, redact_command
+from neurobase.curator import budget
 
 # Tuned defaults (spec §8).
 DISTILL_CHUNK_CHARS = 200_000
@@ -390,6 +391,16 @@ def distill_docs(
                 project=project,
                 write_cache=write_cache,
             )
+        except budget.BudgetExhausted:
+            # The pass budget stopped distillation. Handled like a systemic
+            # backend failure — every remaining raw falls back to its
+            # deterministic skim (D16: distill never aborts a pass) — but the
+            # pass then CONTINUES into planning on the reserved calls, so a
+            # batch still commits and the backlog actually drains. Without that
+            # reserve a chunk-heavy backlog would spend the whole budget here,
+            # consume nothing, and replay the same prefix on every later pass.
+            out.extend(docs[index:])
+            break
         except BrainError:
             # Every remaining raw falls back to its deterministic skim. The
             # curator may still attempt its plan call, which reports the backend

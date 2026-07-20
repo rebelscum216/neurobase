@@ -30,6 +30,7 @@ from neurobase.cli import diagnostics
 from neurobase.core import backups, locks, projects, store
 from neurobase.core.config import load_config
 from neurobase.core.process_guard import is_internal_call
+from neurobase.curator import budget as curate_budget
 from neurobase.curator import curate as run_curate
 from neurobase.curator import is_stale, read_fact_count_trend
 from neurobase.recommender import corpus as recommend_corpus
@@ -220,6 +221,9 @@ def curate(
             )
             raise typer.Exit(code=1)
 
+        # `--if-stale` is the hook spawner's flag, so it is the signal for the
+        # small automatic tier; an explicitly typed `neurobase curate` gets the
+        # permissive one (P0, 2026-07-17 runaway incident).
         summary = run_curate(
             resolved_root,
             project_slug,
@@ -231,6 +235,7 @@ def curate(
             distill=config.curate.distill,
             distill_chunk_chars=config.curate.distill_chunk_chars,
             redact_patterns=tuple(config.redact.extra_patterns),
+            pass_budget=curate_budget.from_config(config.curate, automatic=if_stale),
         )
 
         if dry_run:

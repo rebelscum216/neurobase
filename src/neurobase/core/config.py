@@ -36,6 +36,43 @@ class CurateConfig:
     # when its transcript_path resolves; `off` disables it (skim only).
     distill: str = "auto"
     distill_chunk_chars: int = 200_000
+    # --- pass budget (P0, 2026-07-17 runaway incident) ------------------------
+    # Hard per-pass ceilings. Exhaustion is a NORMAL bounded result: the pass
+    # stops, the remaining raws stay unconsumed, and it is retryable. Flat
+    # scalars, not a nested [curate.budget] table, because `load_config` builds
+    # `CurateConfig(**data["curate"])` — a nested table would arrive as a plain
+    # dict and every attribute access would fail at runtime, invisible to mypy.
+    #
+    # The `auto_*` tier applies to hook-triggered passes (`curate --if-stale`);
+    # the unprefixed tier applies to an explicitly typed `neurobase curate`.
+    #
+    # Sized against a measurement of this store on 2026-07-20 (1669 raws, 1469
+    # consumed, 200 unconsumed), not a guess. Those 200 spread over five days:
+    # 165 landed on 2026-07-17 (the incident), the other four days ran 1-18.
+    # So a normal day is single-to-low-double digits and the runaway was ~10x
+    # that; 40 sits well above the former and decisively below the latter.
+    auto_max_raws: int = 40
+    # 40 distill + <=4 plan batches + 1 synthesis = 45, plus headroom. Measured
+    # bodies are median 1482 / p90 4028 / max 13926 chars against a 200k chunk
+    # size, so no raw in this store chunks and each costs exactly one call.
+    auto_max_brain_calls: int = 50
+    # Worst-case subprocesses, enforced as calls x (DEFAULT_RETRIES + 1) because
+    # `call_with_retry` sits inside each backend, below the Brain protocol.
+    auto_max_brain_attempts: int = 100
+    # Defense-in-depth only: chunk calls are brain calls, so max_brain_calls
+    # binds first in every case measured here. This catches transcripts growing
+    # far beyond anything currently in the store.
+    auto_max_distill_chunks: int = 60
+    # A healthy 40-raw pass is estimated at 4-10 min (per-call latency is NOT
+    # measured — an open item). 15 min leaves margin without letting a detached
+    # background curator run unbounded.
+    auto_max_seconds: int = 900
+    # Explicit tier: one typed command drains the current 200-raw backlog.
+    max_raws: int = 250
+    max_brain_calls: int = 280
+    max_brain_attempts: int = 560
+    max_distill_chunks: int = 320
+    max_seconds: int = 3600
 
 
 @dataclass

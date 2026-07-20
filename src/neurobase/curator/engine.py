@@ -25,6 +25,7 @@ from typing import Any
 
 from neurobase.brain.base import Brain, BrainError, combine_prompt
 from neurobase.core import linkify, store
+from neurobase.curator import budget as budget_mod
 from neurobase.curator import distill as distill_mod
 
 DEFAULT_TOMBSTONE_GRACE_DAYS = 14
@@ -259,9 +260,18 @@ def curate(
     distill: str = DEFAULT_DISTILL,
     distill_chunk_chars: int = DEFAULT_DISTILL_CHUNK_CHARS,
     redact_patterns: tuple[str, ...] = (),
+    pass_budget: budget_mod.PassBudget | None = None,
 ) -> dict[str, Any]:
-    """Run one curate pass (spec §2). Returns the summary dict."""
+    """Run one curate pass (spec §2). Returns the summary dict.
+
+    ``pass_budget`` bounds the pass (P0, 2026-07-17 runaway incident). Omitting
+    it builds the permissive explicit-tier default, so a direct caller is still
+    bounded — there is no unbounded path — while the CLI passes the much
+    smaller automatic tier for hook-triggered runs.
+    """
     store.ensure_tree(project, root)
+    if pass_budget is None:
+        pass_budget = budget_mod.explicit_budget()
 
     if resynth:
         _synthesize(root, project, brain)
@@ -276,6 +286,15 @@ def curate(
         _log_pass(root, project, summary)
         return summary
 
+    # P0 pass budget. Every brain call from here on goes through the wrapper, so
+    # no call site — including one added later — can escape the ledger. Raws
+    # beyond the ceiling are dropped BEFORE the batch loop, which is what makes
+    # "the rest stays unconsumed" structural: they never reach `mark_consumed`.
+    backlog = len(raw_docs)
+    raw_docs = pass_budget.select_raws(raw_docs)
+    budgeted = budget_mod.BudgetedBrain(brain, pass_budget)
+    brain = budgeted
+
     # Step 1 (spec §2.0): distill each raw's transcript into a richer body for
     # this pass, degrading to the skim on any failure (D16 — never aborts). The
     # cache is derived state; a dry run reads it but never writes it.
@@ -283,7 +302,7 @@ def curate(
         root,
         project,
         raw_docs,
-        brain,
+        budgeted.for_distill(),
         mode=distill,
         chunk_chars=distill_chunk_chars,
         extra_patterns=redact_patterns,
@@ -312,6 +331,12 @@ def curate(
         # unconsumed; earlier committed batches intentionally stand.
         try:
             plan = brain.plan_json(PLAN_SYSTEM, user_payload)
+        except budget_mod.BudgetExhausted:
+            # A ceiling, not a failure: stop cleanly and leave `remaining`
+            # unconsumed. Deliberately NOT `plan_error` — that would report
+            # `status: error`, which the CLI turns into exit 1 and would break
+            # the hooks-always-exit-zero guarantee for a normal bounded stop.
+            break
         except BrainError as exc:
             plan_error = str(exc)
             break
@@ -407,6 +432,11 @@ def curate(
     synth_error: str | None = None
     try:
         _synthesize(root, project, brain)
+    except budget_mod.BudgetExhausted:
+        # The budget stopped synthesis, which is a bounded stop rather than a
+        # synthesis failure — the node is a pure function of curated/ and
+        # self-heals on any later pass, exactly as in the `partial` case.
+        pass
     except Exception as exc:  # noqa: BLE001 - spec §2: keep applied state, log, return partial
         synth_error = str(exc)
 
@@ -417,9 +447,15 @@ def curate(
     else:
         status = "ok"
 
+    # Raws the budget stopped short of, whether deferred before the pass or left
+    # in `remaining` when a ceiling hit mid-loop. Reported so a bounded stop is
+    # visible rather than looking like a completed pass.
+    unconsumed_left = pass_budget.deferred_raws + len(remaining)
+
     summary = {
         "status": status,
         "raw": len(raw_docs),
+        "backlog": backlog,
         "batches": batch_count,
         **distill_counts,
         "upserts": upsert_count,
@@ -427,7 +463,10 @@ def curate(
         "tombstones": tombstone_count,
         "pruned_tombstones": len(pruned),
         "active_facts": len(store.list_curated(root, project)),
+        **pass_budget.summary(),
     }
+    if unconsumed_left:
+        summary["unconsumed_left"] = unconsumed_left
     if plan_error is not None:
         summary["error"] = plan_error
     if synth_error is not None:

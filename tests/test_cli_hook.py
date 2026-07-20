@@ -13,6 +13,7 @@ import neurobase.cli as cli
 from neurobase.adapters.claude import recall
 from neurobase.cli import app
 from neurobase.core import projects, store
+from neurobase.core.process_guard import INTERNAL_CALL_ENV
 
 runner = CliRunner()
 
@@ -177,6 +178,28 @@ def test_parse_hook_args_forms() -> None:
         "session-start",
         {},
     )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["claude", "session-start"],
+        ["claude", "session-end"],
+        ["codex", "session-start"],
+        ["codex", "stop"],
+        ["codex", "notify", "{}"],
+    ],
+)
+def test_internal_agent_call_skips_hook_before_reading_stdin(
+    args: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(INTERNAL_CALL_ENV, "1")
+
+    def fail_if_read() -> dict[str, object]:
+        raise AssertionError("internal calls must return before reading hook input")
+
+    monkeypatch.setattr(cli, "_read_stdin_json", fail_if_read)
+    cli.run_hook(args)
 
 
 def test_session_end_scribe_failure_exits_zero(

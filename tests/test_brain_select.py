@@ -9,6 +9,7 @@ from neurobase.brain.anthropic_api import AnthropicAPIBrain
 from neurobase.brain.claude_cli import ClaudeCLIBrain
 from neurobase.brain.codex_cli import CodexCLIBrain
 from neurobase.core.config import Config
+from neurobase.core.process_guard import INTERNAL_CALL_ENV
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +38,18 @@ def test_auto_prefers_claude_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(brain, ClaudeCLIBrain)
     assert resolution.backend == "claude-cli"
     assert resolution.available
+
+
+def test_cli_version_marks_agent_process_as_internal(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return select.subprocess.CompletedProcess(cmd, 0, stdout="claude 1.0\n", stderr="")
+
+    monkeypatch.setattr(select.subprocess, "run", fake_run)
+    assert select._cli_version("claude") == "claude 1.0"
+    assert seen["env"][INTERNAL_CALL_ENV] == "1"
 
 
 def test_auto_falls_through_to_codex(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -29,6 +29,7 @@ from neurobase.brain import resolve_brain
 from neurobase.cli import diagnostics
 from neurobase.core import backups, projects, store
 from neurobase.core.config import load_config
+from neurobase.core.process_guard import is_internal_call
 from neurobase.curator import curate as run_curate
 from neurobase.curator import is_stale, read_fact_count_trend
 from neurobase.recommender import corpus as recommend_corpus
@@ -1190,6 +1191,8 @@ def run_hook(args: list[str]) -> None:
     """Dispatch a hook invocation. Spec §4/§5: **always returns cleanly** —
     never raises, never exits non-zero, never wedges an agent's session start
     or teardown. On any error it captures nothing / injects nothing."""
+    if is_internal_call():
+        return
     try:
         agent, event, opts = _parse_hook_args(args)
         payload = _read_stdin_json()

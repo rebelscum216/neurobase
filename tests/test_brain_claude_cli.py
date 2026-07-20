@@ -7,8 +7,10 @@ import subprocess
 
 import pytest
 
+from neurobase.brain import claude_cli
 from neurobase.brain.base import BrainError
 from neurobase.brain.claude_cli import ClaudeCLIBrain
+from neurobase.core.process_guard import INTERNAL_CALL_ENV
 
 
 def _proc(stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
@@ -58,6 +60,18 @@ def test_invokes_expected_command() -> None:
     assert "--max-turns" in seen["cmd"]
     # system + user folded into the single prompt arg.
     assert "SYS" in seen["cmd"][2] and "USER" in seen["cmd"][2]
+
+
+def test_default_runner_marks_agent_process_as_internal(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return _proc(_envelope("ok"))
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    claude_cli._default_runner(["claude", "-p", "prompt"], timeout=5)
+    assert seen["env"][INTERNAL_CALL_ENV] == "1"
 
 
 def test_nonzero_exit_raises_brain_error() -> None:

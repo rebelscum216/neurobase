@@ -17,6 +17,7 @@ from neurobase.brain.base import Brain
 from neurobase.brain.claude_cli import ClaudeCLIBrain
 from neurobase.brain.codex_cli import CodexCLIBrain
 from neurobase.core.config import Config
+from neurobase.core.process_guard import internal_call_env
 
 # The D9 auto-detection order.
 AUTO_ORDER = ("claude-cli", "codex-cli", "anthropic-api", "openai-api")
@@ -35,7 +36,13 @@ class BrainResolution:
 
 def _cli_version(binary: str) -> str | None:
     try:
-        proc = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=5)
+        proc = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=internal_call_env(),
+        )
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:

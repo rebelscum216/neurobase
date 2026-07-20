@@ -21,12 +21,20 @@ from neurobase.brain.base import (
     combine_prompt,
     parse_plan_json,
 )
+from neurobase.core.process_guard import internal_call_env
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
 def _default_runner(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, input="", capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(
+        cmd,
+        input="",
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=internal_call_env(),
+    )
 
 
 def _last_agent_message(stdout: str) -> str | None:

@@ -7,8 +7,10 @@ import subprocess
 
 import pytest
 
+from neurobase.brain import codex_cli
 from neurobase.brain.base import BrainError
 from neurobase.brain.codex_cli import CodexCLIBrain
+from neurobase.core.process_guard import INTERNAL_CALL_ENV
 
 
 def _proc(stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
@@ -79,6 +81,18 @@ def test_invokes_expected_command() -> None:
     CodexCLIBrain(runner=runner).text("SYS", "USER")
     assert seen["cmd"][:3] == ["codex", "exec", "--json"]
     assert "SYS" in seen["cmd"][3] and "USER" in seen["cmd"][3]
+
+
+def test_default_runner_marks_agent_process_as_internal(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return _proc(_jsonl(_agent_message("ok")))
+
+    monkeypatch.setattr(codex_cli.subprocess, "run", fake_run)
+    codex_cli._default_runner(["codex", "exec", "prompt"], timeout=5)
+    assert seen["env"][INTERNAL_CALL_ENV] == "1"
 
 
 def test_no_agent_message_retries_then_gives_up() -> None:

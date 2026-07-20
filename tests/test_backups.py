@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from neurobase.core import backups
+from neurobase.core.backups import BackupRestoreError
 
 
 def test_same_second_backups_do_not_clobber_each_other(
@@ -38,3 +39,95 @@ def test_same_second_backups_do_not_clobber_each_other(
     second_restored = backups.restore_backup(root, second_dir.name)
     assert [p.name for p in first_restored] == ["first.md"]
     assert [p.name for p in second_restored] == ["second.md"]
+
+
+def test_distinct_sources_with_same_basename_do_not_clobber(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two sources sharing a basename (``a/config`` and ``b/config``) are stored
+    side by side under a ``.N`` suffix, and both round-trip through restore with
+    their own original contents."""
+    root = tmp_path / "store"
+    monkeypatch.setattr(backups, "_timestamp", lambda: "2026-07-10T00-00-00Z")
+
+    a = tmp_path / "a" / "config"
+    b = tmp_path / "b" / "config"
+    a.parent.mkdir()
+    b.parent.mkdir()
+    a.write_text("from a\n", encoding="utf-8")
+    b.write_text("from b\n", encoding="utf-8")
+
+    backup_dir = backups.backup_files(root, [a, b])
+    assert backup_dir is not None
+    # Both sources landed in the one dir under distinct stored names.
+    assert sorted(p.name for p in backup_dir.glob("config*")) == ["config", "config.1"]
+
+    a.write_text("clobbered\n", encoding="utf-8")
+    b.write_text("clobbered\n", encoding="utf-8")
+    restored = backups.restore_backup(root, backup_dir.name)
+
+    assert sorted(p.name for p in restored) == ["config", "config"]
+    assert a.read_text(encoding="utf-8") == "from a\n"
+    assert b.read_text(encoding="utf-8") == "from b\n"
+
+
+def test_restore_rejects_non_leaf_timestamp(tmp_path: Path) -> None:
+    """A timestamp that is not a single directory name (path traversal) is
+    refused before any filesystem lookup."""
+    root = tmp_path / "store"
+    with pytest.raises(BackupRestoreError, match="single directory name"):
+        backups.restore_backup(root, "../escape")
+
+
+def test_restore_missing_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    (root / "backups" / "ts").mkdir(parents=True)
+    with pytest.raises(BackupRestoreError, match="manifest not found"):
+        backups.restore_backup(root, "ts")
+
+
+def _write_manifest(root: Path, ts: str, text: str) -> None:
+    backup_dir = root / "backups" / ts
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "manifest.json").write_text(text, encoding="utf-8")
+
+
+def test_restore_rejects_invalid_json_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    _write_manifest(root, "ts", "{not json")
+    with pytest.raises(BackupRestoreError, match="not valid JSON"):
+        backups.restore_backup(root, "ts")
+
+
+def test_restore_rejects_non_list_manifest(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    _write_manifest(root, "ts", '{"original_abs_path": "x", "stored_as": "y"}')
+    with pytest.raises(BackupRestoreError, match="not a JSON list"):
+        backups.restore_backup(root, "ts")
+
+
+def test_restore_rejects_non_object_entry(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    _write_manifest(root, "ts", '["not an object"]')
+    with pytest.raises(BackupRestoreError, match="non-object entry"):
+        backups.restore_backup(root, "ts")
+
+
+def test_restore_rejects_entry_missing_paths(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    _write_manifest(root, "ts", '[{"original_abs_path": "x"}]')
+    with pytest.raises(BackupRestoreError, match="missing paths"):
+        backups.restore_backup(root, "ts")
+
+
+def test_restore_rejects_missing_backed_up_file(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    original = tmp_path / "orig.md"
+    gone = tmp_path / "backups" / "ts" / "orig.md"  # never created
+    _write_manifest(
+        root,
+        "ts",
+        f'[{{"original_abs_path": "{original}", "stored_as": "{gone}"}}]',
+    )
+    with pytest.raises(BackupRestoreError, match="backed-up file is missing"):
+        backups.restore_backup(root, "ts")

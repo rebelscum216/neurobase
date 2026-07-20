@@ -348,6 +348,15 @@ def _distill_one(
         if write_cache:
             _cache_write(cache_path, fingerprint, digest)
         return digest
+    except budget.BudgetExhausted:
+        # Codex F3: not a document-local failure — the pass budget stopped this
+        # call. Must re-raise, same as BrainError below: `except Exception`
+        # would otherwise catch it FIRST (BudgetExhausted is an Exception but
+        # not a BrainError) and silently convert it into "this one raw failed,
+        # use its skim", so distill_docs's own `except budget.BudgetExhausted`
+        # loop-level breaker never fires and the loop keeps re-attempting (and
+        # re-failing) on every remaining raw instead of stopping immediately.
+        raise
     except BrainError:
         # Backend failures are systemic, not document-local. Let distill_docs
         # trip its pass-local breaker so a quota/auth/outage failure does not

@@ -23,6 +23,7 @@ import pytest
 from neurobase.core import store
 from neurobase.core.config import CurateConfig
 from neurobase.curator import budget as budget_mod
+from neurobase.curator import distill as distill_mod
 from neurobase.curator import engine
 
 # Flat cross-test import, as `test_redact_audit` does: ruff's `src` includes
@@ -388,3 +389,90 @@ def test_synthesis_exhaustion_after_committed_batches_reports_partial(
     assert summary["status"] == "partial"  # ...but the node is honestly stale
     assert summary["status"] != "ok"
     assert len(store.list_raw(root, "proj", unconsumed_only=True)) == 0
+
+
+# --- Codex round-2 finding (2026-07-20) --------------------------------------
+
+
+_GOOD_DIGEST = "## Decisions\n- Chose X over Y."
+
+
+class _OneShotDistillBrain:
+    """Returns a valid digest once; only used for the one raw whose distill
+    call is meant to succeed before the budget stops the rest. `plan_json` is
+    unused here but required to satisfy the `Brain` protocol."""
+
+    name = "fake"
+
+    def plan_json(self, system: str, user: str) -> dict:
+        raise AssertionError("plan_json should not be called in this distill-only test")
+
+    def text(self, system: str, user: str) -> str:
+        return _GOOD_DIGEST
+
+
+def _seed_transcript_raw(root: Path, project: str, name: str, transcript: Path) -> None:
+    store.ensure_tree(project, root)
+    store.write_doc(
+        store.memory_dir(project, root) / "raw" / name,
+        {
+            "agent": "claude",
+            "session_id": name,
+            "cwd": "/x",
+            "branch": "main",
+            "captured_at": "2026-07-07T12:00:00Z",
+            "consumed": False,
+            "transcript_path": str(transcript),
+            "capture_version": 2,
+        },
+        f"skim {name}",
+    )
+
+
+def test_distill_budget_exhaustion_stops_the_loop_immediately(root: Path, tmp_path: Path) -> None:
+    """F3: `_distill_one` has its own broad `except Exception` (for
+    document-local failures), and `BudgetExhausted` is an `Exception` but NOT a
+    `BrainError` — so the pre-fix code's `except BrainError: raise` never saw
+    it, and the generic handler silently swallowed it, returning `None` (skim)
+    for that one raw and letting `distill_docs`'s loop carry on to the next raw
+    instead of its intended loop-level breaker firing.
+
+    The bug is invisible in the returned digests/counts: buggy and fixed code
+    both end up skimming the same two raws. What differs is how much work
+    happened getting there, so this counts DEBIT ATTEMPTS via the injected
+    clock (`_check_clock()` runs at the top of every `debit()` call, success or
+    failure) rather than asserting on `out`/`counts`. With the loop-level
+    breaker firing correctly, raw 3 must never be attempted at all once raw 2's
+    debit already failed — one fewer clock read than the buggy version."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        '{"type":"user","message":{"role":"user","content":"hello"}}\n', encoding="utf-8"
+    )
+    for i in range(3):
+        _seed_transcript_raw(root, "proj", f"2026-07-07T12-00-{i:02d}Z_claude_s{i}.md", transcript)
+    docs = store.list_raw(root, "proj", unconsumed_only=True)
+    assert len(docs) == 3
+
+    clock_calls: list[float] = []
+
+    def counting_clock() -> float:
+        clock_calls.append(0.0)
+        return 0.0
+
+    pass_budget = budget_mod.PassBudget(
+        max_raws=1000,
+        max_brain_calls=1000,
+        max_brain_attempts=10_000,
+        max_distill_chunks=1,  # only the FIRST distill call is allowed
+        max_seconds=10_000,
+        clock=counting_clock,
+    )
+    budgeted = budget_mod.BudgetedBrain(_OneShotDistillBrain(), pass_budget).for_distill()
+
+    out, counts = distill_mod.distill_docs(root, "proj", docs, budgeted, write_cache=False)
+
+    assert counts == {"distilled": 1, "fallback": 2}
+    assert len(out) == 3
+    # 1 (PassBudget.__post_init__) + 1 (raw 1's successful debit) + 1 (raw 2's
+    # failing debit). Raw 3 must never be reached: no 4th clock read.
+    assert len(clock_calls) == 3

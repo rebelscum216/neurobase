@@ -16,6 +16,7 @@ nothing here depends on real elapsed time.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,7 +27,7 @@ from neurobase.curator import engine
 
 # Flat cross-test import, as `test_redact_audit` does: ruff's `src` includes
 # `tests`, so this is first-party and sorts with the neurobase imports.
-from test_curator import FakeBrain, _write_raw
+from test_curator import FakeBrain, SequencedBrain, _write_raw
 
 
 @pytest.fixture
@@ -299,3 +300,91 @@ def test_curate_without_an_explicit_budget_is_still_bounded(root: Path) -> None:
 
     assert summary["status"] != "error"
     assert "budget_calls" in summary
+
+
+# --- regressions for Codex round-1 findings (2026-07-20) ---------------------
+#
+# Both reproduce the reviewer's exact repro steps from
+# docs/reviews/2026-07-20-curate-pass-budget.md rather than a paraphrase of
+# them, so a regression here means the finding is genuinely back.
+
+
+def _seed_one_curated_fact(root: Path, project: str) -> None:
+    """`_synthesize` only calls the brain when at least one active curated fact
+    exists — with none, it writes a fixed placeholder body and never touches
+    the brain at all. The resynth-budget tests need a real brain call to
+    charge (or fail to charge), so they seed one fact first."""
+    store.ensure_tree(project, root)
+    store.upsert_curated(root, project, "some-fact", "A durable fact.", provenance=["raw/x.md"])
+
+
+def test_resynth_brain_call_is_budgeted(root: Path) -> None:
+    """F1: `resynth=True` used to return before the `BudgetedBrain` rebind, so
+    the single `_synthesize` call it makes was never charged to the ledger —
+    the one path that contradicted "every brain call must debit". A budgeted
+    resynth must show exactly one spent call, not zero."""
+    _seed_one_curated_fact(root, "proj")
+    pass_budget = _budget()
+
+    engine.curate(root, "proj", FakeBrain(), resynth=True, pass_budget=pass_budget)
+
+    assert pass_budget.calls == 1
+
+
+def test_resynth_exhaustion_reports_partial_not_a_silent_success(root: Path) -> None:
+    """A budget too small for even the one resynth call must not report
+    `status: "resynth"` (which claims the node was refreshed) or `error`
+    (which the CLI turns into exit 1) — `partial` is the honest outcome: the
+    node was not refreshed and the caller should not treat it as done."""
+    _seed_one_curated_fact(root, "proj")
+    pass_budget = _budget(max_brain_calls=1, reserve_calls=0)
+    pass_budget.debit(distilling=False)  # pre-spend the only call, via the same
+    # public method the code itself uses — not a private-field poke.
+
+    summary = engine.curate(root, "proj", FakeBrain(), resynth=True, pass_budget=pass_budget)
+
+    assert summary["status"] == "partial"
+    assert summary["status"] != "error"
+
+
+def test_synthesis_exhaustion_after_committed_batches_reports_partial(
+    root: Path, tmp_path: Path
+) -> None:
+    """F2: reproduces the reviewer's exact repro. `max_brain_calls=7`,
+    `reserve_calls=6`, one-raw plan batches: 7 raws each cost one plan call,
+    exactly exhausting the budget with nothing left for synthesis. The first
+    batch's plan upserts a real fact, so an active curated fact exists by the
+    time synthesis runs and `_synthesize` genuinely attempts a brain call
+    rather than taking its no-active-facts shortcut — otherwise this would not
+    reproduce the reviewer's "no status node was written" observation at all.
+
+    Before the fix this was swallowed and reported `status: "ok"` even though
+    the node was never resynthesized against the newly committed fact — the
+    exact D22 hazard the surrounding comment warns about ("derived state must
+    never lag committed facts"). It must report `partial`, and the raws must
+    still be consumed (committed batches stand; only synthesis was skipped)."""
+    _seed(root, "proj", 7)
+    plans: list[Any] = [{"upserts": [{"slug": "a-fact", "body": "A fact."}], "tombstones": []}]
+    plans += [{"upserts": [], "tombstones": []}] * 6
+    pass_budget = budget_mod.PassBudget(
+        max_raws=1000,
+        max_brain_calls=7,
+        max_brain_attempts=10_000,
+        max_distill_chunks=1000,
+        max_seconds=10_000,
+        reserve_calls=6,
+    )
+
+    summary = engine.curate(
+        root,
+        "proj",
+        SequencedBrain(plans),
+        plan_payload_max_bytes=1300,
+        pass_budget=pass_budget,
+    )
+
+    assert summary["batches"] == 7  # every batch committed...
+    assert summary["upserts"] == 1  # ...including the fact the first one wrote
+    assert summary["status"] == "partial"  # ...but the node is honestly stale
+    assert summary["status"] != "ok"
+    assert len(store.list_raw(root, "proj", unconsumed_only=True)) == 0

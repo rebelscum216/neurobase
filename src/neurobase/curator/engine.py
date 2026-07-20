@@ -273,8 +273,29 @@ def curate(
     if pass_budget is None:
         pass_budget = budget_mod.explicit_budget()
 
+    # P0 pass budget (Codex F1): wrapped ONCE, here, before either branch below.
+    # `resynth` used to return before this rebind, leaving it a genuinely
+    # unbudgeted brain call — the one path that contradicted "every call site
+    # must debit the ledger". Wrapping before the branch closes that.
+    budgeted = budget_mod.BudgetedBrain(brain, pass_budget)
+    brain = budgeted
+
     if resynth:
-        _synthesize(root, project, brain)
+        try:
+            _synthesize(root, project, brain)
+        except budget_mod.BudgetExhausted:
+            # The budget stopped the resynth: `active_facts` may be stale
+            # relative to what a completed resynth would have produced.
+            # `partial` reuses the meaning the main path already gives that
+            # word rather than claiming `resynth` succeeded (Codex F1).
+            summary = {
+                "status": "partial",
+                "active_facts": len(store.list_curated(root, project)),
+                "error": "budget exhausted before resynth completed",
+                **pass_budget.summary(),
+            }
+            _log_pass(root, project, summary)
+            return summary
         summary = {"status": "resynth", "active_facts": len(store.list_curated(root, project))}
         _log_pass(root, project, summary)
         return summary
@@ -286,14 +307,12 @@ def curate(
         _log_pass(root, project, summary)
         return summary
 
-    # P0 pass budget. Every brain call from here on goes through the wrapper, so
-    # no call site — including one added later — can escape the ledger. Raws
+    # Every brain call from here on goes through the wrapper bound above, so no
+    # call site — including one added later — can escape the ledger. Raws
     # beyond the ceiling are dropped BEFORE the batch loop, which is what makes
     # "the rest stays unconsumed" structural: they never reach `mark_consumed`.
     backlog = len(raw_docs)
     raw_docs = pass_budget.select_raws(raw_docs)
-    budgeted = budget_mod.BudgetedBrain(brain, pass_budget)
-    brain = budgeted
 
     # Step 1 (spec §2.0): distill each raw's transcript into a richer body for
     # this pass, degrading to the skim on any failure (D16 — never aborts). The
@@ -429,14 +448,18 @@ def curate(
     # is `partial`, not a crash: raws are already consumed and the applied state
     # stands, and the node self-heals on any later pass (it's a pure function of
     # curated/).
+    # Codex F2: BudgetExhausted used to be caught separately here and silently
+    # discarded, reporting `status: ok` even though synthesis never ran and the
+    # node was left lagging the batches this pass just committed — exactly the
+    # D22 hazard the comment above this block warns about. BudgetExhausted IS
+    # already an Exception (it subclasses RuntimeError), so simply not
+    # special-casing it lets the existing handler below catch it and report
+    # `partial`, precisely the honest outcome: state changed, node not yet
+    # refreshed, self-heals on a later pass. No new handling needed — the
+    # special case was the bug.
     synth_error: str | None = None
     try:
         _synthesize(root, project, brain)
-    except budget_mod.BudgetExhausted:
-        # The budget stopped synthesis, which is a bounded stop rather than a
-        # synthesis failure — the node is a pure function of curated/ and
-        # self-heals on any later pass, exactly as in the `partial` case.
-        pass
     except Exception as exc:  # noqa: BLE001 - spec §2: keep applied state, log, return partial
         synth_error = str(exc)
 

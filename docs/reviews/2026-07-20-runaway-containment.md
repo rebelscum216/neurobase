@@ -114,7 +114,7 @@ already had eyes on it.
 
 ```bash
 git diff ae025ad...5e6fefa
-uv run python scripts/ci.py          # full gate: 1077 passed, 1 skipped, 91.14%
+uv run python scripts/ci.py          # at 5e6fefa: 1056 passed, 1 skipped, 91.01%
 
 # every commit in this packet is independently green, which is worth spot-checking:
 for c in dc888fb 9b99651 eacd76f 5e6fefa; do git checkout -q $c && uv run pytest tests/ -q; done

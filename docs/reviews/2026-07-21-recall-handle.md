@@ -1,6 +1,6 @@
 ---
 slug: recall-handle
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-recall-handle
@@ -79,4 +79,19 @@ format primitives and are intentionally *not* moved onto the handle.
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+No findings. I reviewed `git diff main...HEAD` against ADR-0015's READ-handle
+semantics, spec §3/§5 recall injection, spec §10's newer-schema refusal, and the
+existing Claude/Codex hook fail-safe behavior. `build_context()` now opens a READ
+handle before resolving the project, uses handle-scoped `resolve_project()` and
+`memory_dir()`, preserves the public recall signatures, and still fails closed to
+no injection for unsupported `store.toml`. The intentional behavior change is also
+correctly pinned: READ recall no longer creates `store.toml` as a side effect.
+
+Verification run:
+- `git diff main...HEAD`
+- `uv run pytest tests/test_recall_common.py tests/test_claude_recall.py tests/test_hook_schema_guard.py tests/test_cross_agent.py -q` — 19 passed
+- `uv run python scripts/ci.py` — ruff, format check, mypy, and pytest passed;
+  `1118 passed, 1 skipped`, total coverage `91.38%`
+
+**Verdict:** approve — the recall handle conversion matches the ADR-0015 step 3.1
+contract and I found no blocking regressions.

@@ -1,6 +1,6 @@
 ---
 slug: scribe-handles
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-scribe-handles
@@ -85,4 +85,25 @@ CI AST check (step 5). Per-method mode enforcement stays deferred.
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+No findings. I reviewed `git diff main...HEAD` against ADR-0015's READ/WRITE
+handle semantics, spec §4/§5 scribe fail-safe and opt-in contracts, spec §10's
+newer-schema refusal, and the existing hook wrappers. Both scribes now inspect
+through a READ handle before project resolution/opt-in, open WRITE only for the
+actual raw write, preserve the normal capture path, and keep Codex's
+`RawConsumedError` retry on the same writer handle with a fresh `captured_at`.
+
+Residual note: compared with the old code, a partial store with an existing memory
+tree but an empty/no-op capture no longer creates `store.toml`, because the WRITE
+handle is opened only after the empty-capture check. That is consistent with the
+new "commit to writing before WRITE" shape and does not violate the scribe
+contracts.
+
+Verification run:
+- `git diff main...HEAD`
+- `uv run pytest tests/test_claude_scribe.py tests/test_codex_scribe.py tests/test_hook_schema_guard.py tests/test_cross_agent.py -q` — 53 passed
+- `uv run python scripts/ci.py` — ruff, format check, mypy, and pytest passed;
+  `1122 passed, 1 skipped`, total coverage `91.42%`
+
+**Verdict:** approve — the scribe handle conversion preserves the capture
+behavior that matters and closes the per-scribe guard placement without new
+blocking regressions.

@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-07-21
-- **Resolves:** G1 ([known-gaps](../known-gaps.md)); the D11 schema guard (spec §10); hardening-plan §15 / Phase 0
+- **Resolves:** G1 ([known-gaps](../known-gaps.md)); the D11 schema guard (spec §10)
 - **Supersedes:** none
 
 ## Context
@@ -106,10 +106,36 @@ def open_store(root: Path, mode: StoreMode = StoreMode.READ) -> StoreHandle: ...
 - **`PURGE`** — open even an unparseable or newer-schema store, so
   `uninstall --purge-store` can delete it (D25).
 
-`open_store()` validates: `store.toml` schema, registry parseability, and store-root
-identity. (Migration-lock and partial-transaction markers named in hardening-plan
-§15.2.3 are **out of scope here** — they arrive with the schema-2 migration ADR
-that needs them; this handle just reserves `MIGRATE`.)
+`open_store()` validates **only the store's own identity**: the `store.toml` schema
+(the D11 comparison) and the store-root path. It **does not** validate
+`registry.toml` — registry-parse failure is a separate concern with its own contract
+(below). Migration-lock and partial-transaction detection are **out of scope here**:
+they arrive with the schema-2 migration ADR that needs them; this ADR only reserves
+the `MIGRATE` mode name so that ADR has a seam to fill.
+
+**Registry parseability is not part of the schema guard** _(added in review — F1)._
+A malformed or unreadable `registry.toml` is a different failure from a newer
+`store.toml` schema, and folding it into `open_store()` as a hard error would break
+the very MCP fail-soft contract D24 exists to protect. It stays **fail-soft per
+surface**, exactly as today. After a handle opens:
+
+- **Registry reads** (`load_registry`, `resolve_project`) treat a bad registry as an
+  **empty** one: `memory_search` and `memory_list_projects` return `[]`, and
+  `build_server()` resolves `current_project = None` — the behavior pinned by
+  `test_search_and_list_projects_fail_soft_on_corrupt_registry` and
+  `test_build_server_survives_corrupt_registry`
+  ([`tests/test_mcp_server.py`](../../tests/test_mcp_server.py)).
+- **Explicit-project reads that never consult the registry** — `memory_read_node(project, name)` —
+  are unaffected by registry state entirely; a corrupt registry must not block them.
+- A **registry write** (`register_project`, WRITE mode) may still hard-fail on a
+  corrupt registry as it does today — a write path is allowed to refuse a store it
+  cannot safely rewrite.
+
+The handle carries only the `store.toml` schema verdict; registry validation lives on
+the registry accessors, not the whole-store gate. Concretely, the per-surface
+fail-soft wrappers that exist today (`_safe_registry`, `build_server()`'s
+`try/except`) are preserved — requiring a handle changes their *signature*, not their
+tolerance.
 
 **Enforcement.** The chokepoint only works if the handle is unavoidable:
 
@@ -120,16 +146,18 @@ that needs them; this handle just reserves `MIGRATE`.)
   `rebuild_index`, and the recommender's corpus/ledger accessors.
 - The raw-`Path` signatures are removed (not merely deprecated) — a lingering
   overload re-arms the same footgun.
-- A **CI check** (AST-based, per hardening-plan §15.3) forbids constructing store
-  paths from a bare root or reading `registry.toml` / `store.toml` / `memory/`
-  outside `core/store.py`, `core/store_handle.py`, and `core/projects.py`.
+- A **CI check** (AST-based) forbids constructing store paths from a bare root or
+  reading `registry.toml` / `store.toml` / `memory/` outside `core/store.py`,
+  `core/store_handle.py`, and `core/projects.py`.
 
 **D24 — MCP failures surface as structured tool errors (spec §13).**
 `build_server()` opens a `READ` handle. A newer-schema store must **not** raise at
 startup: `build_server()` still constructs, `resources/list` still returns a valid
 (possibly empty) array, and each tool returns a structured incompatibility error
 when invoked. The handle is opened once and its outcome captured; tools branch on
-it rather than re-checking.
+it rather than re-checking. This structured error is for an unsupported **`store.toml`
+schema** only; a corrupt **registry** is not conflated with it — that stays fail-soft
+(empty), unchanged from today, per the registry contract above.
 
 **D25 — `uninstall --purge-store` is exempt.** It opens a `PURGE` handle and may
 `rmtree(<root>)` even when the schema is unsupported or unparseable — with the
@@ -141,7 +169,7 @@ stops re-implementing the schema comparison and instead opens a `DOCTOR` handle,
 mapping `schema is None` → "not initialized" (warn), `schema > MAX` → "unsupported"
 (error), else ok. One comparison, one place.
 
-**Migration order** (hardening-plan §15.2.4 — land as separate reviewable PRs):
+**Migration order** (land as separate reviewable PRs):
 
 1. Introduce `store_handle.py` + `open_store()` alongside today's API (no callers
    yet).
@@ -170,9 +198,10 @@ mapping `schema is None` → "not initialized" (warn), `schema > MAX` → "unsup
   the guard once today, so no latency regression (ADR-0003 budget unaffected).
 - **No schema bump, no data migration.** Existing stores keep `schema = 1` and every
   command behaves as before; this is a pure interior refactor. Profiles, project
-  policy, and the central egress gate (hardening-plan Phase 0 remainder) layer on
-  top as their *own* ADRs — and the schema-2 migration ADR is where migration-lock
-  and partial-transaction detection land, using the `MIGRATE` mode reserved here.
+  policy, and the central egress gate — the later trust-boundary work this handle is
+  the foundation for — layer on top as their *own* ADRs, and the schema-2 migration
+  ADR is where migration-lock and partial-transaction detection land, using the
+  `MIGRATE` mode reserved here.
 - **Spec appendix** updates: §10 gains the `open_store()` chokepoint + mode table as
   the store-access contract and the `uninstall --purge-store` exemption (D25); §13
   gains the D24 rule that an unsupported-schema store yields structured tool errors,

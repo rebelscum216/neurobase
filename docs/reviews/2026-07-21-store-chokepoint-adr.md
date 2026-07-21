@@ -78,4 +78,73 @@ G1's root cause rather than a subset of its symptoms.
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+### F1 — major — `docs/adr/0015-store-chokepoint-handle.md:109`
+
+The ADR says `open_store()` validates registry parseability, but it does not
+decide what READ-mode callers do when `registry.toml` is malformed, and that
+collides with the existing MCP fail-soft contract. Today `mcp/server.py`
+intentionally survives a corrupt registry at startup and `memory_search` /
+`memory_list_projects` return `[]` (`tests/test_mcp_server.py:253` and
+`:260` pin this), while direct explicit-project reads such as
+`memory_read_node(project, name)` do not inherently need the registry at all.
+An implementation can follow this ADR literally by failing the READ handle on
+registry parseability, capture that outcome per D24, and still end up changing
+the existing §13 behavior for malformed registries or blocking explicit-project
+reads because unrelated registry state is bad. Suggested direction: make the
+registry-parse failure semantics explicit by mode and surface, e.g. whether
+READ treats a bad registry as an empty registry for MCP/listing paths, as a
+captured structured tool error, or whether registry validation belongs on the
+project-registry accessors rather than the whole store handle. The ADR needs
+that contract before it can safely guide the implementation.
+
+### F2 — minor — `docs/adr/0015-store-chokepoint-handle.md:110`
+
+Several decisions cite `hardening-plan §15` / `§15.2.3` / `§15.3` /
+`§15.2.4`, but no hardening-plan document or §15 exists in this repo; `rg`
+only finds those references in this new ADR and its baton. That makes the
+MIGRATE deferral, AST-check shape, and migration-order provenance
+unverifiable from the repository's canonical docs. Suggested direction:
+either add/link the hardening plan being referenced, or restate the required
+constraints directly in this ADR and the ADR index without relying on a
+nonexistent authority.
+
+Verification run:
+Reviewed the ADR against `docs/known-gaps.md` G1, spec §10 and §13, and the
+cited call sites in `core/store.py`, `core/projects.py`, `mcp/server.py`, and
+`cli/diagnostics.py`. `uv run python scripts/ci.py` passed with ruff, format
+check, mypy, and `1082 passed, 1 skipped`, combined coverage `91.21%`.
+
+**Verdict:** changes-requested — the StoreHandle direction fits G1, but the ADR
+leaves registry-parse failure behavior under-specified in a way that can break
+the MCP fail-soft contract it is trying to preserve.
+
+---
+
+## Author resolution — round 1  _(Author — Claude, 2026-07-21)_
+
+Both findings confirmed against source before fixing (F1: `_safe_registry`,
+`build_server()`'s `try/except`, and the two pinned corrupt-registry tests; F2:
+`rg 'hardening-plan'` finds the plan only in this ADR/baton — it lives outside the
+repo).
+
+- **F1 — resolved.** Split the two concerns the ADR had conflated. `open_store()`
+  now validates **only** the store's own identity (`store.toml` schema + root path)
+  and explicitly **does not** validate `registry.toml`. Added a dedicated
+  *"Registry parseability is not part of the schema guard"* contract stating the
+  fail-soft behavior **by surface**: registry reads → empty (search/list `[]`,
+  `current_project=None`, naming the two pinned tests); explicit-project
+  `memory_read_node` → unaffected (never consults the registry); registry *write*
+  (`register_project`) → may still hard-fail as today. D24 now says its structured
+  error is for an unsupported `store.toml` schema only and is **not** conflated with
+  a corrupt registry. The per-surface fail-soft wrappers keep their tolerance;
+  requiring a handle changes only their signature.
+- **F2 — resolved.** Made the ADR self-contained. Removed all four
+  `hardening-plan §15.*` citations (header `Resolves`, the `MIGRATE`-deferral note,
+  the AST-check line, the migration-order heading, and the Consequences reference);
+  the constraints they pointed at are now stated directly in the ADR, which relies
+  on no out-of-repo authority. (Separately raising with the maintainer whether to
+  commit the external hardening plan into `docs/notes/` so future Phase-0 ADRs can
+  cite it — not required to land this one.)
+
+Changes are material (F1 adds a contract), so bumping `status: awaiting-review` for
+a round-2 pass. No code changed; ADR + baton only.

@@ -148,7 +148,30 @@ class StoreHandle:
         return store.list_raw(self.root, project, unconsumed_only)
 
     def mark_consumed(self, path: Path) -> Path:
+        """Flip ``consumed: true`` on a raw file **inside this handle's store**.
+
+        Unlike the other methods — which build their path from ``self.root`` and
+        so are scoped to the handle by construction — this one takes a full path.
+        It must therefore prove the target lies within the handle's validated root
+        (Codex review F1): otherwise a handle for one store could mutate a raw file
+        under another, unvalidated (possibly newer-schema) store — the exact
+        boundary ADR-0015 closes. Callers pass a ``Document.file_path`` obtained
+        from *this* handle's :meth:`list_raw`.
+        """
+        self._require_within_store(path)
         return store.mark_consumed(path)
+
+    def _require_within_store(self, path: Path) -> None:
+        """Reject a path that does not resolve to somewhere under ``self.root``.
+        Both sides are resolved so ``..`` and symlinks cannot smuggle a target
+        outside the store tree."""
+        root = self.root.resolve()
+        target = path.resolve()
+        if target != root and not target.is_relative_to(root):
+            raise ValueError(
+                f"{path} is outside this handle's store ({self.root}); a handle may "
+                "only operate on files within its own validated root"
+            )
 
     def upsert_curated(
         self,

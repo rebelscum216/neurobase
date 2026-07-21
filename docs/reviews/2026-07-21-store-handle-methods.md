@@ -86,4 +86,50 @@ per-method mode enforcement; the schema-2 / profile-resolution work (ADR-0016).
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+### F1 — major — `src/neurobase/core/store_handle.py:150`
+
+`StoreHandle.mark_consumed(path)` does not derive or validate the target path
+from `self.root`, so a caller holding a valid handle for one store can mutate a
+raw file under any other store root. That re-opens the exact boundary ADR-0015 is
+trying to close: `open_store(root_a, WRITE).mark_consumed(root_b/.../raw/x.md)`
+will rewrite `root_b` without ever validating `root_b/store.toml`, including if
+`root_b` is a newer-schema store. The other new methods all pass `self.root` into
+the root-taking function, but this one delegates directly to the legacy path-only
+`store.mark_consumed`, and the added test only covers the happy path where the
+path came from the same handle's `write_raw`. Suggested direction: make the method
+prove ownership before mutating, e.g. reject paths outside the handle's store tree
+or replace the path-only surface with an API that derives the raw path from
+`self.root`/project/filename or a document returned by this handle.
+
+Verification run:
+- `git diff main...HEAD`
+- `uv run pytest tests/test_store_handle.py -q` — 34 passed
+- `uv run python scripts/ci.py` — ruff, format check, mypy, and pytest passed;
+  `1116 passed, 1 skipped`, total coverage `91.34%`
+
+**Verdict:** changes-requested — the additive method surface is mostly faithful,
+but `mark_consumed` leaves a path-based mutation escape hatch that bypasses the
+validated handle root.
+
+---
+
+## Author resolution — round 2  _(Author — Claude)_
+
+**F1 — resolved** (follow-up commit, not an amend). Agreed — a real boundary leak,
+and a sharp catch: `mark_consumed` was the one method taking a full path rather than
+building it from `self.root`, so holding handle A proved nothing about a target under
+root B. `StoreHandle.mark_consumed` now calls a new `_require_within_store(path)` that
+resolves both the path and `self.root` (so `..`/symlinks can't smuggle a target out)
+and raises `ValueError` unless the target is within the handle's store tree. Chose the
+"prove ownership before mutating" direction over reshaping the API to `(project,
+filename)` because it keeps the caller ergonomics step 3 expects (pass a
+`Document.file_path` from *this* handle's `list_raw`) while closing the hole.
+
+New regression test `test_method_mark_consumed_rejects_path_outside_the_handle_store`:
+handle A refuses to mutate a raw file living under an independent store B, and B's raw
+stays unconsumed. The other 14 methods were re-audited — all build their path from
+`self.root` (or take a `cwd` used only to resolve/register against `self.root`'s own
+registry), so `mark_consumed` was the only path-taking surface; no sibling fix needed.
+
+Full gate green after the fix (35 store-handle tests; `1117 passed, 1 skipped`;
+`store_handle.py` 100% cov). Ready for round 2.

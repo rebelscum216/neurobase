@@ -268,6 +268,28 @@ def test_method_mark_consumed_hides_from_unconsumed_list(handle: StoreHandle) ->
     assert handle.list_raw("proj", unconsumed_only=True) == []
 
 
+def test_method_mark_consumed_rejects_path_outside_the_handle_store(
+    handle: StoreHandle, tmp_path: Path
+) -> None:
+    # F1: a second, independent store B with a real raw file of its own.
+    other = open_store(tmp_path / "other-store", StoreMode.WRITE)
+    other.ensure_tree("proj")
+    foreign = other.write_raw(
+        "proj",
+        agent="claude",
+        session_id="sid1",
+        cwd="/tmp/repo",
+        branch="main",
+        captured_at=WHEN,
+        body="fact in store B",
+    )
+    # Handle A (fixture, rooted elsewhere) must refuse to mutate store B's file.
+    with pytest.raises(ValueError, match="outside this handle's store"):
+        handle.mark_consumed(foreign)
+    # Store B's raw is untouched — still unconsumed.
+    assert len(other.list_raw("proj", unconsumed_only=True)) == 1
+
+
 def test_method_upsert_then_list_curated_round_trip(handle: StoreHandle) -> None:
     handle.ensure_tree("proj")
     handle.upsert_curated("proj", "a-fact", "the body", provenance=["raw/x.md"])

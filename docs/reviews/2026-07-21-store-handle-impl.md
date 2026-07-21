@@ -1,6 +1,6 @@
 ---
 slug: store-handle-impl
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-store-handle
@@ -81,4 +81,25 @@ schema guard here).
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+No findings. I reviewed `git diff main...HEAD` against ADR-0015 D23-D26, ADR-0016
+D28, spec §10's schema guard, and the existing store/doctor behavior. The new
+`open_store()` is additive and callerless as claimed; READ/DOCTOR do not create
+metadata, WRITE/MIGRATE create via the existing `ensure_store_metadata()` path,
+newer schemas fail closed except for DOCTOR/PURGE, PURGE tolerates corrupt
+metadata, the handle carries `profile`, and direct construction is blocked by the
+token guard.
+
+Residual risk: `DOCTOR` mode still raises on genuinely corrupt `store.toml`
+metadata. That is documented in the brief and implementation; future doctor wiring
+must catch/report that error to preserve doctor-as-reporting-surface behavior, but
+it does not break this step-1 callerless slice.
+
+Verification run:
+- `git diff main...HEAD`
+- `uv run pytest tests/test_store_handle.py -q` — 25 passed
+- `uv run python scripts/ci.py` — ruff, format check, mypy, and pytest passed;
+  `1107 passed, 1 skipped`, total coverage `91.30%`
+
+**Verdict:** approve — the StoreHandle chokepoint implementation matches the
+accepted step-1 contract, with focused tests covering the mode matrix and
+construction enforcement.

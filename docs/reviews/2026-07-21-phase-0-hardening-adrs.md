@@ -118,6 +118,79 @@ their consistency, not prose:
 
 > Run the diff and review the actual decisions. One entry per finding.
 
-_(awaiting review)_
+### F1 — major — `docs/adr/0017-egress-policy-gate.md:52`
 
-**Verdict:** _pending._
+`authorize_egress()` is supposed to enforce per-project policy (`privacy`,
+`allowed_brains`, and `allow_*` live on the project records ADR-0016 introduces),
+but the proposed signature only receives a profile-qualified `StoreHandle` plus
+purpose/backend/payload metadata. ADR-0016's D28 handle carries `profile`, not a
+project record, and the source plan's gate included an explicit `project:
+ProjectPolicy` parameter. In a reachable schema-2 store with two projects in the
+same profile but different privacy values — for example one `local-only`, one
+`default` — the gate cannot know which project's policy to apply, so the type-token
+enforcement can still authorize against the wrong/default policy. Suggested
+direction: make project identity/policy an explicit part of the egress decision
+contract (or deliberately make `StoreHandle` project-qualified too, and update
+ADR-0016/D28 accordingly). For cross-project purposes, define whether the gate takes
+multiple project records and fails closed if any participant denies.
+- **resolution:** _(Author)_ resolved (round 2). ADR-0017 D33 now takes an explicit
+  `projects: Sequence[ProjectRecord]` — project policy is passed, **never inferred
+  from the handle** (a profile can hold projects with different privacy). Chose the
+  explicit-param route over a project-qualified handle *because* cross-project mining
+  spans multiple projects, so a single-project handle can't model it. Added the
+  cross-project rule: all participants passed, decision is **most-restrictive / fail
+  closed** — any `local-only`, denied backend, or differing non-null `client_id`
+  (§12.2.2) → `DENY`, no "authorize against profile default" path. Cross-referenced
+  from ADR-0016 D28.
+
+### F2 — major — `docs/adr/0016-store-schema-2-project-records-profiles.md:134`
+
+The migration contract says it preserves proposal and ledger history "verbatim"
+while also back-filling `event_id` ULIDs into existing ledger events. Current ledger
+lines have no `event_id` (`src/neurobase/recommender/proposals.py:439` writes only
+`at`, `slug`, `event`, and optional `candidate_type`), so an implementation cannot
+both leave the JSONL history byte-for-byte intact and add the new field. If it
+rewrites existing lines, append-only/verbatim history is broken; if it does not,
+schema-2's "every appended event carries a stable ULID" invariant has a legacy hole
+that future sync/merge code must special-case. Suggested direction: choose and
+document one migration rule explicitly: allow a one-time backed-up ledger rewrite,
+create a sidecar legacy-event-id map, or declare pre-schema-2 ledger events as a
+named legacy exception with reader behavior.
+- **resolution:** _(Author)_ resolved (round 2). Took the **one-time backed-up
+  rewrite** option and removed the contradictory "verbatim." D31 now states migration
+  rewrites the ledger exactly once, under its full backup, assigning deterministic
+  ULIDs (line-order + content) to legacy events — preserving every event's order,
+  content, and meaning but explicitly **not** a byte-for-byte copy. D29 now scopes the
+  append-only invariant to *normal operation*, naming migration as the single
+  sanctioned exception, so the ULID invariant is hole-free (no legacy special-case
+  for sync).
+
+### F3 — minor — `docs/adr/0016-store-schema-2-project-records-profiles.md:117`
+
+`match_subpath` resolution is specified as "longest prefix" of the cwd's relative
+path, but the ADR does not say that the match is path-segment bounded and normalized.
+For monorepos this is a privacy/isolation boundary: a naive string-prefix
+implementation would let `apps/web-old` match a `match_subpath = "apps/web"` record
+and resolve to the wrong project/profile. Existing root matching uses
+`Path.relative_to()` to avoid this class of prefix bug; D30 should pin the same
+shape for subpaths. Suggested direction: define `match_subpath` as a normalized
+relative directory path, reject absolute/`..` entries, and match only when the cwd
+relative path equals that subpath or is contained under it.
+- **resolution:** _(Author)_ resolved (round 2). D30 now pins **path-segment-bounded**
+  matching via `Path.relative_to`: `match_subpath` is a normalized relative dir
+  (absolute/`..` rejected at registry write); a record matches only when the
+  cwd-relative path **equals or is contained under** it as whole segments, so
+  `match_subpath = "apps/web"` matches `apps/web` and `apps/web/ui` but never
+  `apps/web-old`. Longest `match_subpath` wins.
+
+Verification run:
+Reviewed `git diff main...HEAD`, ADRs 0016–0018, the ADR index, and the ratified
+decision note against the hardening plan draft (§9, §10, §12, §16, §25),
+ADR-0015, spec §10/§13, and the cited current code paths. D-number continuity
+checks out as D27–D38 with no collision. `uv run python scripts/ci.py` passed with
+ruff, format check, mypy, and `1082 passed, 1 skipped`, combined coverage `91.21%`.
+
+**Verdict:** changes-requested — the ADR set captures the ratified Phase-0 direction
+overall, but the egress gate is missing the project policy input it needs to enforce
+its central guarantee, and the schema-2 migration contract is internally impossible
+as written.

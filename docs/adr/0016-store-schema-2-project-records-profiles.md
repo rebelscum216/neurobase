@@ -89,7 +89,11 @@ def open_store(
 artifact targets are addressed **through** the handle's profile, so cross-profile
 access is a different handle, not a path the caller assembles. Markdown stays
 inspectable in one place; isolation is a type-level property of the handle, matching
-ADR-0015's "omission is a type error" posture. Choosing logical over physical
+ADR-0015's "omission is a type error" posture. The handle is scoped to a *profile*,
+not a single project — a profile can hold several project records with different
+privacy — so per-project policy is resolved from the records (D27) and passed
+**explicitly** to the egress gate, never inferred from the handle
+([ADR-0017](0017-egress-policy-gate.md) D33, F1). Choosing logical over physical
 partitions keeps ADR-0015's single-root model intact (a physical split would mean
 multiple roots, multiple handles, and heavier cross-profile tooling for no privacy
 gain that in-API enforcement doesn't already give).
@@ -102,7 +106,11 @@ multi-machine sync (§16.3.3) can merge without a schema change:
   generated once at write. ULIDs are lexically sortable and collision-free across
   machines without coordination.
 - Append-only ledger semantics are **generalized** from the recommender's existing
-  JSONL to a shared `core` append helper — never rewrite a line, only append.
+  JSONL to a shared `core` append helper — never rewrite a line, only append. This is
+  the **normal-operation** invariant; the schema-1→2 migration (D31) is the single
+  sanctioned, backed-up exception that rewrites the ledger once to assign ULIDs to
+  pre-schema-2 events, after which every event — legacy included — carries one, so a
+  future sync has **no legacy `event_id` hole** to special-case.
 - Curated facts and nodes carry a **content hash** in frontmatter so a future sync
   can detect a genuine conflict (two machines edited the same fact) versus an
   identical copy, and mark conflicts `disputed` rather than silently merging.
@@ -112,13 +120,20 @@ retrofit do.
 
 **D30 — Monorepo subproject resolution (`match_subpath`).** `resolve_project()`
 ([`core/projects.py:105`](../../src/neurobase/core/projects.py)) already collapses
-worktrees to the git common root and longest-prefix-matches. It gains a second
-dimension: after selecting candidate records by git common root, pick the one whose
-`match_subpath` is the **longest prefix of the cwd's path relative to that root**.
-Two records can share a `roots` entry and differ only by `match_subpath`, giving
-`apps/web` and `apps/api` isolated memories inside one repo. An empty
-`match_subpath` matches the whole repo (the current behavior, preserved as the
-default).
+worktrees to the git common root and longest-prefix-matches on roots. It gains a
+second dimension: after selecting candidate records by git common root, pick the one
+whose `match_subpath` **contains** the cwd. Two records can share a `roots` entry and
+differ only by `match_subpath`, giving `apps/web` and `apps/api` isolated memories
+inside one repo. An empty `match_subpath` matches the whole repo (the current
+behavior, preserved as the default).
+
+`match_subpath` is **path-segment bounded, not a string prefix** _(added in review —
+F3)._ It is a normalized relative directory path; absolute or `..`-bearing values are
+rejected at registry write. A record matches only when the cwd's path *relative to
+the root* **equals `match_subpath` or is contained under it as whole segments** —
+computed with `Path.relative_to`, exactly as the existing root match avoids the same
+bug class. So `match_subpath = "apps/web"` matches `apps/web` and `apps/web/ui` but
+**never** `apps/web-old`. Among matching records, the longest `match_subpath` wins.
 
 **D31 — Migration mechanics (uses ADR-0015's reserved `MIGRATE` mode).** A new
 `neurobase store migrate`:
@@ -131,8 +146,16 @@ default).
 - Preserves every current active fact as `status: active`, `scope: project`,
   conservative sensitivity; assigns each project record `profile = default_profile`,
   `privacy = "default"`; leaves derived indexes ([ADR-0018] / FTS) absent until
-  rebuilt; preserves proposal and ledger history verbatim (back-filling `event_id`
-  ULIDs deterministically from existing line order + content).
+  rebuilt.
+- **Rewrites the ledger exactly once, under the backup above** _(clarified in review —
+  F2)._ Pre-schema-2 events have no `event_id` (today's `_append_ledger` writes only
+  `at`/`slug`/`event`/`candidate_type`), so migration is the one place they get a
+  deterministic ULID (derived from line order + content). This preserves every
+  event's **order, content, and meaning** — none are dropped or reordered — but it is
+  a genuine one-time rewrite, not a byte-for-byte copy. It is sanctioned precisely
+  because migration is explicit and fully backed up; the append-only invariant (D29)
+  governs *normal operation*, which this is not. The result is the hole-free ULID
+  invariant D29 relies on.
 - Old binary refuses schema 2 (already true); new binary refuses normal operation
   on a schema-1 store except to offer migration.
 

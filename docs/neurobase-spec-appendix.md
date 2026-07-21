@@ -1727,6 +1727,14 @@ resources + the recall prompt are **Claude-only sugar**, gated off by default.
 - Every tool is **fail-soft**: a missing store, bad slug, or unreadable file
   yields an empty/structured result, never an unhandled exception. The only
   hard error is `memory_remember` with empty input or no resolvable project.
+- An unsupported or unreadable `store.toml` MUST NOT prevent server startup and
+  MUST NOT make `resources/list` error. The server captures that incompatibility
+  once; every tool call returns an MCP `CallToolResult` with `isError: true` and
+  structured content containing
+  `{"error":{"code":"unsupported_store_schema","message":"..."}}`. List-valued
+  tools may also include `"result": []` to satisfy their declared output schema.
+  A malformed `registry.toml` is not a schema incompatibility and retains the
+  empty-result behavior above (ADR-0015 D24).
 - Read tools default to **all projects** when `project` is omitted (decision
   D-c — the server can't trust a single session cwd for reads). The write tool
   resolves a project from the process launch cwd, else an explicit `project`.

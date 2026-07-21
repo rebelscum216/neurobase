@@ -133,6 +133,27 @@ async def _round_trip(root: Path, cwd: Path, env: dict[str, str]) -> tuple[str, 
         return init.serverInfo.name, sorted(t.name for t in tools.tools), payload
 
 
+async def _unsupported_schema_round_trip(
+    root: Path, cwd: Path, env: dict[str, str]
+) -> tuple[list[types.Resource], types.CallToolResult]:
+    argv = _serve_argv(root)
+    params = StdioServerParameters(
+        command=argv[0],
+        args=argv[1:],
+        env=env,
+        cwd=str(cwd),
+    )
+    timeout = timedelta(seconds=_TIMEOUT_SECONDS)
+    async with (
+        stdio_client(params) as (read_stream, write_stream),
+        ClientSession(read_stream, write_stream, read_timeout_seconds=timeout) as session,
+    ):
+        await session.initialize()
+        resources = await session.list_resources()
+        called = await session.call_tool("memory_search", {"query": "anything"})
+        return resources.resources, called
+
+
 def test_stdio_handshake_lists_tools_and_round_trips_a_call(tmp_path: Path) -> None:
     """The shipped entrypoint really speaks MCP: a client that knows nothing but
     the protocol can initialize, discover the five baseline tools, and get a
@@ -151,6 +172,28 @@ def test_stdio_handshake_lists_tools_and_round_trips_a_call(tmp_path: Path) -> N
     assert tool_names == _EXPECTED_TOOLS
     assert payload["found"] is True
     assert payload["body"] == _NODE_BODY
+
+
+def test_stdio_unsupported_schema_returns_structured_tool_error(tmp_path: Path) -> None:
+    root = tmp_path / "store-root"
+    root.mkdir()
+    (root / "store.toml").write_text(
+        f"schema = {store.STORE_SCHEMA_VERSION + 1}\n",
+        encoding="utf-8",
+    )
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+
+    async def _run() -> tuple[list[types.Resource], types.CallToolResult]:
+        with anyio.fail_after(_TIMEOUT_SECONDS):
+            return await _unsupported_schema_round_trip(root, cwd, _child_env(tmp_path, root))
+
+    resources, called = anyio.run(_run)
+
+    assert resources == []
+    assert called.isError is True
+    assert called.structuredContent is not None
+    assert called.structuredContent["error"]["code"] == "unsupported_store_schema"
 
 
 # --- clean shutdown ------------------------------------------------------

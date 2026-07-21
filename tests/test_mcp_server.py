@@ -14,6 +14,7 @@ from typing import Any
 
 import anyio
 import pytest
+from mcp.types import CallToolResult
 
 from neurobase.core import projects, store
 from neurobase.core.config import Config, McpConfig
@@ -91,6 +92,69 @@ def test_resources_list_populated_when_on_with_nodes(root: Path, tmp_path: Path)
 def test_resources_list_valid_on_empty_store(root: Path) -> None:
     # No store at all, dual-exposure on ⇒ still a valid empty array, no error.
     assert anyio.run(_server(root, expose=True).list_resources) == []
+
+
+def _write_unsupported_schema(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "store.toml").write_text(
+        f"schema = {store.STORE_SCHEMA_VERSION + 1}\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        f"schema = {store.STORE_SCHEMA_VERSION + 1}\n",
+        "this is [not valid toml",
+    ],
+)
+def test_incompatible_store_metadata_keeps_server_and_resources_list_alive(
+    root: Path, metadata: str
+) -> None:
+    root.mkdir(parents=True)
+    (root / "store.toml").write_text(metadata, encoding="utf-8")
+
+    srv = _server(root, expose=True)
+
+    assert anyio.run(srv.list_resources) == []
+    assert sorted(tool.name for tool in anyio.run(srv.list_tools)) == [
+        "memory_list_projects",
+        "memory_read_node",
+        "memory_remember",
+        "memory_search",
+        "recommendations_list",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "list_result"),
+    [
+        ("memory_search", {"query": "anything"}, True),
+        ("memory_read_node", {"project": "alpha", "name": "status"}, False),
+        ("memory_list_projects", {}, True),
+        ("memory_remember", {"fact": "remember this", "project": "alpha"}, False),
+        ("recommendations_list", {}, True),
+    ],
+)
+def test_unsupported_schema_returns_structured_error_from_every_tool(
+    root: Path,
+    tool: str,
+    arguments: dict,
+    list_result: bool,
+) -> None:
+    _write_unsupported_schema(root)
+    srv = _server(root)
+
+    result = anyio.run(srv.call_tool, tool, arguments)
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "unsupported_store_schema"
+    assert "newer than this binary supports" in result.structuredContent["error"]["message"]
+    if list_result:
+        assert result.structuredContent["result"] == []
 
 
 # --- memory_search -------------------------------------------------------

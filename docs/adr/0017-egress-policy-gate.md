@@ -1,6 +1,6 @@
 # ADR-0017: Central egress policy — one `authorize_egress()` gate every brain call passes
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-21
 - **Resolves:** hardening plan §9 ([plan draft](../notes/2026-07-21-hardening-plan-draft.md), [ratified decisions](../notes/2026-07-21-hardening-decisions.md)); Issue 3
 - **Supersedes:** none — builds on the project records of [ADR-0016](0016-store-schema-2-project-records-profiles.md)

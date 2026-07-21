@@ -1,6 +1,6 @@
 # ADR-0016: Store schema 2 — project-record registry, logical profiles, forward-compatible identifiers
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-21
 - **Resolves:** hardening plan §12 / §16 / §25 ([plan draft](../notes/2026-07-21-hardening-plan-draft.md), [ratified decisions](../notes/2026-07-21-hardening-decisions.md)); Issues 6 + 10
 - **Supersedes:** none — extends the (accepted, unimplemented) `StoreHandle` of [ADR-0015](0015-store-chokepoint-handle.md)

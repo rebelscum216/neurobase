@@ -1,6 +1,6 @@
 # ADR-0018: Hook receipts and degraded-state reporting — make fail-soft visible
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-21
 - **Resolves:** hardening plan §10 ([plan draft](../notes/2026-07-21-hardening-plan-draft.md), [ratified decisions](../notes/2026-07-21-hardening-decisions.md)); Issue 4
 - **Supersedes:** none — builds on the `StoreHandle` of [ADR-0015](0015-store-chokepoint-handle.md) and the schema-2 layout of [ADR-0016](0016-store-schema-2-project-records-profiles.md)

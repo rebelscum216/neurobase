@@ -25,6 +25,7 @@ from typing import Any
 
 from neurobase.brain.base import Brain, BrainError, combine_prompt
 from neurobase.core import linkify, store
+from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 from neurobase.curator import budget as budget_mod
 from neurobase.curator import distill as distill_mod
 
@@ -175,18 +176,18 @@ def _pinned_slugs(docs: list[store.Document]) -> set[str]:
     }
 
 
-def _safe_soft_delete(root: Path, project: str, slug: str) -> bool:
+def _safe_soft_delete(handle: StoreHandle, project: str, slug: str) -> bool:
     """Tombstone ``slug`` if it exists and is a valid slug; return whether it
     was. Missing files / bad slugs are skipped, never fatal."""
     try:
-        store.soft_delete_curated(root, project, slug)
+        handle.soft_delete_curated(project, slug)
     except (FileNotFoundError, store.InvalidSlugError):
         return False
     return True
 
 
 def _apply_upserts(
-    root: Path, project: str, upserts: list[dict[str, Any]]
+    handle: StoreHandle, project: str, upserts: list[dict[str, Any]]
 ) -> tuple[set[str], list[str]]:
     """Apply upserts (spec §2 step 4). Returns (upserted slugs, superseded
     slugs to tombstone). Empty slug/body skipped; supersedes filtered of self;
@@ -202,9 +203,7 @@ def _apply_upserts(
         from_raw = [r for r in (upsert.get("from_raw") or []) if r]
         provenance = [f"raw/{name}" for name in from_raw]
         try:
-            store.upsert_curated(
-                root, project, slug, body, provenance=provenance, supersedes=supersedes
-            )
+            handle.upsert_curated(project, slug, body, provenance=provenance, supersedes=supersedes)
         except store.InvalidSlugError:
             continue  # bad slug ⇒ skip + warn (the model occasionally emits one)
         upserted.add(slug)
@@ -212,18 +211,20 @@ def _apply_upserts(
     return upserted, superseded
 
 
-def _synthesize(root: Path, project: str, brain: Brain) -> None:
+def _synthesize(handle: StoreHandle, project: str, brain: Brain) -> None:
     """Regenerate the status node from active facts, rebuild the index, linkify
     (spec §2 step 8). Node is a pure function of ``curated/``."""
-    active = store.list_curated(root, project)
+    active = handle.list_curated(project)
     if not active:
         body = "# (no active facts)\n\n_Nothing curated yet._"
     else:
         payload = json.dumps({"active_facts": _facts_payload(active)}, ensure_ascii=False)
         body = _strip_outer_fence(brain.text(NODE_SYSTEM, payload).strip())
-    store.write_node(root, project, node_name(project), body)
-    store.rebuild_index(root, project)
-    linkify.linkify(root, project)
+    handle.write_node(project, node_name(project), body)
+    handle.rebuild_index(project)
+    # linkify is not yet on the handle (its own step-3 module); pass the validated
+    # root the handle already carries.
+    linkify.linkify(handle.root, project)
 
 
 def _strip_outer_fence(text: str) -> str:
@@ -240,8 +241,8 @@ def _strip_outer_fence(text: str) -> str:
     return text
 
 
-def _log_pass(root: Path, project: str, summary: dict[str, Any]) -> None:
-    mem = store.memory_dir(project, root)
+def _log_pass(handle: StoreHandle, project: str, summary: dict[str, Any]) -> None:
+    mem = handle.memory_dir(project)
     mem.mkdir(parents=True, exist_ok=True)
     record = {**summary, "at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}
     with (mem / CURATOR_LOG).open("a", encoding="utf-8") as fh:
@@ -269,7 +270,13 @@ def curate(
     bounded — there is no unbounded path — while the CLI passes the much
     smaller automatic tier for hook-triggered runs.
     """
-    store.ensure_tree(project, root)
+    # curate always intends to mutate, so obtain a WRITE handle up front: it runs
+    # the D11 schema guard (a newer-schema store raises, exactly as the old
+    # ensure_tree → ensure_store_metadata did) and ensures store.toml; ensure_tree
+    # then creates the project subdirs. Every store/registry access below goes
+    # through this validated handle.
+    handle = open_store(root, StoreMode.WRITE)
+    handle.ensure_tree(project)
     if pass_budget is None:
         pass_budget = budget_mod.explicit_budget()
 
@@ -282,7 +289,7 @@ def curate(
 
     if resynth:
         try:
-            _synthesize(root, project, brain)
+            _synthesize(handle, project, brain)
         except budget_mod.BudgetExhausted:
             # The budget stopped the resynth: `active_facts` may be stale
             # relative to what a completed resynth would have produced.
@@ -290,21 +297,21 @@ def curate(
             # word rather than claiming `resynth` succeeded (Codex F1).
             summary = {
                 "status": "partial",
-                "active_facts": len(store.list_curated(root, project)),
+                "active_facts": len(handle.list_curated(project)),
                 "error": "budget exhausted before resynth completed",
                 **pass_budget.summary(),
             }
-            _log_pass(root, project, summary)
+            _log_pass(handle, project, summary)
             return summary
-        summary = {"status": "resynth", "active_facts": len(store.list_curated(root, project))}
-        _log_pass(root, project, summary)
+        summary = {"status": "resynth", "active_facts": len(handle.list_curated(project))}
+        _log_pass(handle, project, summary)
         return summary
 
-    raw_docs = store.list_raw(root, project, unconsumed_only=True)
+    raw_docs = handle.list_raw(project, unconsumed_only=True)
     if not raw_docs:
-        active = len(store.list_curated(root, project))
+        active = len(handle.list_curated(project))
         summary = {"status": "noop", "raw": 0, "active_facts": active}
-        _log_pass(root, project, summary)
+        _log_pass(handle, project, summary)
         return summary
 
     # Every brain call from here on goes through the wrapper bound above, so no
@@ -339,7 +346,7 @@ def curate(
     while remaining:
         # Reload after every committed batch: later plans must see facts added,
         # updated, superseded, or tombstoned by earlier batches.
-        curated = store.list_curated(root, project)
+        curated = handle.list_curated(project)
         try:
             batch_docs, user_payload = _next_plan_batch(curated, remaining, plan_payload_max_bytes)
         except ValueError as exc:
@@ -378,10 +385,10 @@ def curate(
         upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]
 
         # Step 4: upserts + tombstone superseded (unless re-upserted / pinned).
-        upserted, superseded_slugs = _apply_upserts(root, project, upserts)
+        upserted, superseded_slugs = _apply_upserts(handle, project, upserts)
         upsert_count += len(upserted)
         superseded_count += sum(
-            _safe_soft_delete(root, project, slug)
+            _safe_soft_delete(handle, project, slug)
             for slug in dict.fromkeys(superseded_slugs)
             if slug not in upserted and slug not in pinned
         )
@@ -391,12 +398,12 @@ def curate(
             slug = str(entry.get("slug", "")).strip()
             if not slug or slug in upserted or slug in pinned:
                 continue
-            if _safe_soft_delete(root, project, slug):
+            if _safe_soft_delete(handle, project, slug):
                 tombstone_count += 1
 
         # Step 6 per batch: the plan was valid and its state is durable.
         for doc in batch_docs:
-            store.mark_consumed(doc.file_path)
+            handle.mark_consumed(doc.file_path)
         remaining = remaining[len(batch_docs) :]
 
     if dry_run:
@@ -408,7 +415,7 @@ def curate(
                 **distill_counts,
                 "error": plan_error,
             }
-            _log_pass(root, project, summary)
+            _log_pass(handle, project, summary)
             return summary
         dry_summary: dict[str, Any] = {
             "status": "dry-run",
@@ -433,7 +440,7 @@ def curate(
             **distill_counts,
             "error": plan_error,
         }
-        _log_pass(root, project, summary)
+        _log_pass(handle, project, summary)
         return summary
 
     # Steps 7/8 run whenever at least one batch committed — including when a
@@ -441,7 +448,7 @@ def curate(
     # is what recall injects, so skipping synthesis here would hide every fact
     # the successful batches wrote until some future pass happened to succeed —
     # and a permanently-failing raw would make that "never" (D22).
-    pruned = store.prune_tombstones(root, project, older_than_days=tombstone_grace_days)
+    pruned = handle.prune_tombstones(project, older_than_days=tombstone_grace_days)
 
     # Per spec §2's partial-failure contract, ANY failure here — brain error, a
     # malformed sibling node tripping the index rebuild, a linkify/disk error —
@@ -459,7 +466,7 @@ def curate(
     # special case was the bug.
     synth_error: str | None = None
     try:
-        _synthesize(root, project, brain)
+        _synthesize(handle, project, brain)
     except Exception as exc:  # noqa: BLE001 - spec §2: keep applied state, log, return partial
         synth_error = str(exc)
 
@@ -485,7 +492,7 @@ def curate(
         "superseded": superseded_count,
         "tombstones": tombstone_count,
         "pruned_tombstones": len(pruned),
-        "active_facts": len(store.list_curated(root, project)),
+        "active_facts": len(handle.list_curated(project)),
         **pass_budget.summary(),
     }
     if unconsumed_left:
@@ -494,7 +501,7 @@ def curate(
         summary["error"] = plan_error
     if synth_error is not None:
         summary["synth_error" if plan_error is not None else "error"] = synth_error
-    _log_pass(root, project, summary)
+    _log_pass(handle, project, summary)
     return summary
 
 
@@ -502,7 +509,8 @@ def is_stale(root: Path, project: str, hours: int) -> bool:
     """True if any unconsumed raw is older than ``hours`` (decision D8's
     ``--if-stale`` gate)."""
     cutoff = datetime.now(UTC).timestamp() - hours * 3600
-    for doc in store.list_raw(root, project, unconsumed_only=True):
+    handle = open_store(root, StoreMode.READ)
+    for doc in handle.list_raw(project, unconsumed_only=True):
         captured_at = doc.get("captured_at")
         if not captured_at:
             continue
@@ -518,7 +526,8 @@ def is_stale(root: Path, project: str, hours: int) -> bool:
 def read_fact_count_trend(root: Path, project: str, last: int = 5) -> list[int]:
     """The tail of the active-fact-count trend from the curator log (the bloat
     alarm `status` shows). Missing/short log ⇒ what's available."""
-    log_path = store.memory_dir(project, root) / CURATOR_LOG
+    handle = open_store(root, StoreMode.READ)
+    log_path = handle.memory_dir(project) / CURATOR_LOG
     if not log_path.exists():
         return []
     counts: list[int] = []

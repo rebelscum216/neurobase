@@ -26,9 +26,10 @@ from neurobase.adapters.scribe_common import (
     bullet,
     final_summary,
 )
-from neurobase.core import projects, store
+from neurobase.core import store
 from neurobase.core.config import load_config
 from neurobase.core.redact import redact
+from neurobase.core.store_handle import StoreMode, open_store
 
 __all__ = [
     "MAX_ASSISTANT_MSG_CHARS",
@@ -266,15 +267,19 @@ def scribe(
 
     # cwd from the hook payload takes precedence over the rollout's.
     resolve_cwd = Path(cwd or parsed["cwd"] or ".").expanduser()
-    project = projects.resolve_project(root, resolve_cwd)
+    # D11: inspect through a READ handle first — it validates the schema (a
+    # newer-schema store raises → fail closed) without writing, so an untracked or
+    # opted-out capture never creates store.toml as a side effect. The WRITE handle
+    # (below) is opened only once we commit to writing.
+    try:
+        handle = open_store(root, StoreMode.READ)
+    except store.UnsupportedSchemaError:
+        return None  # fail closed — never operate on an incompatible store
+    project = handle.resolve_project(resolve_cwd)
     if project is None:
         return None  # untracked directory
-    if not store.memory_dir(project, root).exists():
+    if not handle.memory_dir(project).exists():
         return None  # opt-in: no tree ⇒ write nothing
-    try:
-        store.ensure_store_metadata(root)  # D11: refuse a newer-schema store
-    except store.UnsupportedSchemaError:
-        return None  # fail closed — never write into an incompatible store
 
     prompts: list[str] = parsed["prompts"]
     summary: str = parsed["summary"]
@@ -299,9 +304,12 @@ def scribe(
     sid = session_id or parsed["session_id"]
     started = _parse_started_at(parsed["started_at"])
     transcript = scrub(str(rollout_path))
+    # Commit through a WRITE handle. The tree exists, so store.toml exists and this
+    # only re-validates; a partial store (tree but no store.toml) is created here,
+    # exactly as the old ensure_store_metadata guard did.
+    writer = open_store(root, StoreMode.WRITE)
     try:
-        return store.write_raw(
-            root,
+        return writer.write_raw(
             project,
             agent="codex",
             session_id=sid,
@@ -314,8 +322,7 @@ def scribe(
     except store.RawConsumedError:
         # The session's raw was already folded mid-session; write a fresh
         # capture under a new filename (spec §1 mutability rule).
-        return store.write_raw(
-            root,
+        return writer.write_raw(
             project,
             agent="codex",
             session_id=sid,

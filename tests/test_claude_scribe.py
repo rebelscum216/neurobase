@@ -30,6 +30,30 @@ def _write_transcript(path: Path, events: list[dict]) -> Path:
     return path
 
 
+def test_untracked_capture_creates_no_store_toml(tmp_path: Path) -> None:
+    # ADR-0015 step 3: the scribe inspects via a READ handle before writing, so an
+    # untracked directory must return None without creating store.toml.
+    root = tmp_path / "store"
+    repo = tmp_path / "loose"
+    repo.mkdir()
+    transcript = _write_transcript(tmp_path / "t.jsonl", FIXTURE_EVENTS)
+    assert scribe.scribe(root, transcript_path=transcript, cwd=str(repo), reason="x") is None
+    assert not (root / "store.toml").exists()
+
+
+def test_registered_but_opted_out_creates_no_store_toml(tmp_path: Path) -> None:
+    # Registered but no memory tree ⇒ opt-out. The READ-handle inspect must not
+    # create store.toml the way the old ensure_store_metadata guard could.
+    root = tmp_path / "store"
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
+    projects.register_project(root, repo, slug="myrepo")  # registry only, no ensure_tree
+    transcript = _write_transcript(tmp_path / "t.jsonl", FIXTURE_EVENTS)
+    assert scribe.scribe(root, transcript_path=transcript, cwd=str(repo), reason="x") is None
+    assert not (root / "store.toml").exists()
+
+
 # The §11.1 fixture, verbatim in shape.
 FIXTURE_EVENTS = [
     {

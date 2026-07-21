@@ -453,6 +453,144 @@ the internal marker to hook subprocesses. Healthy automatic passes also remain
 unbounded by a total call/raw/time budget. The hook stays disabled until those
 remaining acceptance criteria are resolved and independently reviewed.
 
+## Live spike: Claude marker propagation (2026-07-20)
+
+Required test 8 (Claude half) and the P0 marker-propagation open question were
+resolved by a real, disposable-store spike. Method: a scratch git repo and a
+scratch `NEUROBASE_ROOT` store (`/private/tmp/neurobase-marker-spike`, deleted
+after), a project-scoped `<repo>/.claude/settings.json` installed via the real
+`neurobase init --agent claude --cwd <repo> --yes` (no edits to the real
+`~/.claude/settings.json`), then two real `claude -p` invocations from that
+repo with `NEUROBASE_ROOT` pointed at the scratch store:
+
+1. **Control** (marker unset): `claude -p "Reply with exactly: ack"
+   --output-format json --max-turns 1`. A raw was captured to the scratch
+   store (`.../memory/raw/2026-07-20T21-07-43Z_claude_1e0c90ed.md`), proving
+   the harness genuinely exercises the real `SessionEnd` hook.
+2. **Marked** (`NEUROBASE_INTERNAL_CALL=1` set before the same `claude -p`
+   call — i.e. exactly what `claude_cli.py`'s `internal_call_env()` produces):
+   no new raw appeared. `run_hook()` (`cli/__init__.py:1204`) is the single
+   dispatch point for every Claude/Codex hook event and checks
+   `is_internal_call()` before any parsing, stdin read, capture, or spawn
+   (`cli/__init__.py:1208`), so this one observation covers `SessionStart`'s
+   spawn-suppression too — there is no separate code path for it to take.
+
+No stale raw was needed to make this a meaningful test: since the guard
+returns before any branching on event type, proving `SessionEnd` capture is
+suppressed proves the marker is visible to the child process at all, which is
+the only unproven fact — the pre-existing unit/integration tests already cover
+what the code does once the marker is known to be present. `ps aux` after both
+runs showed no stray `curate`/`claude -p` process. Cost: two short `claude -p`
+round-trips (~$0.30 total, per the CLI's own `total_cost_usd`).
+
+**Result: Claude reliably propagates `NEUROBASE_INTERNAL_CALL` to hook
+subprocesses it spawns for its own headless `-p` sessions.** This closes the
+Claude half of the P0 marker-propagation design. The Codex half (`codex exec`
+propagating the same marker) is still unproven — Codex was not installed on
+the spike machine — and remains open before Codex-selected automatic curation
+can be considered safe under the same-agent hook/backend pairing.
+
+## Live spike: Codex marker propagation (2026-07-20) — FAILED
+
+The Codex half was run immediately after, once Codex was available on this
+machine (a stale `~/.local/bin/codex` symlink pointed at a deleted ChatGPT
+extension version and had to be re-pointed to the current one first). Method
+mirrored the Claude spike exactly: a scratch git repo + scratch `NEUROBASE_ROOT`
+store (`/private/tmp/neurobase-marker-spike-codex`, deleted after), project-scoped
+`<repo>/.codex/hooks.json` installed via `neurobase init --agent codex --cwd
+<repo> --yes`, then two real `codex exec --json <prompt>` invocations from
+that repo with `NEUROBASE_ROOT` pointed at the scratch store.
+
+Two real, unplanned side effects surfaced during setup, both corrected before
+the test ran: (1) because Codex's project→hooks wiring always lives in the
+global `~/.codex/config.toml` (never purely project-local, unlike Claude), the
+install added a `[projects."<scratch path>"]` table to the user's real global
+config — reverted surgically after the spike, leaving the user's other config
+(including state Codex itself wrote during the session, like
+`[tui.model_availability_nux]`) untouched; (2) running `neurobase init` via
+this dev checkout's `uv run neurobase` rewrote the real global
+`[mcp_servers.neurobase]` command path from the installed tool binary to this
+checkout's dev venv — caught and restored before any Codex invocation. Separately,
+this setup revealed that **user-scoped Codex `SessionStart`/`Stop` hooks were
+already installed and already trusted on this machine** (`~/.codex/hooks.json`,
+wired via a pre-existing `[projects."/Users/andrewsmith"]` table with a
+`trusted_hash` already recorded) — predating this session, live in production,
+not something this spike set up. Checking it did not fire during unrelated
+Codex use in `~/Projects/neurobase` during this session confirmed Codex's
+project matching is **exact-path, not ancestor/prefix-based**: a `hooks =` entry
+keyed to `/Users/andrewsmith` does not apply to `/Users/andrewsmith/Projects/neurobase`
+even though the latter is a trusted sub-path. `~/Projects/neurobase` itself
+has never had Codex hooks installed for it, so no capture occurred there.
+
+Codex's hooks trust gate is stricter than Claude's: editing project-scoped
+`hooks.json` invalidates its `trusted_hash` and Codex silently no-ops the hook
+until a real interactive `codex` session in that directory approves it (no
+prompt appears for headless `codex exec`; it just doesn't fire). The user ran
+one interactive `codex` session in the scratch repo for this sole purpose,
+confirmed by new `trusted_hash` entries appearing under `[hooks.state]` for
+both `session_start` and `stop`.
+
+With trust established, the two real `codex exec` calls were run:
+
+1. **Control** (marker unset): `codex exec --json "Reply with exactly: ack"`.
+   A raw was captured (`.../memory/raw/2026-07-20T21-21-17Z_codex_019f8167.md`),
+   confirming the harness genuinely exercises the real `Stop` hook.
+2. **Marked** (`NEUROBASE_INTERNAL_CALL=1` set before the same `codex exec`
+   call — exactly what `codex_cli.py`'s `internal_call_env()` produces): **a
+   new raw was still captured**
+   (`.../memory/raw/2026-07-20T21-21-28Z_codex_019f8167.md`, `session_id:
+   019f8167-c00a-...` — matching the marked run's own thread ID, prompt
+   "Reply with exactly: ack2", not a stale artifact of the control run).
+
+**Result: unlike Claude, Codex does NOT propagate `NEUROBASE_INTERNAL_CALL` to
+the hook subprocess it spawns for its own `codex exec` sessions.** The P0
+environment-marker design is confirmed broken for Codex specifically. Since
+`run_hook()`'s `is_internal_call()` gate is the single, shared guard for both
+capture and automatic-curation spawn (`cli/__init__.py:1208`), this same
+failure would also fail to suppress a detached `curate --if-stale` spawn from
+a Codex-triggered `SessionStart`, if one existed for the tested project —
+i.e. the marker gives Codex-selected automatic curation no real protection
+against the original incident's exact recursive-capture failure mode. `ps aux`
+showed no stray process after either call — this specific test had no stale
+raw to trigger a spawn, so the spawn half wasn't separately exercised, but
+nothing in the failed-guard evidence suggests it would behave differently.
+
+**Current live exposure on this machine is low but non-zero:** `doctor`
+confirms `auto` brain selection currently resolves to `claude-cli` (tried
+first in `AUTO_ORDER`, and Claude is on `PATH`), not `codex-cli`, so this
+specific failure mode isn't presently being exercised in the background. But
+the pre-existing, already-trusted user-scoped `~/.codex/hooks.json` means
+the instant `codex-cli` is ever selected (Claude CLI becomes unavailable, or a
+user explicitly configures `brain.backend = "codex-cli"`) for any project with
+Codex hooks wired, this exact unguarded recursion becomes live — with no code
+change required to trigger it.
+
+**Follow-up: RESOLVED, 2026-07-21.** Option (a) existed: `codex exec --help`
+lists `--ignore-user-config` ("Do not load `$CODEX_HOME/config.toml`; auth
+still uses `CODEX_HOME`"). Codex's user- and project-scoped hook wiring
+lives entirely in `config.toml` (that's the whole reason a project-scoped
+`hooks.json` isn't self-discovering — the config table must reference it), so
+skipping that file's load means Codex never discovers any hook to fire at all
+— a stronger guarantee than a marker-gated no-op, since the hook subprocess
+never runs in the first place. A third live spike (same disposable-store
+method: fresh scratch repo/store, project-scoped hooks re-installed and
+re-trusted) confirmed it directly: a control `codex exec` call captured a raw
+as expected; the same call with `--ignore-user-config` added captured nothing,
+with no marker involved at all. `codex_cli.py`'s `_once()` now always passes
+`--ignore-user-config` (`cmd = ["codex", "exec", "--ignore-user-config",
+"--json", prompt]`), pinned by
+`tests/test_brain_codex_cli.py::test_invokes_with_ignore_user_config_to_suppress_hook_reentrancy`.
+This also means Codex's headless brain calls no longer inherit the user's
+configured model/effort, MCP servers, or other `config.toml` settings — judged
+an acceptable, arguably desirable, side effect for a one-shot internal
+instruction call, not something the curator needs. `NEUROBASE_INTERNAL_CALL`
+is left in place for Codex too (harmless, still gates Neurobase's own
+`run_hook()` dispatch as defense in depth) even though it's now known Codex
+itself never reads it. The interim mitigation of avoiding `codex-cli` as an
+automatic-curation brain is no longer necessary once this fix ships; `doctor`
+same-agent-pairing observability (P1) remains a good idea but is no longer
+the safety boundary.
+
 ## Required regression and live tests
 
 1. Twenty concurrent `curate --if-stale` processes for one project result in at
@@ -496,10 +634,18 @@ Decisions already made:
 
 Open questions requiring implementation spikes or product decisions:
 
-- Do Claude and Codex reliably propagate an internal environment marker to hook
-  subprocesses on all supported platforms?
-- Do current CLI versions provide a supported per-invocation way to disable
-  hooks, and is that preferable to an environment marker?
+- ~~Do Claude and Codex reliably propagate an internal environment marker to
+  hook subprocesses on all supported platforms?~~ **Claude: confirmed via live
+  spike, 2026-07-20** (see "Live spike: Claude marker propagation" above).
+  **Codex: does not propagate the marker (tested, 2026-07-20)** — but this is
+  moot, see below.
+- ~~Do current CLI versions provide a supported per-invocation way to disable
+  hooks, and is that preferable to an environment marker?~~ **Yes for Codex,
+  RESOLVED 2026-07-21**: `codex exec --ignore-user-config` skips loading
+  `~/.codex/config.toml` entirely, where all hook wiring lives, so Codex never
+  discovers a hook to fire — confirmed via a third live spike and now always
+  passed by `codex_cli.py`. See "Follow-up: RESOLVED" above. Claude has no
+  equivalent need since its marker already propagates correctly.
 - Should automatic curation be off by default for all subscription CLI brains,
   or only for the same-agent hook/backend pairing?
 - What call and raw budgets are useful without making routine curation too slow?

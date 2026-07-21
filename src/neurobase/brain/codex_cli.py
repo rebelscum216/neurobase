@@ -4,6 +4,16 @@ Shells out to ``codex exec --json <prompt>``, which streams JSONL events; the
 model's answer is the ``text`` of the last ``item.completed`` event whose
 ``item.type == "agent_message"``. Runs strictly as the user's own logged-in
 CLI (decision D9's ToS rule).
+
+``--ignore-user-config`` is load-bearing, not an optimization: a live spike
+(2026-07-20/21, see ``docs/notes/2026-07-17-claude-usage-runaway-incident.md``)
+proved Codex does **not** propagate ``NEUROBASE_INTERNAL_CALL`` to hooks it
+spawns for its own headless sessions, so the env-marker guard that protects
+Claude gives Codex no protection at all. Hook wiring (both user- and
+project-scoped) lives entirely in ``~/.codex/config.toml``; skipping that file
+means Codex never discovers any hooks to fire, which a second live spike
+confirmed suppresses capture even with the marker absent. Do not remove this
+flag without an equivalent live re-verification.
 """
 
 from __future__ import annotations
@@ -75,7 +85,7 @@ class CodexCLIBrain:
         self._runner = runner
 
     def _once(self, prompt: str) -> str:
-        cmd = ["codex", "exec", "--json", prompt]
+        cmd = ["codex", "exec", "--ignore-user-config", "--json", prompt]
         try:
             proc = self._runner(cmd, timeout=self._timeout)
         except subprocess.TimeoutExpired as exc:

@@ -1,6 +1,6 @@
 # ADR-0015: Store chokepoint — a validated `StoreHandle` every path must obtain
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-21
 - **Resolves:** G1 ([known-gaps](../known-gaps.md)); the D11 schema guard (spec §10)
 - **Supersedes:** none

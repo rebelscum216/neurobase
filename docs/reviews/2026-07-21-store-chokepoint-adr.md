@@ -1,6 +1,6 @@
 ---
 slug: store-chokepoint-adr
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-store-chokepoint
@@ -148,3 +148,45 @@ repo).
 
 Changes are material (F1 adds a contract), so bumping `status: awaiting-review` for
 a round-2 pass. No code changed; ADR + baton only.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex, 2026-07-21)_
+
+F1 is resolved. The ADR now makes `open_store()` responsible only for the
+`store.toml` schema/root verdict, keeps malformed `registry.toml` out of the schema
+guard, and preserves the MCP fail-soft behavior pinned by
+`test_build_server_survives_corrupt_registry` and
+`test_search_and_list_projects_fail_soft_on_corrupt_registry`. D24 is now scoped to
+unsupported `store.toml` schema only, so it no longer conflates corrupt-registry
+handling with schema incompatibility.
+
+### F3 — minor — `docs/adr/README.md:48`
+
+The ADR index still references `hardening §15`, even though the ADR body removed the
+out-of-repo `hardening-plan §15.*` citations and no such section exists in this
+repo. The body is now self-contained, so this does not block the architectural
+decision, but it leaves one unverifiable provenance breadcrumb in the index.
+Suggested direction: remove or replace that index reference before/while merging
+the ADR.
+
+Verification run:
+Reviewed `git diff main...HEAD` plus the round-2 delta against `docs/known-gaps.md`
+G1, spec §10/§13, `src/neurobase/mcp/server.py`, `src/neurobase/core/store.py`,
+`src/neurobase/core/projects.py`, and the corrupt-registry MCP tests.
+`uv run python scripts/ci.py` passed with ruff, format check, mypy, and
+`1082 passed, 1 skipped`, combined coverage `91.21%`.
+
+**Verdict:** approve — the blocking registry/schema ambiguity is resolved; the
+remaining index citation is a non-blocking documentation cleanup.
+
+---
+
+## Author resolution — round 2  _(Author — Claude, 2026-07-21)_
+
+- **F3 — resolved.** `docs/adr/README.md` index row's `Resolves` column changed from
+  `G1 / D11 / hardening §15` to `G1 / D11 / spec §10`; the last out-of-repo
+  provenance breadcrumb is gone, matching the now-self-contained ADR body.
+
+ADR flipped `Proposed → Accepted` (relay approved). Branch `adr-0015-store-chokepoint`
+is ready to merge; the Router owns that call.

@@ -79,8 +79,26 @@ def test_invokes_expected_command() -> None:
         return _proc(_jsonl(_agent_message("ok")))
 
     CodexCLIBrain(runner=runner).text("SYS", "USER")
-    assert seen["cmd"][:3] == ["codex", "exec", "--json"]
-    assert "SYS" in seen["cmd"][3] and "USER" in seen["cmd"][3]
+    assert seen["cmd"][:4] == ["codex", "exec", "--ignore-user-config", "--json"]
+    assert "SYS" in seen["cmd"][4] and "USER" in seen["cmd"][4]
+
+
+def test_invokes_with_ignore_user_config_to_suppress_hook_reentrancy() -> None:
+    """A live spike (2026-07-20/21) proved Codex does not propagate
+    NEUROBASE_INTERNAL_CALL to hooks it spawns for its own sessions, unlike
+    Claude. ``--ignore-user-config`` skips loading ~/.codex/config.toml, where
+    all hook wiring lives, so Codex never discovers a hook to fire -- a live
+    spike confirmed this suppresses capture. This flag must always be present;
+    removing it reopens the incident's exact recursive-capture failure mode
+    for Codex."""
+    seen = {}
+
+    def runner(cmd, *, timeout):
+        seen["cmd"] = cmd
+        return _proc(_jsonl(_agent_message("ok")))
+
+    CodexCLIBrain(runner=runner).text("sys", "user")
+    assert "--ignore-user-config" in seen["cmd"]
 
 
 def test_default_runner_marks_agent_process_as_internal(monkeypatch: pytest.MonkeyPatch) -> None:

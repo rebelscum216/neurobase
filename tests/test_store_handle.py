@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from neurobase.core import store
+from neurobase.core import projects, store
 from neurobase.core.store import STORE_SCHEMA_VERSION, UnsupportedSchemaError
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
@@ -205,3 +206,101 @@ def test_token_field_excluded_from_equality_and_repr(root: Path) -> None:
     b = open_store(root, StoreMode.READ)
     assert a == b  # _token is compare=False, so two validated handles compare equal
     assert "_token=" not in repr(a)  # repr=False keeps the token field out of repr
+
+
+# --- handle method surface (step 2): each delegates to the root-taking store/
+# registry function, targeting the handle's validated root ------------------
+
+WHEN = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def handle(root: Path) -> StoreHandle:
+    return open_store(root, StoreMode.WRITE)  # WRITE so store.toml exists
+
+
+def test_method_memory_dir_targets_handle_root(handle: StoreHandle, root: Path) -> None:
+    assert handle.memory_dir("proj") == store.memory_dir("proj", root)
+    assert handle.memory_dir("proj") == root / "projects" / "proj" / "memory"
+
+
+def test_method_ensure_tree_creates_subdirs(handle: StoreHandle, root: Path) -> None:
+    mem = handle.ensure_tree("proj")
+    for sub in ("raw", "curated", "nodes", ".tombstones"):
+        assert (mem / sub).is_dir()
+
+
+def test_method_raw_path_matches_store(handle: StoreHandle, root: Path) -> None:
+    assert handle.raw_path("proj", WHEN, "claude", "sid123") == store.raw_path(
+        root, "proj", WHEN, "claude", "sid123"
+    )
+
+
+def test_method_write_raw_then_list_raw_round_trip(handle: StoreHandle) -> None:
+    handle.ensure_tree("proj")
+    handle.write_raw(
+        "proj",
+        agent="claude",
+        session_id="sid1",
+        cwd="/tmp/repo",
+        branch="main",
+        captured_at=WHEN,
+        body="a captured fact",
+    )
+    docs = handle.list_raw("proj")
+    assert len(docs) == 1
+    assert docs[0].body == "a captured fact"
+    assert docs[0].get("agent") == "claude"
+
+
+def test_method_mark_consumed_hides_from_unconsumed_list(handle: StoreHandle) -> None:
+    handle.ensure_tree("proj")
+    path = handle.write_raw(
+        "proj",
+        agent="claude",
+        session_id="sid1",
+        cwd="/tmp/repo",
+        branch="main",
+        captured_at=WHEN,
+        body="fact",
+    )
+    handle.mark_consumed(path)
+    assert handle.list_raw("proj", unconsumed_only=True) == []
+
+
+def test_method_upsert_then_list_curated_round_trip(handle: StoreHandle) -> None:
+    handle.ensure_tree("proj")
+    handle.upsert_curated("proj", "a-fact", "the body", provenance=["raw/x.md"])
+    docs = handle.list_curated("proj")
+    assert [d.get("name") for d in docs] == ["a-fact"]
+    assert docs[0].body == "the body"
+
+
+def test_method_soft_delete_and_prune_curated(handle: StoreHandle) -> None:
+    handle.ensure_tree("proj")
+    handle.upsert_curated("proj", "a-fact", "body")
+    handle.soft_delete_curated("proj", "a-fact")
+    assert handle.list_curated("proj") == []  # tombstoned, not active
+    # nothing is older than the grace period yet, so prune removes nothing
+    assert handle.prune_tombstones("proj", older_than_days=14) == []
+
+
+def test_method_write_node_and_rebuild_index(handle: StoreHandle, root: Path) -> None:
+    handle.ensure_tree("proj")
+    node_path = handle.write_node("proj", "a-node", "# A node\n\nbody")
+    assert node_path.exists()
+    index_path = handle.rebuild_index("proj")
+    assert "a-node" in index_path.read_text(encoding="utf-8")
+
+
+def test_method_registry_register_and_resolve(
+    handle: StoreHandle, tmp_path: Path, root: Path
+) -> None:
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    slug = handle.register_project(repo, slug="myrepo")
+    assert slug == "myrepo"
+    # the handle method reads the same registry the root-taking function writes
+    assert handle.load_registry() == projects.load_registry(root)
+    assert "myrepo" in handle.load_registry()
+    assert handle.resolve_project(repo) == "myrepo"

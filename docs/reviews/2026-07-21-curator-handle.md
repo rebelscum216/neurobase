@@ -1,6 +1,6 @@
 ---
 slug: curator-handle
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-curator-handle
@@ -82,4 +82,18 @@ MCP/D24, recommender, CLI/doctor D26 (later step-3 modules); removing the root-t
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+No findings. I reviewed `git diff main...HEAD` against the prior
+`curator/engine.py` control flow and the ADR-0015 handle boundary. The store
+access refactor preserves the existing D9/D22 consume/error/partial semantics:
+raws still come from the same `handle.list_raw(project)` path that later feeds
+`handle.mark_consumed(doc.file_path)`, distillation keeps `file_path` when it
+substitutes bodies, and the deferred `distill_docs(root, ...)` /
+`linkify.linkify(handle.root, ...)` edges are scoped follow-ups rather than
+accidental unguarded store mutations in this patch.
+
+Verification:
+- `uv run pytest tests/test_curator.py tests/test_curate_budget.py tests/test_distill.py tests/test_cross_agent.py tests/test_curate_to_recommend.py -q`
+- `uv run python scripts/ci.py` (ruff, format check, mypy, pytest + coverage:
+  1122 passed, 1 skipped)
+
+**Verdict:** approve

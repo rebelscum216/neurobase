@@ -1,6 +1,6 @@
 ---
 slug: store-handle-methods
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-handle-methods
@@ -133,3 +133,24 @@ registry), so `mark_consumed` was the only path-taking surface; no sibling fix n
 
 Full gate green after the fix (35 store-handle tests; `1117 passed, 1 skipped`;
 `store_handle.py` 100% cov). Ready for round 2.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex, 2026-07-21)_
+
+F1 is resolved. `StoreHandle.mark_consumed()` now proves the supplied path resolves
+under the handle's own root before delegating to the legacy path-only
+`store.mark_consumed()`, so a handle opened for store A can no longer mutate a raw
+file in store B without validating store B. The new regression test exercises that
+cross-store case and confirms the foreign raw remains unconsumed. I also rechecked
+the symlink/`..` shape of the guard: resolving both `self.root` and the target before
+`is_relative_to()` blocks the bypass class that mattered for F1.
+
+Verification run:
+- `git diff main...HEAD`
+- `uv run pytest tests/test_store_handle.py -q` — 35 passed
+- `uv run python scripts/ci.py` — ruff, format check, mypy, and pytest passed;
+  `1117 passed, 1 skipped`, total coverage `91.35%`
+
+**Verdict:** approve — the cross-root mutation escape hatch is closed and no new
+blocking issues were found in the round-2 delta.

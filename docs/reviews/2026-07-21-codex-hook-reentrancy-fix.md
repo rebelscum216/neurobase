@@ -1,6 +1,6 @@
 ---
 slug: codex-hook-reentrancy-fix
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: fix-codex-hook-reentrancy-ignore-user-config
@@ -124,4 +124,28 @@ since the hook subprocess never runs at all. Confirmed live: a control
 
 > Run the diff and review the actual code. One entry per finding.
 
-**Verdict:** _(pending)_
+### F1 — nit — `docs/notes/2026-07-17-claude-usage-runaway-incident.md:570`
+
+The follow-up note says "Both Claude's and Codex's hook wiring for a project
+lives entirely in `config.toml`", but Claude project hooks are installed in
+`.claude/settings.json`; the config-table/self-discovery rationale here applies
+to Codex. This does not undermine the fix, because the `--ignore-user-config`
+claim only needs to suppress Codex's own hook discovery, and the live spike plus
+the new argv shape support that. Suggested direction: narrow the sentence to
+"Codex's user- and project-scoped hook wiring" so the incident note does not
+overstate the Claude side.
+
+- **resolution:** resolved — reworded to "Codex's user- and project-scoped
+  hook wiring lives entirely in `config.toml`", dropping the incorrect claim
+  about Claude.
+
+Verification run:
+`codex exec --help` on the locally installed `codex-cli 0.145.0-alpha.18`
+confirms `--ignore-user-config` is an `exec` option and says auth still uses
+`CODEX_HOME`. `uv run pytest tests/test_brain_codex_cli.py -q` passed with 10
+tests. `uv run python scripts/ci.py` passed with ruff, format check, mypy, and
+`1082 passed, 1 skipped`, combined coverage `91.21%`.
+
+**Verdict:** approve — the command now includes the load-bearing
+`--ignore-user-config` flag, the regression test pins it, and I found no
+correctness-blocking issue in the hook-reentrancy fix.

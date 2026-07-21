@@ -567,7 +567,7 @@ change required to trigger it.
 
 **Follow-up: RESOLVED, 2026-07-21.** Option (a) existed: `codex exec --help`
 lists `--ignore-user-config` ("Do not load `$CODEX_HOME/config.toml`; auth
-still uses `CODEX_HOME`"). Both Claude's and Codex's hook wiring for a project
+still uses `CODEX_HOME`"). Codex's user- and project-scoped hook wiring
 lives entirely in `config.toml` (that's the whole reason a project-scoped
 `hooks.json` isn't self-discovering — the config table must reference it), so
 skipping that file's load means Codex never discovers any hook to fire at all

@@ -67,3 +67,19 @@ def test_default_cap_is_6000_when_config_absent(enabled: tuple[Path, Path]) -> N
     ctx = claude_recall.build_context(root, repo)
     assert ctx is not None
     assert "small body" in ctx
+
+
+def test_read_recall_does_not_create_store_toml(tmp_path: Path) -> None:
+    # ADR-0015: build_context now opens a READ handle, which never writes. A
+    # project can be registered (registry.toml) before the store is initialized
+    # (no store.toml); recall must read as empty and must NOT create store.toml as
+    # a side effect the way the old ensure_store_metadata guard call did.
+    root = tmp_path / "store"
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
+    projects.register_project(root, repo, slug="myrepo")  # writes registry.toml only
+    assert not (root / "store.toml").exists()
+
+    assert recall_common.build_context(root, repo) is None  # no nodes → inject nothing
+    assert not (root / "store.toml").exists()  # READ recall wrote nothing

@@ -15,8 +15,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from neurobase.core import projects, store
+from neurobase.core import store
 from neurobase.core.config import load_config
+from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
 # Fallback cap when config can't be read; the real cap is [inject].max_chars
 # (spec §8/§10 — 6000 default, config-overridable).
@@ -32,9 +33,9 @@ HEADER = (
 _JOINER = "\n\n---\n\n"
 
 
-def _node_bodies(root: Path, project: str) -> list[str]:
+def _node_bodies(handle: StoreHandle, project: str) -> list[str]:
     """Active status-node bodies, alphabetical by node name (spec §3)."""
-    nodes_dir = store.memory_dir(project, root) / "nodes"
+    nodes_dir = handle.memory_dir(project) / "nodes"
     if not nodes_dir.exists():
         return []
     bodies = []
@@ -69,23 +70,25 @@ def _assemble(header: str, bodies: list[str], cap: int = MAX_CONTEXT_CHARS) -> s
 
 def build_context(root: Path, cwd: Path) -> str | None:
     """The ``additionalContext`` string for this cwd, or ``None`` (⇒ emit
-    nothing) on no-project / no-nodes. Callers treat any exception as ``None``."""
-    project = projects.resolve_project(root, cwd)
-    if project is None:
-        return None
-    # D11: refuse to read from a store whose schema is newer than we support —
-    # the hook fails closed (inject nothing), never operates on an incompatible
-    # store (spec §10). Reached only for an established project, so store.toml
-    # exists; a newer schema raises and we emit nothing.
+    nothing) on no-project / no-nodes / incompatible store. Callers treat any
+    exception as ``None``."""
+    # D11 (spec §10): obtain a READ handle up front — the schema guard runs once
+    # here, at the store boundary. A store newer than we support raises, so the
+    # hook fails closed (injects nothing) and never reads an incompatible store.
+    # An uninitialized store opens as empty and simply yields no nodes. READ never
+    # writes, so recall no longer creates store.toml as a side effect (ADR-0015).
     try:
-        store.ensure_store_metadata(root)
+        handle = open_store(root, StoreMode.READ)
     except store.UnsupportedSchemaError:
         return None
-    bodies = _node_bodies(root, project)
+    project = handle.resolve_project(cwd)
+    if project is None:
+        return None
+    bodies = _node_bodies(handle, project)
     if not bodies:
         return None
     cap = load_config().inject.max_chars  # spec §10: config-overridable
-    header = HEADER.format(memory_dir=store.memory_dir(project, root))
+    header = HEADER.format(memory_dir=handle.memory_dir(project))
     return _assemble(header, bodies, cap)
 
 

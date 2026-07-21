@@ -194,3 +194,58 @@ ruff, format check, mypy, and `1082 passed, 1 skipped`, combined coverage `91.21
 overall, but the egress gate is missing the project policy input it needs to enforce
 its central guarantee, and the schema-2 migration contract is internally impossible
 as written.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex, 2026-07-21)_
+
+F2 and F3 are resolved. D31 now explicitly permits a one-time backed-up ledger
+rewrite during migration, and D29 scopes append-only to normal operation, so the
+ULID migration contract is internally consistent. D30 now uses normalized,
+path-segment-bounded `Path.relative_to` semantics, which closes the `apps/web` vs.
+`apps/web-old` isolation hole.
+
+### F4 — major — `docs/adr/0017-egress-policy-gate.md:67`
+
+F1 is improved but not fully resolved: the ADR now passes `projects:
+Sequence[ProjectRecord]` to `authorize_egress()`, but it still does not bind that
+sequence to the actual payload provenance. A caller building a cross-project miner
+payload can omit the `local-only` source record (or pass a safer/default record) and
+still receive an `ALLOW`; the later `Brain.plan_json` / `text` token check only
+proves that *some* project records were authorized, not that they are the records
+whose content is in the payload. The proposed CI AST check catches backend calls
+that bypass the gate, but it cannot catch a gate call with an incomplete or wrong
+project list. The new `client_id` clause has the same gap: the ADR says
+participants carry a non-null `client_id`, but ADR-0016's `ProjectRecord` fields do
+not define `client_id`, while the hardening plan places `client_id` in fact metadata
+(`§12.2.1`), so the gate has no specified source of truth for that fail-closed rule.
+Suggested direction: make payload provenance part of the typed authorization
+contract, e.g. `PayloadMetadata`/an `EgressRequest` carries source project slugs and
+fact-level client IDs, and `authorize_egress()` verifies the passed records exactly
+cover those sources before issuing a token; or introduce an `AuthorizedPayload`
+builder that constructs the payload and project-record set together. Also pin
+whether `client_id` lives on project records or fact metadata.
+- **resolution:** _(Author)_ resolved (round 3). Reworked D33 around your first
+  option. The gate now takes a single `EgressRequest` whose `PayloadProvenance`
+  (source project slugs + fact-level `client_id`s) is **derived from the payload by
+  the assembler that packs it — not declared by the caller**, so a source can't be
+  under-declared without dropping its content. `authorize_egress` **resolves the
+  `ProjectRecord`s itself** from those source slugs (caller no longer chooses records;
+  an unresolvable source fails closed), applies most-restrictive, and returns an
+  `AuthorizedPayload` whose token is **bound to a hash of the exact payload bytes** —
+  so authorize-A-send-B and partial-source authorization both fail. Extended the CI
+  AST check to forbid assembling a backend payload outside the assembler module, not
+  just backend calls outside the gate. Pinned `client_id` to **fact metadata**
+  (§12.2.1, written by the Issue-6 classifier, a Phase-1 ADR); it is **inert in Phase
+  0** (no such metadata yet) while mode/backend rules stay active — recorded so the
+  source-of-truth is explicit. ADR-0016 D28 cross-ref updated to match.
+
+Verification run:
+Reviewed the round-2 delta (`fb10117...HEAD`) and the full `git diff main...HEAD`
+against the hardening decisions note, hardening plan §9/§12/§16/§25, ADR-0015, and
+the current code paths cited in the ADRs. `uv run python scripts/ci.py` passed with
+ruff, format check, mypy, and `1082 passed, 1 skipped`, combined coverage `91.21%`.
+
+**Verdict:** changes-requested — the ledger and monorepo corrections are good, but
+the egress gate still does not make its central per-project authorization guarantee
+enforceable for payloads with mixed project/fact provenance.

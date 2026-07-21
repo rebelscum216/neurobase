@@ -91,9 +91,10 @@ access is a different handle, not a path the caller assembles. Markdown stays
 inspectable in one place; isolation is a type-level property of the handle, matching
 ADR-0015's "omission is a type error" posture. The handle is scoped to a *profile*,
 not a single project — a profile can hold several project records with different
-privacy — so per-project policy is resolved from the records (D27) and passed
-**explicitly** to the egress gate, never inferred from the handle
-([ADR-0017](0017-egress-policy-gate.md) D33, F1). Choosing logical over physical
+privacy — so per-project policy is **not** read off the handle. The egress gate
+resolves each source project's record (D27) from the payload's *derived* provenance
+(the source project slugs it actually draws from), never from the handle's profile
+alone ([ADR-0017](0017-egress-policy-gate.md) D33). Choosing logical over physical
 partitions keeps ADR-0015's single-root model intact (a physical split would mean
 multiple roots, multiple handles, and heavier cross-profile tooling for no privacy
 gain that in-API enforcement doesn't already give).

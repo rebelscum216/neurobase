@@ -49,45 +49,63 @@ The ratified scope (§27 Q3) is a **minimal** first policy schema:
 first:
 
 ```python
-def authorize_egress(
-    store: StoreHandle,               # the profile partition (ADR-0016 D28)
-    projects: Sequence[ProjectRecord],  # the project(s) whose content is in the payload
-    purpose: EgressPurpose,
-    backend: BrainDescriptor,
-    payload: PayloadMetadata,         # sizes, redaction counts — not the raw text
-) -> EgressDecision:                  # ALLOW | DENY | REQUIRE_LOCAL_DLP
+@dataclass(frozen=True)
+class PayloadProvenance:                  # DERIVED from payload content, not declared
+    source_project_slugs: frozenset[str]  # every project whose content is in the payload
+    fact_client_ids: frozenset[str]       # distinct fact-level client_ids present
+
+@dataclass(frozen=True)
+class EgressRequest:
+    purpose: EgressPurpose
+    backend: BrainDescriptor
+    payload: str                          # the exact string that will be sent
+    provenance: PayloadProvenance
+    meta: PayloadMetadata                 # sizes, redaction counts — not the raw text
+
+def authorize_egress(store: StoreHandle, request: EgressRequest) -> AuthorizedPayload:
+    ...                                   # raises EgressDenied on DENY
 ```
 
-- **Project policy is an *explicit* input, not inferred from the handle** _(added in
-  review — F1)._ A `StoreHandle` is profile-qualified (D28), but one profile can hold
-  several projects with *different* privacy modes (a `local-only` project and a
-  `default` project under `open-source`). The `privacy`/`allowed_brains`/`allow_*`
-  policy lives on the **project record** (ADR-0016 D27), so the gate must be told
-  which project(s) the payload draws from — it cannot read that off the handle's
-  profile alone. The caller resolves the record(s) from the registry (via the handle)
-  and passes them; passing the wrong or a default record is the omission the
-  type-token enforcement below is meant to make impossible.
-- **Cross-project purposes take every participant and fail closed** _(F1)._ A
-  single-project purpose passes exactly one record. A cross-project purpose
-  (`recommend-mine --cross-project`) passes **all** participating records, and the
-  decision is the **most restrictive** across them: if *any* participant is
-  `local-only`, denies the backend, or (per §12.2.2) carries a different non-null
-  `client_id`, the whole call is `DENY`. There is no "authorize against the profile
-  default" path — the payload is only as authorized as its least-authorized source.
-- **No caller may invoke a backend without an `ALLOW`.** Enforced the ADR-0015 way:
-  the `Brain.plan_json` / `text` call path takes the decision (or a token proving it)
-  so a bare backend invocation does not type-check, and a **CI AST check** forbids
-  constructing a backend outside the gate module.
+- **Provenance is *derived from the payload*, never declared by the caller** _(added
+  in review — F1 → F4)._ The single payload **assembler** (the corpus/evidence loader
+  that packs the bytes) emits `PayloadProvenance` from the *same content it packs* —
+  the set of source project slugs and the distinct fact-level `client_id`s actually
+  present. A caller cannot under-declare a `local-only` source without also dropping
+  its content, because provenance and payload come from one pass. This is what closes
+  the confused-deputy gap in the earlier "pass a `projects` list" shape: a hand-passed
+  list could omit or soften a source; a derived provenance cannot.
+- **The gate resolves records itself; the caller does not choose them** _(F4)._
+  `authorize_egress` looks up each `source_project_slug`'s `ProjectRecord` from the
+  registry via the handle (ADR-0016 D27). There is no "pass a safer/default record"
+  path — the records evaluated are exactly the payload's real sources, and a source
+  slug with **no** resolvable record fails closed (`EgressDenied`).
+- **Most-restrictive across sources; `client_id` source-of-truth pinned** _(F4)._ The
+  decision is the least-authorized source: if any source project is `local-only`,
+  denies the backend, or the payload mixes **≥2 distinct non-null `fact_client_ids`**
+  (§12.2.2), the whole request is denied. `client_id` lives on **fact metadata**, not
+  the project record — it is a field the scope/sensitivity classifier writes
+  (hardening §12.2.1, Issue 6, a *Phase-1* ADR). Until that metadata exists,
+  `fact_client_ids` is empty and the client-id clause is **inert**; the mode/backend
+  rules are fully active in Phase 0. Recording the source-of-truth now keeps the gate
+  contract honest about what enforces the rule and when.
+- **The token binds to the exact payload** _(F4)._ On allow, the gate returns an
+  `AuthorizedPayload` carrying the decision + a hash of `request.payload`.
+  `Brain.plan_json` / `text` accepts **only** an `AuthorizedPayload` and re-checks the
+  hash against the bytes it sends — so authorize-payload-A-send-payload-B and
+  partial-source authorization both fail. The **CI AST check** forbids constructing a
+  backend outside the gate module *and* assembling a backend payload outside the
+  assembler module, so a gate call with a hand-built, wrong-provenance payload cannot
+  compile in the first place.
 - `EgressPurpose` is a closed enum — `curate-plan`, `curate-verify`, `scope-classify`,
   `transcript-distill`, `recall-rerank`, `recommend-mine`, `recommend-critic`,
   `evaluation-judge`, `health-diagnose`, `embed`. Every one of the shipping AI calls
   from the ratified decisions maps to exactly one purpose, so a policy can allow
   `curate-plan` while denying `evaluation-judge`.
-- The decision reads *only* the passed project record(s) + backend descriptor +
-  payload **metadata**. It is deterministic — never itself a model call (§17.4 forbids
-  an AI call deciding egress). `REQUIRE_LOCAL_DLP` is the seam for D34; with no DLP
-  model installed it collapses to `DENY` for a sensitive project and `ALLOW` for
-  `default`.
+- The decision reads *only* the resolved project record(s) + backend descriptor +
+  payload **metadata/provenance**. It is deterministic — never itself a model call
+  (§17.4 forbids an AI call deciding egress). `REQUIRE_LOCAL_DLP` is the seam for D34;
+  with no DLP model installed it collapses to `DENY` for a sensitive source and
+  `ALLOW` for an all-`default` request.
 
 **D34 — Semantic DLP is an interface-only extension point.** Ship the *contract*, no
 model (§27 Q4):

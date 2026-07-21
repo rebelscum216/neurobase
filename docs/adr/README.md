@@ -45,6 +45,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0012](0012-curator-plan-payload-batching.md) | Curator plan payloads use byte-budgeted sequential batches | Accepted | S-cf4 / D22 |
 | [0013](0013-capture-fidelity-event-shapes.md) | Live capture event shapes for richer deterministic skims | Accepted | S-cf1 / S-cf2 / S-cf3 |
 | [0014](0014-transcript-distill-curation.md) | Transcript-distill curation — Tier-2 capture fidelity (raw pointer + curate-time distill) | Accepted | S-cf5 / D15 / D16 / D17 |
+| [0015](0015-store-chokepoint-handle.md) | Store chokepoint — a validated `StoreHandle` every path must obtain (D23–D26) | Proposed | G1 / D11 / hardening §15 |
 
 All four Phase 0 spikes (S1, S2, S5, S6) are now closed. ADR-0004 was caught
 and reversed by Codex's own review of this repo's relay process — see

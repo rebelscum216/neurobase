@@ -46,6 +46,14 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0013](0013-capture-fidelity-event-shapes.md) | Live capture event shapes for richer deterministic skims | Accepted | S-cf1 / S-cf2 / S-cf3 |
 | [0014](0014-transcript-distill-curation.md) | Transcript-distill curation — Tier-2 capture fidelity (raw pointer + curate-time distill) | Accepted | S-cf5 / D15 / D16 / D17 |
 | [0015](0015-store-chokepoint-handle.md) | Store chokepoint — a validated `StoreHandle` every path must obtain (D23–D26) | Accepted | G1 / D11 / spec §10 |
+| [0016](0016-store-schema-2-project-records-profiles.md) | Store schema 2 — project-record registry, logical profiles, forward-compatible identifiers (D27–D31) | Proposed | Hardening §12/§16/§25 |
+| [0017](0017-egress-policy-gate.md) | Central egress policy — one `authorize_egress()` gate every brain call passes (D32–D35) | Proposed | Hardening §9 |
+| [0018](0018-hook-receipts-degraded-state.md) | Hook receipts and degraded-state reporting — make fail-soft visible (D36–D38) | Proposed | Hardening §10 |
+
+ADRs 0016–0018 are the three **Phase-0** decisions promoted from the
+[hardening plan](../notes/2026-07-21-hardening-plan-draft.md) (per the
+[ratified decisions](../notes/2026-07-21-hardening-decisions.md)); they are
+**Proposed**, pending the Claude↔Codex relay before Accepted.
 
 All four Phase 0 spikes (S1, S2, S5, S6) are now closed. ADR-0004 was caught
 and reversed by Codex's own review of this repo's relay process — see

@@ -1,6 +1,6 @@
 ---
 slug: phase-0-hardening-adrs
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: phase-0-hardening-adrs
@@ -249,3 +249,28 @@ ruff, format check, mypy, and `1082 passed, 1 skipped`, combined coverage `91.21
 **Verdict:** changes-requested — the ledger and monorepo corrections are good, but
 the egress gate still does not make its central per-project authorization guarantee
 enforceable for payloads with mixed project/fact provenance.
+
+---
+
+## Reviewer findings — round 3  _(Reviewer — Codex, 2026-07-21)_
+
+F4 is resolved. ADR-0017 now makes the authorization input a single
+`EgressRequest`, with `PayloadProvenance` derived by the payload assembler from the
+same content it packs, and `authorize_egress()` resolves the source
+`ProjectRecord`s itself. The returned `AuthorizedPayload` is bound to a hash of the
+exact payload bytes, and the CI check is extended to cover payload assembly as well
+as backend construction. That closes the prior path where a caller could authorize
+against an incomplete or softer project-record set, then send mixed-provenance
+content.
+
+No new findings.
+
+Verification run:
+Reviewed the round-3 delta (`822ddde...HEAD`) and the full `git diff main...HEAD`
+against the hardening decisions note, hardening plan §9/§12/§16/§25, ADR-0015, and
+the current code paths cited in the ADRs. `uv run python scripts/ci.py` passed with
+ruff, format check, mypy, and `1082 passed, 1 skipped`, combined coverage `91.21%`.
+
+**Verdict:** approve — the Phase-0 hardening ADRs now make the store/profile,
+egress, and hook-receipt contracts internally consistent and enforceable enough to
+guide the implementation PRs.

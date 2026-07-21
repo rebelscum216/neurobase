@@ -128,6 +128,29 @@ def test_doctor_reports_installed_hooks_and_trust(
     assert "✓ codex trust:" in result.output
 
 
+def test_doctor_recognizes_absolute_project_codex_trust_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_tools(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    hooks_path = repo / ".codex" / "hooks.json"
+    codex_install.write_hooks(hooks_path, codex_install.build_hooks({}, SHIM))
+    key = str(hooks_path).replace("\\", "\\\\")
+    cfg = codex_install.merge_config("", str(repo.resolve()))
+    cfg += (
+        f'\n[hooks.state]\n"{key}:session_start:0:0" = {{ trusted_hash = "abc" }}\n'
+        f'"{key}:stop:0:0" = {{ trusted_hash = "def" }}\n'
+    )
+    codex_install.write_config(tmp_path / "home" / ".codex" / "config.toml", cfg)
+
+    result = runner.invoke(app, ["doctor", "--cwd", str(repo)])
+
+    assert result.exit_code == 0
+    assert "✓ codex trust:" in result.output
+    assert "! codex trust:" not in result.output
+
+
 def test_doctor_warns_for_untrusted_codex_hook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

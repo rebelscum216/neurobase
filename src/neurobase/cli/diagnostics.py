@@ -257,14 +257,17 @@ def _codex_hooks_file_check(hooks_path: Path, shim: str, scope: str) -> tuple[Ch
     )
 
 
-def _codex_trust_check(parsed: dict | None, hooks_rel: str) -> Check:
+def _codex_trust_check(parsed: dict | None, hooks_refs: tuple[str, ...]) -> Check:
     state = _codex_hooks_state(parsed) if parsed is not None else {}
-    if _has_trusted_hash_for(state, hooks_rel, {"session_start", "stop"}):
-        return _check("codex trust", "ok", f"trusted_hash present for {hooks_rel}")
+    events = {"session_start", "stop"}
+    for hooks_ref in hooks_refs:
+        if _has_trusted_hash_for(state, hooks_ref, events):
+            return _check("codex trust", "ok", f"trusted_hash present for {hooks_ref}")
+    hooks_ref = hooks_refs[0]
     return _check(
         "codex trust",
         "warn",
-        f"no trusted_hash recorded for {hooks_rel}",
+        f"no trusted_hash recorded for {hooks_ref}",
         "Launch Codex in this repo and approve the hook prompt.",
     )
 
@@ -318,7 +321,12 @@ def _codex_hook_checks(cwd: Path, shim: str) -> list[Check]:
         hook_check, hooks_ok = _codex_hooks_file_check(project_hooks_path, shim, "project")
         checks.insert(0, hook_check)
         if hooks_ok:
-            checks.append(_codex_trust_check(parsed, codex_install.PROJECT_HOOKS_REL))
+            checks.append(
+                _codex_trust_check(
+                    parsed,
+                    (str(project_hooks_path), codex_install.PROJECT_HOOKS_REL),
+                )
+            )
         return checks
 
     hook_check, hooks_ok = _codex_hooks_file_check(user_hooks_path, shim, "user")
@@ -328,7 +336,7 @@ def _codex_hook_checks(cwd: Path, shim: str) -> list[Check]:
             checks = [check for check in checks if check.name != "codex config"]
             checks.append(_check("codex config", "ok", "user hooks are auto-discovered"))
         if hooks_ok:
-            checks.append(_codex_trust_check(parsed, str(user_hooks_path)))
+            checks.append(_codex_trust_check(parsed, (str(user_hooks_path),)))
         return checks
 
     project_hook_check, project_hooks_ok = _codex_hooks_file_check(
@@ -336,7 +344,12 @@ def _codex_hook_checks(cwd: Path, shim: str) -> list[Check]:
     )
     checks.insert(0, project_hook_check)
     if project_hooks_ok:
-        checks.append(_codex_trust_check(parsed, codex_install.PROJECT_HOOKS_REL))
+        checks.append(
+            _codex_trust_check(
+                parsed,
+                (str(project_hooks_path), codex_install.PROJECT_HOOKS_REL),
+            )
+        )
     return checks
 
 

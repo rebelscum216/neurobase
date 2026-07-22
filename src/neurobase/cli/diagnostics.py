@@ -19,6 +19,7 @@ from neurobase.brain import resolve_brain
 from neurobase.brain import select as brain_select
 from neurobase.core import projects, store
 from neurobase.core.config import Config
+from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
 Status = str
 
@@ -92,50 +93,68 @@ def _agent_check(binary: str, which: Callable[[str], str | None]) -> Check:
 def _store_checks(root: Path, cwd: Path) -> list[Check]:
     checks: list[Check] = []
     meta = store.store_toml_path(root)
-    if not meta.exists():
-        checks.append(
-            _check(
-                "store",
-                "warn",
-                f"{root} is not initialized yet",
-                "Run `neurobase enable` or interactive `neurobase init`.",
-            )
-        )
-    else:
-        try:
-            data = tomllib.loads(meta.read_text(encoding="utf-8"))
-            schema = data.get("schema")
-            if not isinstance(schema, int) or schema > store.STORE_SCHEMA_VERSION:
-                checks.append(
-                    _check(
-                        "store",
-                        "error",
-                        f"{meta}: unsupported schema {schema!r}",
-                        "Upgrade neurobase-cli before operating on this store.",
-                    )
-                )
-            else:
-                checks.append(_check("store", "ok", f"{root} (schema {schema})"))
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            checks.append(_check("store", "error", f"{meta} is unreadable or invalid: {exc}"))
-
+    # D26: doctor inspects store health through a DOCTOR handle. DOCTOR never
+    # writes store.toml and — unlike READ/WRITE — carries a schema *newer* than we
+    # support instead of raising, so doctor can *report* an unsupported schema
+    # rather than refuse. A genuinely-corrupt store.toml (unreadable / invalid
+    # TOML / missing-or-non-int schema) still raises UnsupportedSchemaError from
+    # open_store; doctor catches it and reports, never crashing — doctor stays a
+    # read-only reporting surface (spec §6, ADR-0015 D26).
+    handle: StoreHandle | None
     try:
-        slug = projects.resolve_project(root, cwd)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        checks.append(_check("project", "error", f"registry is unreadable or invalid: {exc}"))
+        handle = open_store(root, StoreMode.DOCTOR)
+    except store.UnsupportedSchemaError as exc:
+        # exc already embeds the store.toml path and a specific reason (unreadable
+        # TOML, or a missing/non-int schema) — report it verbatim, don't crash.
+        handle = None
+        checks.append(_check("store", "error", str(exc)))
     else:
-        if slug is None:
+        if handle.schema is None:
             checks.append(
                 _check(
-                    "project",
+                    "store",
                     "warn",
-                    f"{cwd} is not enabled",
-                    "Run `neurobase enable` in this repo.",
+                    f"{root} is not initialized yet",
+                    "Run `neurobase enable` or interactive `neurobase init`.",
+                )
+            )
+        elif handle.schema > store.STORE_SCHEMA_VERSION:
+            checks.append(
+                _check(
+                    "store",
+                    "error",
+                    f"{meta}: unsupported schema {handle.schema}",
+                    "Upgrade neurobase-cli before operating on this store.",
                 )
             )
         else:
-            checks.append(_check("project", "ok", f"{cwd} resolves to {slug!r}"))
+            checks.append(_check("store", "ok", f"{root} (schema {handle.schema})"))
+
+    checks.append(_project_check(handle, root, cwd))
     return checks
+
+
+def _project_check(handle: StoreHandle | None, root: Path, cwd: Path) -> Check:
+    """Project resolution is a registry concern, independent of store.toml health.
+    Resolve through the DOCTOR handle when we have one; if store.toml was corrupt
+    (no handle), fall back to the registry directly so a broken store.toml does
+    not also mask an otherwise-healthy project check."""
+    try:
+        slug = (
+            handle.resolve_project(cwd)
+            if handle is not None
+            else projects.resolve_project(root, cwd)
+        )
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return _check("project", "error", f"registry is unreadable or invalid: {exc}")
+    if slug is None:
+        return _check(
+            "project",
+            "warn",
+            f"{cwd} is not enabled",
+            "Run `neurobase enable` in this repo.",
+        )
+    return _check("project", "ok", f"{cwd} resolves to {slug!r}")
 
 
 def _brain_check(config: Config) -> Check:

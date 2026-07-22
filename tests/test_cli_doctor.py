@@ -66,6 +66,64 @@ def test_doctor_exits_nonzero_when_nothing_resolves(monkeypatch: pytest.MonkeyPa
     assert "brain: none" in result.output
 
 
+# --- store health via the DOCTOR handle (ADR-0015 D26) -------------------
+
+
+def test_doctor_reports_unsupported_store_schema_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A store.toml a version too new is *reported*, not refused: a DOCTOR handle
+    # carries the newer schema instead of raising, so doctor exits with an error
+    # rather than crashing.
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "store.toml").write_text(
+        f"schema = {store.STORE_SCHEMA_VERSION + 1}\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["doctor"])
+
+    # A clean CLI error exits via typer.Exit (SystemExit, not an Exception); a
+    # genuine crash would surface an Exception subclass here instead.
+    assert not isinstance(result.exception, Exception)
+    assert result.exit_code == 1
+    assert f"unsupported schema {store.STORE_SCHEMA_VERSION + 1}" in result.output
+
+
+def test_doctor_reports_corrupt_store_toml_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # D26 carry-in: a genuinely-corrupt store.toml makes open_store(DOCTOR) raise
+    # UnsupportedSchemaError; doctor must catch and report it, never crash — it is
+    # a read-only reporting surface.
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "store.toml").write_text("this is [not valid toml", encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert not isinstance(result.exception, Exception)  # caught + reported, not crashed
+    assert result.exit_code == 1
+    assert "unreadable" in result.output
+
+
+def test_doctor_is_read_only_and_does_not_create_store_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Doctor inspects via a DOCTOR handle, which never writes: reporting on an
+    # uninitialized store must not materialize store.toml as a side effect.
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "not initialized yet" in result.output
+    assert not (root / "store.toml").exists()
+
+
 def test_doctor_reports_mcp_registration(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_tools(monkeypatch)
     # The mcp checks always run (as warnings before registration).

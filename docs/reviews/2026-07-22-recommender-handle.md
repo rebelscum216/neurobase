@@ -1,6 +1,6 @@
 ---
 slug: recommender-handle
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-recommender-handle
@@ -153,3 +153,26 @@ Fix:
 
 Full gate green: ruff, format, mypy, `1139 passed, 1 skipped`, coverage 91.78%.
 Re-opened `status: awaiting-review` for round 2.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex)_
+
+No new findings. I verified F1 against the implementation rather than the
+resolution summary. `load_corpus()` now refuses an unsupported schema before
+reading any corpus input, and `load_ledger_summary()` independently performs the
+same READ open for direct callers. The expanded regression seeds both a rejected
+ledger event and a rejected proposal, then proves neither is surfaced through
+either entry point. This closes the D11/spec §10 violation from round 1 without
+changing valid-schema behavior.
+
+Verification run:
+
+- `git diff main...HEAD` and focused review of commit `ad635f5`
+- Unsupported-schema regression — passed
+- Recommender-focused corpus/emitter/seed/proposal suite — passed
+- `uv run python scripts/ci.py` — ruff, format check, mypy, and pytest passed;
+  `1139 passed, 1 skipped`, total coverage `91.71%`
+
+**Verdict:** approve — F1 is corrected and the branch now preserves the
+store-handle chokepoint for the reviewed recommender read paths.

@@ -122,3 +122,24 @@ def test_invalid_project_slug_is_fail_soft(root: Path) -> None:
 
 def test_missing_store_returns_empty(root: Path) -> None:
     assert search.search(open_store(root, StoreMode.READ), "anything") == []
+
+
+def test_unreadable_node_entry_is_skipped_search_survives(root: Path) -> None:
+    """A directory named ``*.md`` in nodes/ (read_doc → IsADirectoryError, an
+    OSError, not the ValueError the malformed-frontmatter skip handles) must be
+    skipped per document, not raise out of search — spec §13 fail-soft (Codex
+    F1). The healthy curated fact still surfaces."""
+    _curated(root, "alpha", "good-fact", "shared keyword here")
+    (store.memory_dir("alpha", root) / "nodes" / "bad.md").mkdir(parents=True, exist_ok=True)
+    hits = search.search(open_store(root, StoreMode.READ), "keyword", project="alpha")
+    assert [h.name for h in hits] == ["good-fact"]
+
+
+def test_unreadable_curated_entry_is_skipped_search_survives(root: Path) -> None:
+    """An unreadable curated entry makes ``list_curated`` raise OSError; search
+    fails soft to no curated facts for that project rather than raising, and the
+    project's healthy status node still surfaces — spec §13 (Codex F1)."""
+    _node(root, "alpha", "good-node", "shared keyword here")
+    (store.memory_dir("alpha", root) / "curated" / "bad.md").mkdir(parents=True, exist_ok=True)
+    hits = search.search(open_store(root, StoreMode.READ), "keyword", project="alpha")
+    assert [h.name for h in hits] == ["good-node"]

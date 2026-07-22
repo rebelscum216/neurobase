@@ -184,6 +184,18 @@ def test_memory_search_returns_ranked_hits(root: Path, tmp_path: Path) -> None:
     assert hits[0]["kind"] == "curated"
 
 
+def test_memory_search_fail_soft_on_unreadable_entry(root: Path, tmp_path: Path) -> None:
+    """spec §13 MUST: an unreadable store entry (a directory named ``*.md``, so
+    read_doc raises IsADirectoryError) must yield a normal/empty result from
+    memory_search, never an unhandled FastMCP ToolError (Codex F1). The healthy
+    fact still comes back; the call does not raise."""
+    _register(root, tmp_path, "alpha")
+    store.upsert_curated(root, "alpha", "good-fact", "shared keyword here", provenance=["t"])
+    (store.memory_dir("alpha", root) / "nodes" / "bad.md").mkdir(parents=True, exist_ok=True)
+    hits = _result(_server(root), "memory_search", query="keyword")
+    assert [h["name"] for h in hits] == ["good-fact"]
+
+
 # --- memory_read_node ----------------------------------------------------
 
 

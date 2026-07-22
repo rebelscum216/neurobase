@@ -75,19 +75,28 @@ def _all_projects(handle: StoreHandle) -> list[str]:
 
 def _candidates(handle: StoreHandle, project: str) -> Iterator[tuple[str, str, str]]:
     """Yield ``(name, kind, body)`` for a project's curated facts + status
-    nodes. An invalid slug or missing tree yields nothing."""
+    nodes. Fail-soft per spec §13: an invalid slug, a missing tree, or a
+    filesystem-unreadable entry yields nothing rather than raising — a
+    directory named ``*.md`` or an unreadable file must not turn ``memory_search``
+    into an unhandled ``ToolError``. ``read_doc`` reads bytes (``read_text``), so
+    an ``OSError``/``IsADirectoryError`` is possible on a hostile tree and is
+    skipped alongside the ``ValueError`` malformed-frontmatter case."""
     try:
         mem = handle.memory_dir(project)
     except store.InvalidSlugError:
         return
-    for doc in handle.list_curated(project):
+    try:
+        curated = handle.list_curated(project)
+    except OSError:
+        curated = []
+    for doc in curated:
         yield (str(doc.get("name") or doc.file_path.stem), "curated", doc.body)
     nodes_dir = mem / "nodes"
     if nodes_dir.exists():
         for path in sorted(nodes_dir.glob("*.md")):
             try:
                 doc = store.read_doc(path)
-            except ValueError:
+            except (ValueError, OSError):
                 continue
             yield (str(doc.get("name") or path.stem), "node", doc.body)
 

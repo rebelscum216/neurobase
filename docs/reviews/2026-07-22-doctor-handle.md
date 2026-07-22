@@ -1,6 +1,6 @@
 ---
 slug: doctor-handle
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-doctor-handle
@@ -80,4 +80,21 @@ distill/linkify edges; per-method mode enforcement; removing root-taking APIs
 
 > Run the diff and review the actual code. One entry per finding.
 
-<!-- Reviewer appends findings + verdict here. -->
+No findings. I reviewed `git diff main...HEAD` against the old
+`_store_checks` behavior, the ADR-0015 `DOCTOR` handle contract, and the
+doctor/reporting requirements. The new path opens a non-creating
+`StoreMode.DOCTOR` handle, reports too-new schemas from `handle.schema`, catches
+`UnsupportedSchemaError` for corrupt or missing/non-integer schema metadata, and
+keeps the project check's previous registry fallback behavior when no handle is
+available. The branch's untracked local `.agents/`, `.codex/`, and
+`.claude/settings.json` files are outside the requested committed diff and were
+not reviewed.
+
+Verification:
+- `uv run pytest tests/test_cli_doctor.py -q` (14 passed)
+- `uv run pytest tests/test_store_handle.py tests/test_cli_phase1.py tests/test_mcp_server.py -q`
+- `uv run python scripts/ci.py` (ruff, format check, mypy, pytest + coverage:
+  1136 passed, 1 skipped)
+
+**Verdict:** approve — the implementation preserves doctor as a read-only
+reporting surface while routing store health through the DOCTOR handle.

@@ -157,6 +157,22 @@ def test_unsupported_schema_returns_structured_error_from_every_tool(
         assert result.structuredContent["result"] == []
 
 
+def test_unreadable_store_metadata_also_returns_structured_error(root: Path) -> None:
+    # An unparseable store.toml is a distinct UnsupportedSchemaError path from a
+    # too-new schema; confirm it reaches the same structured tool refusal, not
+    # only the startup/resources survival covered above (D24).
+    root.mkdir(parents=True)
+    (root / "store.toml").write_text("this is [not valid toml", encoding="utf-8")
+
+    result = anyio.run(_server(root).call_tool, "memory_search", {"query": "anything"})
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "unsupported_store_schema"
+    assert result.structuredContent["result"] == []
+
+
 # --- memory_search -------------------------------------------------------
 
 
@@ -418,3 +434,14 @@ def test_recall_prompt_only_registered_with_dual_exposure(root: Path, tmp_path: 
     assert anyio.run(_server(root, expose=False).list_prompts) == []
     on = anyio.run(_server(root, expose=True).list_prompts)
     assert [p.name for p in on] == ["recall"]
+
+
+def test_recall_prompt_reports_unsupported_store_without_erroring(root: Path) -> None:
+    # On an incompatible store the recall prompt (Claude sugar) must still render,
+    # returning an explanatory message rather than reading the store or raising —
+    # the handle-is-None branch of the recall closure (D24).
+    _write_unsupported_schema(root)
+
+    result = anyio.run(_server(root, expose=True).get_prompt, "recall", {})
+
+    assert "unsupported" in result.messages[0].content.text.lower()

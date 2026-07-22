@@ -60,18 +60,24 @@ def _safe_registry(handle: StoreHandle) -> dict[str, list[str]]:
         return {}
 
 
-def _unsupported_schema_result(message: str, *, list_result: bool = False) -> Any:
+def _unsupported_schema_result(message: str | None, *, list_result: bool = False) -> Any:
     """MCP-native, machine-readable D24 refusal for an incompatible store.
 
     ``Any`` is deliberate: FastMCP rejects a ``CallToolResult`` union in a tool's
     return annotation. The concrete runtime value remains a typed
     ``CallToolResult`` with ``isError`` set. List-valued tools also carry their
     usual empty ``result`` field so the SDK's existing output schema validates.
+
+    ``message`` is the captured schema-guard error. It is always populated when a
+    tool actually reaches here (``handle is None`` implies the ``except`` branch
+    ran), but is typed ``str | None`` so callers pass that verdict directly rather
+    than repeating a coercion; the default below is a defensive fallback, not a
+    reachable state.
     """
     payload: dict[str, Any] = {
         "error": {
             "code": _UNSUPPORTED_SCHEMA_CODE,
-            "message": message,
+            "message": message or "the store schema is unsupported",
         }
     }
     if list_result:
@@ -175,7 +181,7 @@ def build_server(
         """Keyword search over curated facts and status nodes. Omit ``project``
         to search every project. Returns ranked hits (empty list if none)."""
         if handle is None:
-            return _unsupported_schema_result(schema_error or "unsupported store", list_result=True)
+            return _unsupported_schema_result(schema_error, list_result=True)
         hits = search.search(handle.root, query, project=project)
         return [
             {
@@ -193,7 +199,7 @@ def build_server(
         """Read one synthesized status node by project + name. Returns
         ``{found: false}`` for a missing/invalid node — never an error."""
         if handle is None:
-            return _unsupported_schema_result(schema_error or "unsupported store")
+            return _unsupported_schema_result(schema_error)
         # Validate the node name as a slug BEFORE building the path: an
         # unvalidated name (e.g. "../curated/x") would escape nodes/ and read an
         # arbitrary store file. Node-only read boundary (§13).
@@ -215,7 +221,7 @@ def build_server(
     def memory_list_projects() -> list[dict]:
         """List registered projects with curated-fact and node counts."""
         if handle is None:
-            return _unsupported_schema_result(schema_error or "unsupported store", list_result=True)
+            return _unsupported_schema_result(schema_error, list_result=True)
         out = []
         for project in sorted(_safe_registry(handle)):
             try:
@@ -232,7 +238,7 @@ def build_server(
         ``user-directed``), redacted first. Resolves the target project from
         ``project`` or the launch cwd; errors if neither yields one."""
         if handle is None:
-            return _unsupported_schema_result(schema_error or "unsupported store")
+            return _unsupported_schema_result(schema_error)
         text = fact.strip()
         if not text:
             raise ValueError("fact must not be empty")
@@ -246,6 +252,15 @@ def build_server(
                 "no valid project resolved for this save — pass a registered "
                 f"project= (available: {available})"
             )
+        # memory_remember writes through the READ handle captured at startup:
+        # ADR-0015 D24 has the server open exactly one READ handle for its whole
+        # lifetime. This is safe today because ensure_tree -> ensure_store_metadata
+        # re-creates store.toml and re-runs the schema guard on the write path. It
+        # is, however, coupled to per-method mode enforcement being deferred
+        # (ADR-0015): the moment a WRITE method may no longer run on a READ handle,
+        # this tool must open its own WRITE handle here instead —
+        # open_store(handle.root, StoreMode.WRITE) — which is the cleaner long-term
+        # boundary and the maintainer's call to make against D24's one-open wording.
         handle.ensure_tree(target)
         body = redact.redact(text, config.redact.extra_patterns)
         # Slug from the REDACTED text — otherwise a secret in the first line
@@ -260,7 +275,7 @@ def build_server(
         """List recommender proposals under ``<root>/proposals`` (Phase 8 owns
         the format). Returns ``[]`` when the directory does not exist yet."""
         if handle is None:
-            return _unsupported_schema_result(schema_error or "unsupported store", list_result=True)
+            return _unsupported_schema_result(schema_error, list_result=True)
         proposals_dir = handle.root / "proposals"
         if not proposals_dir.exists():
             return []

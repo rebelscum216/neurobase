@@ -1,6 +1,6 @@
 ---
 slug: cli-core-handle
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-cli-core-handle
@@ -125,3 +125,24 @@ pre-fix ordering** (it printed metrics and exited 0 on a `schema = 999` store)
 before restoring the fix. Full gate green (ruff/format/mypy/pytest).
 
 Re-opened `status: awaiting-review` for round 2.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex)_
+
+No new findings. I verified the F1 fix in `git diff main...HEAD`: `status()`
+now opens `_open_store_or_exit(resolved_root, StoreMode.READ)` before the
+`--recommender` branch and passes `handle.root` into `_print_recommender_metrics`,
+so recommender metrics no longer bypass the schema guard. The new regression test
+also covers the former failure by asserting a newer-schema store exits 1 before
+printing "insufficient data".
+
+Verification:
+- `uv run pytest tests/test_cli_recommend.py::test_status_recommender_refuses_newer_schema tests/test_cli_recommend.py::test_status_recommender_on_empty_store_prints_insufficient_data tests/test_cli_recommend.py::test_status_recommender_without_project_flag_bypasses_project_resolution -q`
+- `uv run pytest tests/test_cli.py tests/test_cli_curate.py tests/test_cli_init.py tests/test_cli_phase1.py tests/test_hook_schema_guard.py tests/test_cli_recommend.py -q`
+- Direct reproduction of the round-1 failure now reports the unsupported schema
+  and exits 1 before printing metrics.
+- `uv run python scripts/ci.py` (ruff, format check, mypy, pytest + coverage:
+  1138 passed, 1 skipped)
+
+**Verdict:** approve — F1 is resolved and no new blocking issues were found.

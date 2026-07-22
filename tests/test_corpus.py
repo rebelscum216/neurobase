@@ -95,6 +95,28 @@ def test_empty_registry_yields_empty_corpus(tmp_path: Path) -> None:
     assert result.ledger.reject_counts == {}
 
 
+def test_corpus_reads_self_guard_against_a_too_new_store(tmp_path: Path) -> None:
+    """ADR-0015: the corpus readers now obtain a validated store handle before
+    any store access, so a store whose schema is newer than this binary supports
+    degrades to an empty corpus / unresolved evidence (fail-soft) instead of
+    reading facts without the schema guard — defense in depth even when the
+    library is called directly, not just behind the CLI guard."""
+    root = tmp_path / "store"
+    _write_registry(root, ["alpha"])
+    _seed_curated(root, "alpha", "alpha-fact")  # creates store.toml at schema 1
+    (root / "store.toml").write_text(
+        f'schema = {store.STORE_SCHEMA_VERSION + 1}\ncreated_at = "2020-01-01T00:00:00Z"\n',
+        encoding="utf-8",
+    )
+
+    result = corpus.load_corpus(root)
+    assert result.curated == []
+    assert result.raw == []
+
+    ref = corpus.EvidenceRef.curated("alpha", "alpha-fact")
+    assert not corpus.resolve_evidence(root, ref).resolved
+
+
 # --- named test 2: missing/bad project tree skips ----------------------------
 
 

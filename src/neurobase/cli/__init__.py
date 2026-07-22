@@ -52,26 +52,11 @@ def version() -> None:
     typer.echo(__version__)
 
 
-def _check_store_schema(root: Path) -> None:
-    """Refuse to operate on a store whose schema is newer than this binary
-    supports (spec §10/D11) — called before any registry/memory read or
-    write so a newer-schema store is never partially mutated.
-
-    Legacy guard for the not-yet-converted commands (``seed`` + the ``recommend``
-    family, whose recommender sub-modules still take a raw root). Converted
-    commands use :func:`_open_store_or_exit` with an explicit mode instead
-    (ADR-0015 step 3)."""
-    try:
-        store.ensure_store_metadata(root)
-    except store.UnsupportedSchemaError as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
-
-
 def _open_store_or_exit(root: Path, mode: StoreMode) -> StoreHandle:
     """Open a validated :class:`StoreHandle` at a command's entry, or exit 1 with
     a red message if the store's schema is newer than this binary supports — the
-    handle-based replacement for :func:`_check_store_schema` (ADR-0015 step 3).
+    single schema-guard for every store-touching command (ADR-0015 step 3;
+    replaced the former ad-hoc ``ensure_store_metadata`` guard).
 
     The mode is the command's own boundary: ``WRITE`` for a command that mutates
     the store/registry through the handle (creates ``store.toml`` on first use and
@@ -349,8 +334,8 @@ def seed(
     config = load_config()
     resolved_root = store.resolve_root(root)
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
-    _check_store_schema(resolved_root)
-    registry = projects.load_registry(resolved_root)
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
+    registry = handle.load_registry()
 
     total = seed_import.SeedResult()
 
@@ -373,7 +358,7 @@ def seed(
             single_slug = project
             single_project_root = Path(roots[0])
         else:
-            single_slug = projects.resolve_project(resolved_root, resolved_cwd)
+            single_slug = handle.resolve_project(resolved_cwd)
             if single_slug is None:
                 typer.secho(
                     "Cannot resolve a project from this cwd — run `neurobase seed` from "
@@ -389,7 +374,7 @@ def seed(
         assert single_slug is not None  # guaranteed by the block above
         try:
             result = seed_import.import_from_dir(
-                resolved_root,
+                handle.root,
                 single_slug,
                 Path(from_dir),
                 extra_patterns=config.redact.extra_patterns,
@@ -405,7 +390,7 @@ def seed(
                 if not roots:
                     continue
                 result = seed_import.import_from_claude_memory(
-                    resolved_root,
+                    handle.root,
                     slug,
                     Path(roots[0]),
                     extra_patterns=config.redact.extra_patterns,
@@ -415,7 +400,7 @@ def seed(
             assert single_slug is not None  # guaranteed by the block above
             if single_project_root is not None:
                 result = seed_import.import_from_claude_memory(
-                    resolved_root,
+                    handle.root,
                     single_slug,
                     single_project_root,
                     extra_patterns=config.redact.extra_patterns,
@@ -900,8 +885,8 @@ def recommend_list(
 ) -> None:
     """List proposals in deterministic review order."""
     resolved_root = store.resolve_root(root)
-    _check_store_schema(resolved_root)
-    for doc in proposals.load_all_proposals(resolved_root):
+    handle = _open_store_or_exit(resolved_root, StoreMode.READ)
+    for doc in proposals.load_all_proposals(handle.root):
         if project is not None and doc.get("project") != project:
             continue
         if status_filter is not None and doc.get("status") != status_filter:
@@ -917,8 +902,8 @@ def recommend_list(
 def recommend_show(slug: str, root: str | None = typer.Option(None, "--root")) -> None:
     """Show a proposal, evidence resolution, and ledger history."""
     resolved_root = store.resolve_root(root)
-    _check_store_schema(resolved_root)
-    doc = proposals.load_proposal(resolved_root, slug)
+    handle = _open_store_or_exit(resolved_root, StoreMode.READ)
+    doc = proposals.load_proposal(handle.root, slug)
     if doc is None:
         typer.secho(f"proposal {slug!r} not found or malformed", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -933,12 +918,12 @@ def recommend_show(slug: str, root: str | None = typer.Option(None, "--root")) -
             continue
         try:
             ref = recommend_corpus.EvidenceRef.from_frontmatter(item)
-            resolved = recommend_corpus.resolve_evidence(resolved_root, ref)
+            resolved = recommend_corpus.resolve_evidence(handle.root, ref)
             typer.echo(f"- {ref.to_frontmatter()} [{resolved.status}]")
         except (KeyError, ValueError):
             typer.echo(f"- {item!r} [unresolved]")
     typer.echo("\nHistory:")
-    for event in proposals.ledger_history(resolved_root, slug):
+    for event in proposals.ledger_history(handle.root, slug):
         typer.echo(json.dumps(event, ensure_ascii=False))
 
 
@@ -950,7 +935,7 @@ def recommend_run(
     """Mine, rank, and optionally persist proposals."""
     config = load_config()
     resolved_root = store.resolve_root(root)
-    _check_store_schema(resolved_root)
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
     brain, resolution = resolve_brain(config)
     if brain is None:
         typer.secho(
@@ -959,14 +944,14 @@ def recommend_run(
             err=True,
         )
         raise typer.Exit(code=1)
-    candidates = miner.mine(resolved_root, brain, config=config.recommend)
-    loaded = recommend_corpus.load_corpus(resolved_root, config=config.recommend)
-    ranked = ranker.rank(resolved_root, candidates, loaded, config=config.recommend)
+    candidates = miner.mine(handle.root, brain, config=config.recommend)
+    loaded = recommend_corpus.load_corpus(handle.root, config=config.recommend)
+    ranked = ranker.rank(handle.root, candidates, loaded, config=config.recommend)
     if dry_run:
         for candidate in ranked:
             typer.echo(f"{candidate.slug}\t{candidate.type}\t{candidate.scores.total}")
         return
-    outcome = proposals.write_ranked(resolved_root, ranked, config=config.recommend)
+    outcome = proposals.write_ranked(handle.root, ranked, config=config.recommend)
     typer.echo(json.dumps(outcome.__dict__, ensure_ascii=False))
 
 
@@ -974,8 +959,8 @@ def recommend_run(
 def recommend_edit(slug: str, root: str | None = typer.Option(None, "--root")) -> None:
     """Edit only a proposal's managed artifact draft."""
     resolved_root = store.resolve_root(root)
-    _check_store_schema(resolved_root)
-    doc = proposals.load_proposal(resolved_root, slug)
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
+    doc = proposals.load_proposal(handle.root, slug)
     if doc is None:
         typer.secho(f"proposal {slug!r} not found or malformed", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -991,7 +976,7 @@ def recommend_edit(slug: str, root: str | None = typer.Option(None, "--root")) -
     if edited is None:
         typer.echo(draft)
         return
-    if not proposals.save_edited_draft(resolved_root, slug, edited):
+    if not proposals.save_edited_draft(handle.root, slug, edited):
         typer.secho("could not save edited draft", err=True)
         raise typer.Exit(code=1)
     typer.echo(f"Edited proposal {slug}.")
@@ -1005,9 +990,9 @@ def recommend_reject(
 ) -> None:
     """Reject a proposed candidate without touching agent configuration."""
     resolved_root = store.resolve_root(root)
-    _check_store_schema(resolved_root)
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
     try:
-        proposals.reject_proposal(resolved_root, slug, reason=reason)
+        proposals.reject_proposal(handle.root, slug, reason=reason)
     except ValueError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
@@ -1023,8 +1008,8 @@ def recommend_accept(
 ) -> None:
     """Diff, confirm, back up, and install one proposal artifact."""
     resolved_root = store.resolve_root(root)
-    _check_store_schema(resolved_root)
-    doc = proposals.load_proposal(resolved_root, slug)
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
+    doc = proposals.load_proposal(handle.root, slug)
     if doc is None:
         typer.secho(f"proposal {slug!r} not found or malformed", err=True)
         raise typer.Exit(code=1)
@@ -1037,7 +1022,7 @@ def recommend_accept(
         typer.secho(f"cannot accept proposal {slug!r}: status is {status}", err=True)
         raise typer.Exit(code=1)
     try:
-        artifact = emitters.prepare(resolved_root, doc, skill_scope=target)
+        artifact = emitters.prepare(handle.root, doc, skill_scope=target)
     except ValueError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
@@ -1050,7 +1035,7 @@ def recommend_accept(
     if not yes and not typer.confirm(f"Install proposal {slug} to {artifact.path}?"):
         typer.echo("Aborted — no changes made.")
         return
-    backup_dir = backups.backup_files(resolved_root, [artifact.path])
+    backup_dir = backups.backup_files(handle.root, [artifact.path])
     if backup_dir is not None:
         typer.echo(f"Backed up existing artifact to {backup_dir}")
     emitters.write_atomic(artifact)
@@ -1060,7 +1045,7 @@ def recommend_accept(
     # else on disk.
     installed_hash = hashlib.sha256(artifact.after.encode("utf-8")).hexdigest()
     proposals.accept_proposal(
-        resolved_root,
+        handle.root,
         slug,
         target=artifact.target,
         installed_path=artifact.path,

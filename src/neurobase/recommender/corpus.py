@@ -47,8 +47,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from neurobase.core import projects, search, store
+from neurobase.core import search, store
 from neurobase.core.config import RecommendConfig, load_config
+from neurobase.core.store_handle import StoreMode, open_store
 
 # Canonical on-disk locations (spec §12.1 / §12.2), defined here so every later
 # workstream (E/F/H) imports one source of truth rather than re-deriving them.
@@ -235,17 +236,21 @@ def resolve_evidence(root: Path, ref: EvidenceRef) -> ResolvedEvidence:
     raises on a missing target and never on a bad project slug — an
     unresolvable ref simply comes back ``status="unresolved"``."""
     try:
+        # ADR-0015: obtain the validated store handle before any store read; an
+        # unreadable/too-new store degrades every ref to unresolved (D21 fail-soft),
+        # never raising out of this path.
+        handle = open_store(root, StoreMode.READ)
         if ref.kind == "raw":
             file = _require(ref.file)
             if not _is_safe_raw_basename(file):
                 return ResolvedEvidence(ref, UNRESOLVED)
-            path = store.memory_dir(_require(ref.project), root) / "raw" / file
+            path = handle.memory_dir(_require(ref.project)) / "raw" / file
             return _resolved_if_exists(ref, path)
         if ref.kind == "curated":
             slug = _require(ref.slug)
             if not _valid_slug(slug):
                 return ResolvedEvidence(ref, UNRESOLVED)
-            mem = store.memory_dir(_require(ref.project), root)
+            mem = handle.memory_dir(_require(ref.project))
             live = mem / "curated" / f"{slug}.md"
             if live.exists():
                 return ResolvedEvidence(ref, RESOLVED, live)
@@ -256,8 +261,8 @@ def resolve_evidence(root: Path, ref: EvidenceRef) -> ResolvedEvidence:
         if ref.kind == "proposal":
             # proposal_path validates the slug and raises on a bad one — caught
             # below and reported unresolved, per D21's fail-soft contract.
-            return _resolved_if_exists(ref, proposal_path(root, _require(ref.slug)))
-    except (store.InvalidSlugError, ValueError, OSError):
+            return _resolved_if_exists(ref, proposal_path(handle.root, _require(ref.slug)))
+    except (store.InvalidSlugError, store.UnsupportedSchemaError, ValueError, OSError):
         return ResolvedEvidence(ref, UNRESOLVED)
     return ResolvedEvidence(ref, UNRESOLVED)
 
@@ -406,15 +411,17 @@ def load_corpus(
 
 
 def _registry_projects(root: Path) -> list[str]:
-    """Registry slugs, fail-soft: a malformed/missing registry yields ``[]``
-    (matches ``core.search``'s contractually fail-soft registry read)."""
+    """Registry slugs, fail-soft: a malformed/missing registry (or a too-new
+    store) yields ``[]`` (matches ``core.search``'s contractually fail-soft
+    registry read)."""
     try:
-        return list(projects.load_registry(root))
+        return list(open_store(root, StoreMode.READ).load_registry())
     except Exception:
         return []
 
 
 def _load_curated(root: Path, project: str) -> list[CuratedFact]:
+    handle = open_store(root, StoreMode.READ)
     return [
         CuratedFact(
             project=project,
@@ -423,7 +430,7 @@ def _load_curated(root: Path, project: str) -> list[CuratedFact]:
             provenance=[str(p) for p in (doc.get("provenance") or [])],
             path=doc.file_path,
         )
-        for doc in store.list_curated(root, project)
+        for doc in handle.list_curated(project)
     ]
 
 
@@ -434,8 +441,9 @@ def _load_raw(root: Path, project: str, cfg: RecommendConfig, now: datetime) -> 
     of the most recent. ``list_raw`` already returns oldest-first and skips
     unparseable files."""
     cutoff = now - timedelta(days=cfg.raw_lookback_days)
+    handle = open_store(root, StoreMode.READ)
     captures: list[RawCapture] = []
-    for doc in store.list_raw(root, project, unconsumed_only=False):
+    for doc in handle.list_raw(project, unconsumed_only=False):
         captured_raw = doc.get("captured_at")
         when = _parse_dt(captured_raw)
         # A capture with no parseable timestamp can't be aged against the

@@ -32,6 +32,7 @@ import yaml
 
 from neurobase.core import store
 from neurobase.core.redact import redact
+from neurobase.core.store_handle import StoreMode, open_store
 
 MAX_SOURCE_BYTES = 20 * 1024
 _MARKDOWN_SUFFIXES = (".md", ".markdown")
@@ -154,7 +155,7 @@ def _iter_source_files(top: Path) -> Iterable[Path]:
 def _existing_seed_state(root: Path, project: str, slug: str) -> tuple[str | None, str | None]:
     """``(source_digest, agent_last)`` for ``slug``'s existing curated file,
     or ``(None, None)`` if there is no such file or it fails to parse."""
-    path = store.memory_dir(project, root) / "curated" / f"{slug}.md"
+    path = open_store(root, StoreMode.READ).memory_dir(project) / "curated" / f"{slug}.md"
     if not path.exists():
         return None, None
     try:
@@ -177,6 +178,9 @@ def _import_tree(
     *,
     extra_patterns: Iterable[str],
 ) -> SeedResult:
+    # WRITE handle: seed imports curated facts, so the schema guard runs (and
+    # store.toml is created on first use) before any upsert (ADR-0015).
+    handle = open_store(root, StoreMode.WRITE)
     result = SeedResult()
     for path in _iter_source_files(top):
         rel = path.relative_to(top).as_posix()
@@ -241,8 +245,7 @@ def _import_tree(
             continue
 
         redacted_body = redact(body, extra_patterns=extra_patterns)
-        store.upsert_curated(
-            root,
+        handle.upsert_curated(
             project,
             slug,
             redacted_body,

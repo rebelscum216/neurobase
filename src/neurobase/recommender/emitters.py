@@ -8,8 +8,9 @@ from typing import Any
 
 import yaml
 
-from neurobase.core import projects, redact, store
+from neurobase.core import redact, store
 from neurobase.core.config import load_config
+from neurobase.core.store_handle import StoreMode, open_store
 from neurobase.recommender import proposals
 
 
@@ -56,7 +57,7 @@ def _project_root(root: Path, doc: store.Document) -> Path:
     project = doc.get("project")
     if not isinstance(project, str) or not project:
         raise ValueError("this proposal has no single source project")
-    roots = projects.load_registry(root).get(project)
+    roots = open_store(root, StoreMode.READ).load_registry().get(project)
     if not roots:
         raise ValueError(f"proposal project {project!r} is not registered")
     return Path(roots[0])

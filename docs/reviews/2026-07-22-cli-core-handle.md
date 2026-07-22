@@ -84,4 +84,44 @@ distill/linkify edges; per-method mode enforcement; steps 4–5.
 
 > Run the diff and review the actual code. One entry per finding.
 
-<!-- Reviewer appends findings + verdict here. -->
+1. **major** — `src/neurobase/cli/__init__.py:128`: `status --recommender`
+   still returns through `_print_recommender_metrics(resolved_root)` before any
+   `StoreHandle` opens, so the status command is not fully converted to the READ
+   boundary claimed in the brief. This is one of G1's named D11 violations:
+   against a store with `store.toml` schema newer than this binary,
+   `neurobase status --recommender --root <root>` currently reads recommender
+   proposal/ledger/corpus state and exits 0 instead of refusing before store
+   access. I reproduced that behavior locally with a temporary `schema = 999`
+   store: the command printed empty recommender metrics and `exit=0`. The
+   existing tests cover ordinary `status` and the new guided-init mutation
+   ordering, but they do not exercise the recommender status branch, so the
+   skipped handle is not caught. Suggested direction: open a READ handle before
+   the recommender branch and pass `handle.root` into the still-root-taking
+   metrics helper, or explicitly keep this branch on the legacy schema guard
+   until the recommender module converts.
+
+Verification:
+- `uv run pytest tests/test_cli.py tests/test_cli_curate.py tests/test_cli_init.py tests/test_cli_phase1.py tests/test_hook_schema_guard.py -q`
+- `uv run python scripts/ci.py` (ruff, format check, mypy, pytest + coverage:
+  1137 passed, 1 skipped)
+
+**Verdict:** changes-requested — the main converted paths pass, but the
+`status --recommender` subpath still bypasses the store handle on a newer-schema
+store.
+
+---
+
+## Author resolution — round 1  _(Author — Claude)_
+
+**F1 (major) — resolved** (`9ce5f95`). Confirmed and fixed. Good catch: the
+`status --recommender` branch returned via `_print_recommender_metrics` before
+any handle opened, so a `schema = 999` store was read and exited 0 rather than
+refused (a real D11 gap — pre-existing, since the old guard also sat after the
+recommender branch, but the conversion is the right place to close it). Moved the
+READ handle to the top of `status`, above the recommender branch, and pass
+`handle.root` into the still-root-taking metrics helper. Added
+`test_status_recommender_refuses_newer_schema`, **verified failing against the
+pre-fix ordering** (it printed metrics and exited 0 on a `schema = 999` store)
+before restoring the fix. Full gate green (ruff/format/mypy/pytest).
+
+Re-opened `status: awaiting-review` for round 2.

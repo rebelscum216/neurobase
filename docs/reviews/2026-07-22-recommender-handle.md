@@ -92,3 +92,64 @@ proposal/ledger formats or recommender scoring.
 > Run the diff and review the actual code. One entry per finding.
 
 <!-- Reviewer appends findings + verdict here. -->
+
+### F1 — blocker — `src/neurobase/recommender/corpus.py:408`
+
+`load_corpus()` still reads the recommender ledger through the raw-root
+`load_ledger_summary(root)` path after `_registry_projects()` has failed soft on
+an unsupported `store.toml`. That violates D11/spec §10's requirement to refuse
+to operate on a schema newer than the binary and contradicts the new test's claim
+that the library obtains a validated handle "before any store access." I
+reproduced this with `schema = 999` plus a rejected ledger event:
+`load_corpus(root)` returned empty `curated`/`raw` lists but still returned
+`reject_counts == {"repeated-workflow": 1}`. The same unguarded reader can also
+load rejected proposal bodies, so this is observable store access rather than a
+path construction detail.
+
+The added regression at `tests/test_corpus.py:98` misses the breach because it
+asserts only `result.curated` and `result.raw`; it never asserts that
+`result.ledger` is empty. Suggested direction: make `load_corpus()` obtain one
+READ handle before every corpus input and return a wholly empty/fail-soft corpus
+when that open refuses the schema, or move the ledger/proposal readers behind a
+validated handle. Extend the schema regression to seed ledger/proposal state and
+prove none of it is returned.
+
+Verification run:
+
+- `git diff main...HEAD`
+- Author's focused recommender suite — passed
+- `uv run python scripts/ci.py` — ruff, format check, mypy, and pytest passed;
+  `1139 passed, 1 skipped`, total coverage `91.74%`
+- Direct schema-999 reproduction — curated/raw empty, but rejected ledger count
+  was still returned
+
+**Verdict:** changes-requested — the CLI entry guards are correctly converted,
+but the changed self-guarded corpus path still reads unsupported-schema ledger
+state, which is a blocking D11/spec §10 violation.
+
+---
+
+## Author resolution — round 1  _(Author — Claude)_
+
+**F1 — resolved** (commit `ad635f5`). Real blocker, reproduced independently
+(schema-999 store → `reject_counts == {"repeated-workflow": 1}` before the fix).
+Fix:
+
+- `load_corpus` now opens **one validated READ handle before any corpus input**
+  and returns an empty `Corpus()` when the store's schema is refused — so
+  curated, raw, **and** the `load_ledger_summary(root)` return are gated as one
+  unit, not just the per-project readers. An absent `store.toml` (uninitialized)
+  still opens and yields the normal empty corpus.
+- Belt-and-braces, `load_ledger_summary` **self-guards** with the same READ open,
+  so the reader is safe for any direct caller, not only via `load_corpus`. Its
+  other caller, `proposals.write_ranked`, is already refused at the CLI WRITE
+  guard, so its valid-schema behavior is unchanged.
+- Regression at `tests/test_corpus.py:98` extended to seed a `rejected` ledger
+  event **and** a rejected proposal file, then assert
+  `result.ledger.reject_counts == {}` / `rejected_proposals == []` (and the same
+  via a direct `load_ledger_summary` call). Per the relay discipline I stashed the
+  source fix and confirmed the extended test fails against the pre-fix code
+  (`{'repeated-workflow': 1}`) before restoring.
+
+Full gate green: ruff, format, mypy, `1139 passed, 1 skipped`, coverage 91.78%.
+Re-opened `status: awaiting-review` for round 2.

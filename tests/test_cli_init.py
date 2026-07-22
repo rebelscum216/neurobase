@@ -179,6 +179,30 @@ def test_guided_init_no_detected_agents_still_enables_repo(
     assert (tmp_path / "store" / "projects" / "repo" / "memory").is_dir()
 
 
+def test_guided_init_refuses_newer_schema_without_registering(
+    env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G1 closure (ADR-0015): init --guided must obtain the WRITE handle — and so
+    run the schema guard — BEFORE register_project touches registry.toml, so a
+    store newer than we support aborts without a partial mutation. Pre-fix, the
+    guided path registered first and only hit the guard inside ensure_tree."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(cli.shutil, "which", lambda _: None)
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    (store_root / "store.toml").write_text(
+        'schema = 999\ncreated_at = "2020-01-01T00:00:00Z"\n', encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["init", "--cwd", str(repo), "--yes"])
+
+    assert result.exit_code == 1
+    assert "schema" in result.output
+    assert not (store_root / "registry.toml").exists()  # never partially mutated
+    assert not (store_root / "projects" / "repo").exists()
+
+
 # --- init --agent codex (spec §7) -----------------------------------------
 
 

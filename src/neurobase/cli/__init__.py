@@ -30,6 +30,7 @@ from neurobase.cli import diagnostics
 from neurobase.core import backups, locks, projects, store
 from neurobase.core.config import load_config
 from neurobase.core.process_guard import is_internal_call
+from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 from neurobase.curator import budget as curate_budget
 from neurobase.curator import curate as run_curate
 from neurobase.curator import is_stale, read_fact_count_trend
@@ -54,9 +55,33 @@ def version() -> None:
 def _check_store_schema(root: Path) -> None:
     """Refuse to operate on a store whose schema is newer than this binary
     supports (spec §10/D11) — called before any registry/memory read or
-    write so a newer-schema store is never partially mutated."""
+    write so a newer-schema store is never partially mutated.
+
+    Legacy guard for the not-yet-converted commands (``seed`` + the ``recommend``
+    family, whose recommender sub-modules still take a raw root). Converted
+    commands use :func:`_open_store_or_exit` with an explicit mode instead
+    (ADR-0015 step 3)."""
     try:
         store.ensure_store_metadata(root)
+    except store.UnsupportedSchemaError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _open_store_or_exit(root: Path, mode: StoreMode) -> StoreHandle:
+    """Open a validated :class:`StoreHandle` at a command's entry, or exit 1 with
+    a red message if the store's schema is newer than this binary supports — the
+    handle-based replacement for :func:`_check_store_schema` (ADR-0015 step 3).
+
+    The mode is the command's own boundary: ``WRITE`` for a command that mutates
+    the store/registry through the handle (creates ``store.toml`` on first use and
+    runs the guard *before* any write — this is what closes the G1
+    ``init --guided`` mutate-before-guard hole), ``READ`` for a command that only
+    reads through it. Commands that delegate their writes to an already-converted
+    sub-module (e.g. ``curate`` → ``run_curate``, which owns its own WRITE handle)
+    hold only a READ handle here for the guard + registry resolution."""
+    try:
+        return open_store(root, mode)
     except store.UnsupportedSchemaError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
@@ -75,13 +100,14 @@ def enable(
     """Register the current repo as a project and create its memory tree."""
     resolved_root = store.resolve_root(root)
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
-    _check_store_schema(resolved_root)  # before registry.toml is touched
+    # WRITE handle guards before registry.toml is touched (and creates store.toml).
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
     try:
-        project_slug = projects.register_project(resolved_root, resolved_cwd, slug=slug)
+        project_slug = handle.register_project(resolved_cwd, slug=slug)
     except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
-    mem = store.ensure_tree(project_slug, resolved_root)
+    mem = handle.ensure_tree(project_slug)
     typer.echo(f"Enabled project '{project_slug}' at {mem}")
 
 
@@ -103,17 +129,19 @@ def status(
         _print_recommender_metrics(resolved_root)
         return
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
-    project_slug = projects.resolve_project(resolved_root, resolved_cwd)
+    # READ handle guards before any memory read; it never writes, so status no
+    # longer creates store.toml as a side effect.
+    handle = _open_store_or_exit(resolved_root, StoreMode.READ)
+    project_slug = handle.resolve_project(resolved_cwd)
     if project_slug is None:
         typer.echo("Not an enabled project (no registered root matches this directory).")
         raise typer.Exit(code=1)
-    _check_store_schema(resolved_root)  # before any memory read
 
-    all_raw = store.list_raw(resolved_root, project_slug, unconsumed_only=False)
+    all_raw = handle.list_raw(project_slug, unconsumed_only=False)
     unconsumed_count = sum(1 for d in all_raw if not d.get("consumed"))
     consumed_count = sum(1 for d in all_raw if d.get("consumed"))
 
-    mem = store.memory_dir(project_slug, resolved_root)
+    mem = handle.memory_dir(project_slug)
     active_facts = 0
     curated_dir = mem / "curated"
     if curated_dir.exists():
@@ -132,7 +160,7 @@ def status(
     typer.echo(f"Active curated facts: {active_facts}")
     typer.echo(f"Nodes: {node_count}")
 
-    trend = read_fact_count_trend(resolved_root, project_slug)
+    trend = read_fact_count_trend(handle.root, project_slug)
     if trend:
         typer.echo(f"Fact-count trend (last {len(trend)} passes): {' → '.join(map(str, trend))}")
 
@@ -194,20 +222,22 @@ def curate(
     config = load_config()
     resolved_root = store.resolve_root(root)
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
-    project_slug = projects.resolve_project(resolved_root, resolved_cwd)
+    # READ guard: curate delegates every store write to run_curate, which owns its
+    # own WRITE handle (ADR-0015 step 3.3); this handle only guards + resolves.
+    handle = _open_store_or_exit(resolved_root, StoreMode.READ)
+    project_slug = handle.resolve_project(resolved_cwd)
     if project_slug is None:
         typer.echo("Not an enabled project (no registered root matches this directory).")
         raise typer.Exit(code=1)
-    _check_store_schema(resolved_root)
 
-    with locks.try_curate_lock(resolved_root, project_slug) as acquired:
+    with locks.try_curate_lock(handle.root, project_slug) as acquired:
         if not acquired:
             typer.echo(f"Curate already running for project {project_slug!r}; skipping.")
             return
 
         checking_staleness = if_stale and not resynth
         if checking_staleness and not is_stale(
-            resolved_root, project_slug, config.curate.stale_hours
+            handle.root, project_slug, config.curate.stale_hours
         ):
             typer.echo("Not stale — nothing to curate.")
             return
@@ -225,7 +255,7 @@ def curate(
         # small automatic tier; an explicitly typed `neurobase curate` gets the
         # permissive one (P0, 2026-07-17 runaway incident).
         summary = run_curate(
-            resolved_root,
+            handle.root,
             project_slug,
             brain,
             dry_run=dry_run,
@@ -470,9 +500,14 @@ def _init_guided(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bo
 
     enable_repo = yes or typer.confirm(f"Enable this repo in Neurobase ({resolved_cwd})?")
     if enable_repo:
+        # G1 closure: obtain a WRITE handle BEFORE touching registry.toml, so a
+        # store whose schema is newer than we support aborts here rather than after
+        # register_project has already mutated the registry (the init --guided
+        # mutate-before-guard hole ADR-0015's WRITE mode exists to close).
+        handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
         try:
-            project_slug = projects.register_project(resolved_root, resolved_cwd)
-            mem = store.ensure_tree(project_slug, resolved_root)
+            project_slug = handle.register_project(resolved_cwd)
+            mem = handle.ensure_tree(project_slug)
         except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1) from exc

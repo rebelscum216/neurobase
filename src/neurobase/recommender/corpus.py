@@ -386,6 +386,19 @@ def load_corpus(
     cfg = config if config is not None else load_config().recommend
     reference = now if now is not None else datetime.now(UTC)
 
+    # D11/spec §10: obtain one validated READ handle before *any* corpus input.
+    # An absent store.toml is uninitialized (schema is None), not an error, and
+    # opens fine; but a schema newer than this binary supports (or an otherwise
+    # unopenable store) must refuse to read anything — curated, raw, AND the
+    # ledger/proposal state below — degrading to an empty corpus. Without this
+    # gate the unconditional ``load_ledger_summary(root)`` at the return would
+    # leak reject counts + rejected-proposal bodies off an unsupported-schema
+    # store even though the per-project readers already failed soft (Codex F1).
+    try:
+        open_store(root, StoreMode.READ)
+    except Exception:
+        return Corpus()
+
     curated: list[CuratedFact] = []
     raw: list[RawCapture] = []
     skipped: list[str] = []
@@ -486,6 +499,17 @@ def load_ledger_summary(root: Path) -> LedgerSummary:
     workstream F, and a malformed line anywhere in it is skipped, never fatal
     (§12.2, the exact precedent ``curator/engine.py:read_fact_count_trend``
     sets)."""
+    # D11/spec §10: validate the store's schema before reading any ledger or
+    # proposal state, so a caller that reaches this reader outside a CLI command
+    # guard (e.g. corpus.load_corpus, or a future direct caller) still cannot read
+    # off an unsupported-schema store (Codex F1). An absent store.toml is
+    # uninitialized, not an error, and opens fine; a too-new/corrupt store refuses
+    # → an empty summary (fail-soft, §12.2).
+    try:
+        open_store(root, StoreMode.READ)
+    except Exception:
+        return LedgerSummary()
+
     path = ledger_path(root)
     if not path.exists():
         return LedgerSummary()

@@ -104,6 +104,22 @@ def test_corpus_reads_self_guard_against_a_too_new_store(tmp_path: Path) -> None
     root = tmp_path / "store"
     _write_registry(root, ["alpha"])
     _seed_curated(root, "alpha", "alpha-fact")  # creates store.toml at schema 1
+    # Ledger + a rejected proposal on disk: the fail-soft ledger reader would
+    # happily surface these off an unsupported-schema store unless it, too, is
+    # gated by the handle (Codex F1 — an unguarded corpus input, not just a path
+    # construction detail).
+    store.write_doc(
+        corpus.proposal_path(root, "rejected-one"),
+        {"name": "rejected-one", "status": "rejected", "candidate_type": "repeated-workflow"},
+        "Never do the rejected thing.",
+    )
+    ledger = corpus.ledger_path(root)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        '{"at":"2026-07-09T12:00:00Z","slug":"rejected-one","event":"rejected",'
+        '"candidate_type":"repeated-workflow"}\n',
+        encoding="utf-8",
+    )
     (root / "store.toml").write_text(
         f'schema = {store.STORE_SCHEMA_VERSION + 1}\ncreated_at = "2020-01-01T00:00:00Z"\n',
         encoding="utf-8",
@@ -112,9 +128,17 @@ def test_corpus_reads_self_guard_against_a_too_new_store(tmp_path: Path) -> None
     result = corpus.load_corpus(root)
     assert result.curated == []
     assert result.raw == []
+    # The ledger/proposal readers are corpus inputs too: none of that state may
+    # leak off a store whose schema this binary refuses (D11/spec §10).
+    assert result.ledger.reject_counts == {}
+    assert result.ledger.rejected_proposals == []
 
     ref = corpus.EvidenceRef.curated("alpha", "alpha-fact")
     assert not corpus.resolve_evidence(root, ref).resolved
+    # The reader is guarded even when called directly, not only via load_corpus.
+    summary = corpus.load_ledger_summary(root)
+    assert summary.reject_counts == {}
+    assert summary.rejected_proposals == []
 
 
 # --- named test 2: missing/bad project tree skips ----------------------------

@@ -1,6 +1,6 @@
 ---
 slug: search-linkify-handle
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-deferred-edges
@@ -163,3 +163,27 @@ this diff. Cleanest fix is likely a one-line normalization in `store.read_doc`
 — worth its own small branch rather than widening a "thread the handle" change.
 
 Re-opened `status: awaiting-review` for round 2.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex)_
+
+No new findings. I verified F1 against commit `0638a61` and the actual runtime
+paths. A filesystem-unreadable curated entry now degrades that project's curated
+candidates while leaving its healthy nodes searchable; an unreadable node entry
+is skipped individually while healthy curated facts survive. Most importantly,
+the original MCP reproduction now returns a normal `memory_search` result instead
+of raising `ToolError`. The added core and MCP regressions enforce all three
+behaviors.
+
+Verification run:
+
+- `git diff main...HEAD` and focused review of commit `0638a61`
+- Original direct core and MCP reproductions — passed without exceptions
+- Focused search/linkify/curator/MCP suite — passed
+- `uv run python scripts/ci.py` — ruff, format check, mypy, and pytest passed;
+  `1142 passed, 1 skipped`, total coverage `91.76%`
+
+**Verdict:** approve — F1 is corrected, the §13 fail-soft contract is now
+enforced for the reviewed search path, and the handle-threading change remains
+behaviorally sound.

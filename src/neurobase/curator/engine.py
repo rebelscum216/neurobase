@@ -222,9 +222,7 @@ def _synthesize(handle: StoreHandle, project: str, brain: Brain) -> None:
         body = _strip_outer_fence(brain.text(NODE_SYSTEM, payload).strip())
     handle.write_node(project, node_name(project), body)
     handle.rebuild_index(project)
-    # linkify is not yet on the handle (its own step-3 module); pass the validated
-    # root the handle already carries.
-    linkify.linkify(handle.root, project)
+    linkify.linkify(handle, project)
 
 
 def _strip_outer_fence(text: str) -> str:

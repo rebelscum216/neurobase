@@ -182,7 +182,7 @@ def build_server(
         to search every project. Returns ranked hits (empty list if none)."""
         if handle is None:
             return _unsupported_schema_result(schema_error, list_result=True)
-        hits = search.search(handle.root, query, project=project)
+        hits = search.search(handle, query, project=project)
         return [
             {
                 "project": h.project,

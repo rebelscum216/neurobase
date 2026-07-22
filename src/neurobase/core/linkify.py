@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from neurobase.core import store
+from neurobase.core.store_handle import StoreHandle
 
 LINEAGE_START = "<!-- lineage:auto (generated — edits here are overwritten) -->"
 LINEAGE_END = "<!-- /lineage:auto -->"
@@ -81,13 +82,15 @@ def _node_block(active_slugs: list[str]) -> str | None:
     return "\n".join([LINEAGE_START, "## Synthesized from", links, LINEAGE_END])
 
 
-def linkify(root: Path, project: str) -> None:
-    """Rewrite the lineage:auto block in every ``curated/`` and ``nodes/`` file.
-    Idempotent; frontmatter preserved byte-for-byte; ``raw/`` and
-    ``.tombstones/`` never modified."""
-    mem = store.memory_dir(project, root)
+def linkify(handle: StoreHandle, project: str) -> None:
+    """Rewrite the lineage:auto block in every ``curated/`` and ``nodes/`` file
+    of the store behind ``handle``. Idempotent; frontmatter preserved
+    byte-for-byte; ``raw/`` and ``.tombstones/`` never modified. Taking a
+    validated ``StoreHandle`` (not a raw root) keeps the curated read behind the
+    schema guard (ADR-0015)."""
+    mem = handle.memory_dir(project)
 
-    active = store.list_curated(root, project)
+    active = handle.list_curated(project)
     active_slugs = [str(doc.get("name", doc.file_path.stem)) for doc in active]
 
     for doc in active:

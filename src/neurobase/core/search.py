@@ -16,9 +16,9 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 
-from neurobase.core import projects, store
+from neurobase.core import store
+from neurobase.core.store_handle import StoreHandle
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _NAME_WEIGHT = 3  # a query term in the slug/name counts more than in the body
@@ -64,23 +64,23 @@ def _snippet(terms: list[str], body: str) -> str:
     return lines[0][:_SNIPPET_CHARS] if lines else ""
 
 
-def _all_projects(root: Path) -> list[str]:
+def _all_projects(handle: StoreHandle) -> list[str]:
     """Registry project slugs, fail-soft: a malformed registry yields ``[]``
     (search is contractually fail-soft — a corrupt file must not raise)."""
     try:
-        return list(projects.load_registry(root))
+        return list(handle.load_registry())
     except Exception:
         return []
 
 
-def _candidates(root: Path, project: str) -> Iterator[tuple[str, str, str]]:
+def _candidates(handle: StoreHandle, project: str) -> Iterator[tuple[str, str, str]]:
     """Yield ``(name, kind, body)`` for a project's curated facts + status
     nodes. An invalid slug or missing tree yields nothing."""
     try:
-        mem = store.memory_dir(project, root)
+        mem = handle.memory_dir(project)
     except store.InvalidSlugError:
         return
-    for doc in store.list_curated(root, project):
+    for doc in handle.list_curated(project):
         yield (str(doc.get("name") or doc.file_path.stem), "curated", doc.body)
     nodes_dir = mem / "nodes"
     if nodes_dir.exists():
@@ -93,21 +93,23 @@ def _candidates(root: Path, project: str) -> Iterator[tuple[str, str, str]]:
 
 
 def search(
-    root: Path,
+    handle: StoreHandle,
     query: str,
     project: str | None = None,
     limit: int | None = _DEFAULT_LIMIT,
 ) -> list[SearchHit]:
-    """Ranked hits over curated facts + nodes. Empty query (no word tokens) or
-    no matches ⇒ ``[]``. Results sort by score desc, then project, then name
-    for a stable order; ``limit`` caps the count (``None`` = uncapped)."""
+    """Ranked hits over curated facts + nodes for the store behind ``handle``.
+    Empty query (no word tokens) or no matches ⇒ ``[]``. Results sort by score
+    desc, then project, then name for a stable order; ``limit`` caps the count
+    (``None`` = uncapped). Taking a validated ``StoreHandle`` (not a raw root)
+    keeps every store read behind the schema guard (ADR-0015)."""
     terms = _tokenize(query)
     if not terms:
         return []
-    targets = [project] if project is not None else sorted(_all_projects(root))
+    targets = [project] if project is not None else sorted(_all_projects(handle))
     hits: list[SearchHit] = []
     for proj in targets:
-        for name, kind, body in _candidates(root, proj):
+        for name, kind, body in _candidates(handle, proj):
             score = _score(terms, name, body)
             if score <= 0:
                 continue

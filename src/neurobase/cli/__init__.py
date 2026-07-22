@@ -121,17 +121,19 @@ def status(
 ) -> None:
     """Show projects, raw/curated counts, nodes, and fact-count trend."""
     resolved_root = store.resolve_root(root)
+    # READ handle guards before ANY store access — including the store-wide
+    # recommender-metrics path below (D11: a too-new store must refuse before any
+    # read, not just the project-status path); it never writes, so status no
+    # longer creates store.toml as a side effect.
+    handle = _open_store_or_exit(resolved_root, StoreMode.READ)
     # §12.9: recommender metrics are STORE-WIDE (ledger + proposals aren't
     # project-scoped — same as `recommend list/show/run`, which only take
     # `--root`, never project resolution), so branch BEFORE any project
     # resolution and never require an enabled project to see them.
     if recommender:
-        _print_recommender_metrics(resolved_root)
+        _print_recommender_metrics(handle.root)
         return
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
-    # READ handle guards before any memory read; it never writes, so status no
-    # longer creates store.toml as a side effect.
-    handle = _open_store_or_exit(resolved_root, StoreMode.READ)
     project_slug = handle.resolve_project(resolved_cwd)
     if project_slug is None:
         typer.echo("Not an enabled project (no registered root matches this directory).")

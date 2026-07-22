@@ -276,6 +276,23 @@ def test_status_recommender_on_empty_store_prints_insufficient_data(tmp_path: Pa
     assert "Recurrence reduction: insufficient data" in result.output
 
 
+def test_status_recommender_refuses_newer_schema(tmp_path: Path) -> None:
+    """D11 (Codex F1): `status --recommender` must refuse a store whose schema is
+    newer than supported BEFORE reading any recommender state — the READ guard now
+    runs on the store-wide metrics subpath too, not just the project-status path."""
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "store.toml").write_text(
+        'schema = 999\ncreated_at = "2020-01-01T00:00:00Z"\n', encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["status", "--recommender", "--root", str(root)])
+
+    assert result.exit_code == 1
+    assert "schema" in result.output
+    assert "insufficient data" not in result.output  # refused before any read
+
+
 def test_status_recommender_without_project_flag_bypasses_project_resolution(
     tmp_path: Path,
 ) -> None:

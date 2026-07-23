@@ -66,23 +66,43 @@ def _project_root(root: Path, doc: store.Document) -> Path:
 def _split_leading_frontmatter(text: str) -> tuple[dict[str, Any] | None, str]:
     """Split a leading ``---`` YAML frontmatter block off ``text``.
 
-    Returns ``(mapping, body)`` when ``text`` opens with a well-fenced block —
-    ``mapping`` is the parsed dict (``{}`` when the block parses to a non-mapping),
-    ``body`` is everything after the closing fence with leading blank lines
-    trimmed. Returns ``(None, text)`` when there is no leading block or its YAML is
-    unparseable. Lets ``_skill`` drop a draft's *own* frontmatter before wrapping
-    it, so the installed SKILL.md carries exactly one (our) block instead of two —
-    G3; a consumer reads only the first block, so an embedded second one is
-    silently-dropped content, not a second document."""
-    if not text.startswith("---\n") or "\n---\n" not in text[4:]:
+    Detection is *structural* and separate from YAML validity (F3): a leading block
+    is present when ``text`` opens with ``---\\n`` and the first following ``---``
+    is a clean fence line — its own line, closed by a newline or end-of-text.
+    (Bodies here are the store's LF-normalised text, so ``\\r\\n`` never reaches
+    this.) When no such block is present, returns ``(None, text)`` — all body.
+
+    When a leading block *is* present it must parse to a YAML **mapping** to count
+    as frontmatter; then its mapping and the body after it (leading blank lines
+    trimmed) are returned, letting ``_skill`` drop a draft's *own* frontmatter so
+    the installed SKILL.md carries exactly one (our) block. A leading block whose
+    content is invalid YAML, or valid-but-not-a-mapping (a scalar/list — e.g. an
+    ordinary Markdown ``---`` rule around prose), is **rejected with ValueError**:
+    we neither embed it verbatim under our generated block (that reproduces the G3
+    doubling) nor silently drop it (that would delete real body text). A draft must
+    not carry its own frontmatter; a malformed leading fence is surfaced, not
+    guessed — the accept flow turns this into a clear, named error."""
+    if not text.startswith("---\n"):
         return None, text
-    frontmatter, body = text[4:].split("\n---\n", 1)
+    rest = text[4:]
+    idx = rest.find("\n---")
+    if idx < 0:
+        return None, text  # a lone leading `---` with no closing fence — all body
+    after_fence = rest[idx + 4 :]
+    if after_fence and not after_fence.startswith("\n"):
+        return None, text  # `\n---xyz` is not a fence line — not frontmatter
+    frontmatter_text = rest[:idx]
+    body = after_fence.lstrip("\n")
     try:
-        parsed = yaml.safe_load(frontmatter)
-    except yaml.YAMLError:
-        return None, text
-    mapping = parsed if isinstance(parsed, dict) else {}
-    return mapping, body.lstrip("\n")
+        parsed = yaml.safe_load(frontmatter_text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"draft's leading '---' block is not valid YAML: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            "draft's leading '---' block is not a YAML mapping "
+            "(a draft must not carry its own frontmatter)"
+        )
+    return parsed, body
 
 
 def _skill(root: Path, doc: store.Document, slug: str, draft: str, scope: str) -> Artifact:

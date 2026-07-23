@@ -191,15 +191,17 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
 
 ### G2 — accepted-proposal state can drift from disk; there is no revert path
 
-- **status:** fixed (2026-07-23) — added `recommend revert <slug>` +
-  `proposals.revert_proposal`: on an `accepted` proposal it flips status back to
-  `proposed`, clears the dangling `installed_path`, and appends a `reverted` ledger
-  event, **without deleting the artifact** (revert corrects the store record, it is
-  not an uninstall). Only `accepted` can be reverted (else a named-status error).
-  Because the survival/precision metrics key on current frontmatter status not the
-  ledger (§12.9), a reverted proposal drops out of them cleanly. Spec §12.7 updated
-  (command table + blocked-status rule + transitions table). Regression-tested in
-  `test_proposals.py`, `test_metrics.py` (drops-out-of-metrics), `test_cli_recommend.py`.
+- **status:** in progress (2026-07-23) — a first `recommend revert` landed
+  (`cb40448`) but Codex review (`docs/reviews/2026-07-23-g2-g3-recommender-fixes.md`)
+  found it reopens the very drift §12.7 forbids: on a **healthy** (present,
+  unmodified) artifact, `accept → revert → reject` orphans the installed file
+  (F1), and `accept → revert → accept` is a no-op that can't restore acceptance
+  (F2). Redesign underway: **revert becomes drift-repair-only** — allowed only when
+  the recorded artifact is missing or its content no longer matches the accept-time
+  `installed_hash`. That closes both (a healthy artifact is non-revertable; a
+  drifted one always re-writes on re-accept) and needs an ADR revising ADR-0007's
+  lifecycle (F4). The shipped `revert` command + `revert_proposal` + spec §12.7
+  edits + tests are on the branch but are being reworked, not final.
 - **severity:** minor — nothing corrupts, but the store's view of the present is
   wrong: a proposal stays `accepted` with a dangling `installed_path` after its
   artifact is removed by hand, and §12.7 makes reject-on-accepted a hard error,
@@ -228,10 +230,13 @@ fix). Needs a small §12 note either way.
   draft's own leading `---` frontmatter via `_split_leading_frontmatter` before wrapping
   (so exactly one block ships, salvaging a draft-set `description`), and derives
   `description` from the draft's `description`/`#` heading, falling to `candidate_type`
-  only as a last resort. Regression-tested (`test_emitters.py` —
-  `test_skill_strips_draft_own_frontmatter_no_doubling`,
-  `test_skill_description_prefers_title_over_candidate_type`; both mutation-verified to
-  fail pre-fix).
+  only as a last resort. Hardened after Codex review (F3): the splitter detects the
+  leading fence *structurally* and **fails closed** (raises) on an invalid-YAML or
+  non-mapping leading block, rather than embedding a second block (invalid case, which
+  had left G3 reproducible) or silently dropping the text (non-mapping/`---`-rule case).
+  Regression-tested (`test_emitters.py` — doubling, description, invalid-YAML,
+  non-mapping, mid-body rule, no-trailing-newline fence; the fail-closed and
+  description/doubling tests all mutation-verified to fail pre-fix).
 - **severity:** minor — the installed artifact is valid enough for Claude to
   load, but reads wrong.
 - **found:** 2026-07-16 by Andrew (same live smoke; emitted SKILL.md had two

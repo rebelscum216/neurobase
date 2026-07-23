@@ -1,6 +1,6 @@
 ---
 slug: g2-g3-recommender-fixes
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/webui-phase1-suggestions
@@ -90,6 +90,133 @@ two commits: `488167e` G3, `cb40448` G2). Key files:
 
 > Run the diff and review the actual code. One entry per finding.
 
-_(none yet)_
+**Review scope (pass 1).** Reviewed branch
+`feat/webui-phase1-suggestions` at
+`6984ef0ba02aa950883ba4786515fa033bb20339` against base
+`30696a88b382b9f5e70ee69d3c61443eaed273c4`, including both implementation
+commits and the review-baton commit in the stated diff. Inspected every changed
+production, test, spec, and known-gap file plus the shared install, metrics,
+ledger-summary, and web-accept call paths. There were no prior findings.
 
-**Verdict:** _(pending)_
+### F1 — Revert recreates the forbidden rejected-with-live-artifact state
+
+- **severity:** major
+- **location:** `src/neurobase/cli/__init__.py:1048`
+- **issue:** The command reads `installed_path` only to print it; it never checks
+  whether the artifact is actually missing or modified before clearing the path
+  and returning the proposal to `proposed`. Therefore a healthy accepted
+  artifact can take the fully supported sequence `accept → revert → reject`.
+  I reproduced that sequence through the CLI: all three commands exited 0, the
+  proposal ended `status: rejected` with `installed_path: null`, and the
+  Neurobase-managed rule remained present in `AGENTS.md`. That is the exact
+  metadata/disk mismatch §12.7 lines 1566–1572 call the load-bearing reason
+  `reject` on `accepted` must be blocked. The new claim at lines 1573–1584 that
+  `revert` is not that backdoor is therefore false whenever the recorded
+  artifact still exists unchanged.
+- **suggested direction:** Decide and encode the intended boundary before
+  shipping. If this command is specifically a drift repair, require verified
+  missing/modified state (using the recorded path/hash) before dropping
+  ownership metadata. If it is a general "unaccept," define how a live artifact
+  remains tracked or is removed through diff/consent/backup so a later reject
+  cannot orphan installed behavior. Add a CLI integration regression for
+  `accept → revert → reject` that proves the final proposal and disk state cannot
+  contradict one another.
+- **resolution:** deferred — accepted as real. Paused per Andrew (2026-07-23) to
+  redesign G2's revert as **drift-repair-only**: `revert` will be allowed only when
+  the recorded artifact is actually missing or its content no longer matches the
+  accept-time `installed_hash`. That closes this backdoor (a healthy artifact
+  becomes non-revertable) and F2 (a missing/modified artifact means re-accept
+  always re-writes). Not yet coded — see the round-2 plan.
+
+### F2 — Re-accepting an unchanged reverted artifact cannot restore acceptance
+
+- **severity:** major
+- **location:** `src/neurobase/cli/__init__.py:1085`
+- **issue:** Revert deliberately leaves the artifact on disk, but both accept
+  surfaces short-circuit whenever the rendered bytes already match the file.
+  I reproduced `accept → revert → accept --yes`: the second accept printed
+  `Already up to date.` and returned 0 while the proposal remained `proposed`
+  with `installed_path: null`. The same early return exists in
+  `webui/routes.py:341`. This contradicts the new §12.7 promise that a reverted
+  proposal can be re-accepted/reinstalled. The added test
+  `tests/test_proposals.py:522` misses the bug because it calls
+  `accept_proposal` directly, bypassing `prepare_install` and both real
+  no-op call sites. The spec is also internally inconsistent: lines 1583–1584
+  promise re-acceptance while lines 1594–1596 require an identical render to
+  leave status unchanged.
+- **suggested direction:** Reconcile the reverted transition with the unchanged
+  diff contract in the shared install service and spec. Either a proposed,
+  previously reverted proposal needs a metadata-only acceptance path when the
+  owned artifact already matches, or F1's repair-only guard must make this state
+  impossible. Pin the decision with a service/CLI test that performs the real
+  accept, revert, and re-accept flow and asserts final `accepted` status,
+  `installed_path`, and ledger behavior.
+- **resolution:** deferred — accepted as real (my proposals/metrics tests bypassed
+  `prepare_install`'s no-op path, so they never exercised this). Resolved together
+  with F1 by the drift-repair-only redesign; round-2 tests will drive the real
+  `accept → revert → accept` flow through the install service + `webui/routes.py`.
+
+### F3 — The frontmatter splitter can still double blocks or discard draft content
+
+- **severity:** minor
+- **location:** `src/neurobase/recommender/emitters.py:77`
+- **issue:** `_split_leading_frontmatter` conflates fence detection, YAML
+  validity, and "this is frontmatter." A leading fenced block with invalid YAML
+  returns `(None, original_text)`, so `_skill` embeds the complete second
+  `---` block under the generated one and G3 remains reproducible. Conversely,
+  syntactically valid non-mapping YAML is converted to `{}` and stripped. A
+  direct probe with
+  `---\nintro paragraph\n---\n# H\nBody` returned `{}` plus `# H\nBody`,
+  silently deleting `intro paragraph` even though that shape can be ordinary
+  Markdown horizontal rules rather than frontmatter. The tests cover only a
+  valid mapping and cannot distinguish these failure modes.
+- **suggested direction:** Detect the leading fenced shape independently, then
+  accept only a valid mapping as frontmatter. Fail closed on malformed or
+  non-mapping fenced content instead of either embedding a second block or
+  silently dropping text. Add regressions for invalid YAML and non-mapping /
+  horizontal-rule content.
+- **resolution:** resolved (follow-up commit) — `_split_leading_frontmatter` now
+  detects the leading fence *structurally* (independent of YAML validity) and
+  **raises ValueError** on an invalid-YAML or non-mapping leading block, instead of
+  embedding it (invalid case) or silently dropping the text (non-mapping case). A
+  `---` rule that is not the leading block stays body. Regressions added for all
+  four shapes (invalid YAML, non-mapping/rule, mid-body rule preserved,
+  no-trailing-newline fence); the two fail-closed tests were mutation-verified
+  against the old lenient splitter.
+
+### F4 — The new lifecycle contract is not recorded in an ADR
+
+- **severity:** minor
+- **location:** `docs/neurobase-spec-appendix.md:1549`
+- **issue:** This diff adds a public command, a new ledger event, and a new
+  `accepted → proposed` lifecycle transition. It also changes ADR-0007 D14/D15's
+  settled rationale that an accepted proposal cannot be metadata-transitioned
+  while its installed artifact remains in place. AGENTS.md lines 276–277 require
+  every behavioral-contract change to update the spec *and* be noted in an ADR,
+  while the ADR policy makes accepted records immutable. The spec was updated,
+  but the diff contains no new/superseding ADR, so the durable decision record
+  still describes the pre-revert lifecycle.
+- **suggested direction:** After resolving F1/F2's semantics, add the required
+  ADR that explicitly revises/supersedes the affected ADR-0007 lifecycle and
+  consent clauses, and update the ADR index/status according to repository
+  policy.
+- **resolution:** deferred — will land with the G2 redesign (F1/F2): a new ADR
+  revising ADR-0007's lifecycle/consent clauses is part of the round-2 work, once
+  the drift-repair-only semantics are settled. Writing it now would just be rewritten.
+
+Verification:
+
+- `git diff 30696a8..HEAD` and `git diff --check 30696a8..HEAD`
+- Focused affected suites:
+  `tests/test_emitters.py tests/test_proposals.py tests/test_metrics.py
+  tests/test_cli_recommend.py tests/test_recommender_install.py` — passed
+- Direct CLI reproductions for `accept → revert → accept` and
+  `accept → revert → reject` — reproduced F1/F2 as described
+- Direct `_split_leading_frontmatter` malformed/non-mapping probes — reproduced
+  F3 as described
+- `make ci` with a sandbox-local uv cache — all checks passed:
+  `1252 passed, 1 skipped`, total coverage `91.88%`
+
+**Verdict:** changes-requested — the green gate does not cover two broken G2
+lifecycle paths, G3's parser still has unsafe edge behavior, and the new
+contract lacks its required ADR.

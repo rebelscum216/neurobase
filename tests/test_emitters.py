@@ -242,3 +242,78 @@ def test_skill_strips_draft_own_frontmatter_no_doubling(
     assert fm["description"] == "A precise git staging helper"
     assert "# Heading" in body
     assert "Body." in body
+
+
+def _skill_candidate_with_draft(draft: str) -> RankedCandidate:
+    return RankedCandidate(
+        **{**_candidate(kind="skill", target="user-skill").__dict__, "draft": draft}
+    )
+
+
+def test_skill_rejects_draft_with_invalid_yaml_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: a leading `---` block with invalid YAML must fail closed (ValueError),
+    never be embedded verbatim under our block (which would re-double frontmatter)."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    candidate = _skill_candidate_with_draft("---\nfoo: [unclosed\n---\n\n# H\n\nBody.")
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    with pytest.raises(ValueError, match="not valid YAML"):
+        emitters.prepare(root, doc, skill_scope="user")
+
+
+def test_skill_rejects_draft_with_non_mapping_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: a leading `---` block that parses to a non-mapping (a scalar — e.g. an
+    ordinary Markdown rule around prose) must fail closed, never silently drop the
+    text between the fences."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    candidate = _skill_candidate_with_draft("---\nintro paragraph\n---\n# H\n\nBody.")
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    with pytest.raises(ValueError, match="not a YAML mapping"):
+        emitters.prepare(root, doc, skill_scope="user")
+
+
+def test_skill_preserves_a_mid_body_horizontal_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: a `---` rule that is NOT the leading block is body content — never
+    mistaken for frontmatter, never stripped."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    candidate = _skill_candidate_with_draft("# H\n\nfirst\n\n---\n\nsecond")
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    _fm, body = _skill_artifact_frontmatter(emitters.prepare(root, doc, skill_scope="user").after)
+
+    assert "first" in body and "second" in body
+    assert "\n---\n" in body  # the rule survived intact
+
+
+def test_skill_strips_frontmatter_without_trailing_newline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: a valid mapping fence that ends at EOF (no blank line after the closing
+    `---`) is still detected and stripped."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    candidate = _skill_candidate_with_draft("---\ndescription: Terse helper\n---")
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    fm, body = _skill_artifact_frontmatter(emitters.prepare(root, doc, skill_scope="user").after)
+
+    assert fm["description"] == "Terse helper"
+    assert not body.lstrip().startswith("---")

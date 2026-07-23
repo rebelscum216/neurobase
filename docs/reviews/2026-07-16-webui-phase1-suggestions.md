@@ -16,7 +16,7 @@ created: 2026-07-16
 loopback-only Starlette+Jinja2 app for reviewing recommender proposals —
 list/detail with metrics, accept preview (diff) → CSRF-gated commit, reject,
 edit — installing through the same choreography as the CLI. Alongside the code:
-promote the surface to law (spec §14 + ADR-0015), record two live-smoke
+promote the surface to law (spec §14 + ADR-0019), record two live-smoke
 findings as known-gaps G2/G3, and land the two working plans for what comes
 next (session→fact provenance hardening; the app-shell UI phases).
 
@@ -32,7 +32,7 @@ next (session→fact provenance hardening; the app-shell UI phases).
   `templates/` (server-rendered, zero JS).
 - `src/neurobase/cli/__init__.py` — `recommend_accept` now delegates to the
   install service; new lazy-importing `ui` command (`--root`, `--port`).
-- `docs/neurobase-spec-appendix.md` §14 + `docs/adr/0015-webui-surface.md` —
+- `docs/neurobase-spec-appendix.md` §14 + `docs/adr/0019-webui-surface.md` —
   the surface's behavioral contract.
 - `docs/known-gaps.md` — G2 (accepted-state/disk drift, no revert path),
   G3 (emitter frontmatter doubling; `description` from `candidate_type`).
@@ -55,7 +55,7 @@ next (session→fact provenance hardening; the app-shell UI phases).
    `prepare_install` fresh)?
 3. The D-1 extraction — behavior preservation in `recommend_accept`
    (messages/exit codes/short-circuits byte-for-byte).
-4. Spec §14 / ADR-0015 accuracy — does the written law match the shipped code
+4. Spec §14 / ADR-0019 accuracy — does the written law match the shipped code
    exactly? A spec/code divergence here is a blocker by our own rules.
 5. The two plan docs' load-bearing claims (they cite `file:line` throughout).
    Plans are plans, not contracts — flag wrong claims, not disagreements with
@@ -64,7 +64,7 @@ next (session→fact provenance hardening; the app-shell UI phases).
 **Known risks / tradeoffs.**
 - `cli/__init__.py` lazily imports `webui.app.serve` in the `ui` command — the
   one sanctioned coupling (mirrors `mcp serve`), judged intentional in an
-  earlier security pass; ADR-0015 records it.
+  earlier security pass; ADR-0019 records it.
 - Flash messages ride a query param (no sessions/cookies by design) — they are
   user-visible echo text, HTML-escaped by Jinja autoescape.
 - G2/G3 are documented, deliberately not fixed here (scope discipline).
@@ -111,13 +111,13 @@ next (session→fact provenance hardening; the app-shell UI phases).
   DNS rebinding a hostile page becomes same-origin with the loopback server
   and can drive every mutating route.
 - **suggested direction:** reject non-loopback Host authorities (allowlist)
-  before the origin comparison; extend §14/ADR-0015 so the allowlist is
+  before the origin comparison; extend §14/ADR-0019 so the allowlist is
   contract, not accident; test that a matching-but-foreign Host+Origin 403s.
 - **resolution:** resolved — `is_loopback_host` allowlist
   (`127.0.0.1`/`localhost`/`::1`) enforced by the middleware on **every
   method** (not just POST, so a rebound page cannot read pages or the token
   either), re-checked inside `check_same_origin_csrf` for direct callers;
-  §14 + ADR-0015 extended; tests cover the exact rebinding shape
+  §14 + ADR-0019 extended; tests cover the exact rebinding shape
   (matching-but-foreign Host+Origin+token → 403), localhost acceptance, and
   the hostname vocabulary.
 

@@ -1,4 +1,4 @@
-# ADR-0015: Web UI — loopback server as a peer presentation layer
+# ADR-0019: Web UI — loopback server as a peer presentation layer
 
 - **Status:** Accepted
 - **Date:** 2026-07-16

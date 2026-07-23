@@ -31,13 +31,13 @@ This file exists because nothing else in `docs/` was the right home for it:
 
 ### G1 — the D11 store-schema guard is enforced per-command by hand, not at the store boundary
 
-- **status:** mostly fixed (ADR-0015 — the `StoreHandle` chokepoint; migration steps
-  1–5, `docs/reviews/2026-07-2*-*handle*.md`). The store-tree/registry **accessor**
-  class is closed and CI-enforced by `scripts/check_store_chokepoint.py`; the guided
-  `init` flow guards before mutating. **Two lifecycle paths remain open** and are
-  tracked for **ADR-0015 step 4d** (see *Residual gaps* below): `init --agent`'s backup
-  write and `uninstall --purge-store`'s direct delete both touch the store without the
-  guard. G1 flips to `fixed` when 4d lands.
+- **status:** open — the store-tree/registry **accessor** class is closed and
+  CI-enforced (ADR-0015 — the `StoreHandle` chokepoint; migration steps 1–5,
+  `docs/reviews/2026-07-2*-*handle*.md`; guard `scripts/check_store_chokepoint.py`), and
+  the guided `init` flow guards before mutating. It stays `open` because **two lifecycle
+  paths remain**, tracked for **ADR-0015 step 4d** (see *Residual gaps* below):
+  `init --agent`'s backup write and `uninstall --purge-store`'s direct delete both touch
+  the store without the guard. Flips to `fixed` when 4d closes both.
 - **severity:** major — spec §10 says *"refuse to **operate** on a schema newer
   than the binary."* No read-only exemption exists in the contract. At least one
   path **mutates** a newer-schema store before the guard runs, which is the exact

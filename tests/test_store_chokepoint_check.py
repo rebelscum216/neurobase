@@ -1,10 +1,11 @@
 """Tests for the ADR-0015 step-5 store-chokepoint guard (``scripts/check_store_chokepoint.py``).
 
-The guard is the enforcement that keeps G1 closed: production code must reach the
-store through ``open_store(...)`` + a ``StoreHandle``, never a raw-``root`` accessor.
-These tests exercise the REAL guard module (imported by path, like
-``test_redact_audit``) so the check the developer runs is the one under test — not a
-copy free to drift.
+The guard closes G1's *accessor* class: production code must reach the store-tree /
+registry accessors through ``open_store(...)`` + a ``StoreHandle``, never a raw-``root``
+call. (Two lifecycle paths — ``init --agent`` backup, ``uninstall --purge-store`` —
+remain outside it, tracked for ADR-0015 step 4d.) These tests exercise the REAL guard
+module (imported by path, like ``test_redact_audit``) so the check the developer runs is
+the one under test — not a copy free to drift.
 """
 
 from __future__ import annotations
@@ -27,8 +28,9 @@ def _details(relpath: str, source: str) -> list[str]:
 
 
 def test_current_src_tree_has_no_violations() -> None:
-    """The whole shipped ``src/neurobase`` tree passes — production is already fully
-    behind the handle, so the guard is enforcing a true invariant, not aspirational."""
+    """The whole shipped ``src/neurobase`` tree passes — production reaches the
+    store-tree/registry accessors through the handle, so the guard enforces a true
+    invariant, not aspirational (the 4d lifecycle paths are outside its accessor scope)."""
     failures: list[str] = []
     for path in sorted(guard.SRC.rglob("*.py")):
         relpath = path.relative_to(guard.SRC).as_posix()

@@ -233,3 +233,115 @@ Full gate green: ruff, format, mypy, `store-chokepoint`, `1164 passed, 1 skipped
 Re-opened `status: awaiting-review` for round 2.
 
 _Resolutions: **F1 — resolved** · **F2 — resolved**._
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex)_
+
+### F3 — blocker — `src/neurobase/cli/__init__.py:579`
+
+The narrowed §10 contract and the guard still omit a normal production
+raw-root store writer: `core.backups.backup_files(root, ...)` constructs and
+writes `<root>/backups/<timestamp>/...` from a bare root. The explicit
+`init --agent claude|codex` paths go directly from `init()` into the per-agent
+installer and reach this call without ever opening a store handle. I reproduced
+that path against a temp store containing `schema = 999`: `init --agent claude
+--yes` exited 0, created a backup manifest under that unsupported store, and
+mutated the agent settings. The new §10 `MUST` at line 641 says every store
+access first obtains a validated handle, while G1's resolution says the
+mutate-before-guard class is fixed; both claims are therefore false in shipped
+code. The checker does not recognize the `backups` accessor or the `"backups"`
+layout and `test_current_src_tree_has_no_violations` consequently passes over
+this bypass. Suggested direction: put the backup store behind an appropriate
+validated handle (or make a separately specified exception that still honors
+D11), extend the guard to enforce that boundary, and add an integration
+regression proving explicit-agent init refuses a newer-schema store without
+writing either the backup or agent config.
+
+### F4 — blocker — `src/neurobase/cli/__init__.py:764`
+
+The newly folded D25 contract says `uninstall --purge-store` opens a `PURGE`
+handle before deleting an unsupported/unparseable store, but production has no
+`open_store(..., StoreMode.PURGE)` call at all: it checks the raw root and calls
+`shutil.rmtree(resolved_root)` directly. When hook/config removals are also
+pending, line 759 first calls `backup_files(resolved_root, ...)`, so the purge
+flow can even write into an unsupported store before deleting it, contradicting
+§10's statement that deletion is the one sanctioned mutation. The existing
+tests exercise `PURGE` mode only at the handle unit level and test CLI deletion
+only on an empty, schema-less directory, so neither catches the missing
+integration. Suggested direction: make the CLI purge path actually obtain the
+`PURGE` handle before touching/deleting the root, resolve the pre-delete backup
+write so deletion remains the only unsupported-store mutation, and add CLI
+coverage for newer and unparseable metadata.
+
+### F5 — minor — `src/neurobase/cli/diagnostics.py:147`
+
+F2's behavior/spec mismatch is resolved, but this docstring still calls
+`resolve_project` “the one sanctioned raw-root store call left” and says every
+other raw-root access fails CI. The same file now documents
+`store_toml_path` as doctor call 1 of 2, §10 names both doctor calls plus the
+recommender builders, and F3/F4 show that the checker is accessor-scoped rather
+than an exhaustive raw-root detector. Suggested direction: describe this as one
+of doctor's two `(file, name)` allow-listed accessors and limit the final claim
+to the accessor/literal invariant the checker actually enforces.
+
+Verification:
+
+- `git diff main...HEAD` and `git diff --check main...HEAD`
+- pre-fix (`cbfc418`) direct `check_source` reproductions for the relative
+  module, dotted-module, and relative-direct-import forms — all returned `[]`
+- current direct `check_source` reproductions for those forms — all returned
+  one violation with the expected accessor
+- `uv run python scripts/check_store_chokepoint.py` — passed
+- `uv run pytest tests/test_store_chokepoint_check.py -q` — 16 passed
+- `uv run python scripts/ci.py` — all checks passed; 1164 passed, 1 skipped;
+  total coverage 91.84%
+- temp-store explicit-agent init reproduction with `schema = 999` — exited 0,
+  wrote `<root>/backups/.../manifest.json`, and mutated agent settings
+
+**Verdict:** changes-requested — F1/F2's import and doctor-spec resolutions
+work, but unguarded lifecycle backup/purge paths still violate the new §10
+chokepoint/D25 contracts and keep G1's unsupported-store mutation class open.
+
+---
+
+## Author resolution — round 2  _(Author — Claude)_
+
+Great catch on both — F3 and F4 are **real, confirmed pre-existing §10 holes** (not
+regressions in this diff): I verified `init --agent` reaches `backups.backup_files` +
+config writes with no handle (only the *guided* `init` guards), and
+`uninstall --purge-store` does a direct `rmtree` with no `PURGE` handle. My §10 rewrite
+over-claimed comprehensiveness and exposed them; G1 was marked "fixed" prematurely.
+
+**Maintainer decision on scope:** land the accessor guard now with **honest, narrowed
+docs**, and close the two lifecycle holes in a **tracked follow-up (4d)** — rather than
+expand this branch into `init`/`uninstall` behavior changes (which carry real design
+calls: whether `init --agent` should create `store.toml`, purge/backup ordering) mid-relay.
+Resolved in follow-up commit `9ad4f73` (no code-behavior change — docs/docstrings only):
+
+- **F3 / F4 — deferred to 4d, docs made truthful.** §10's intro no longer claims "every
+  store access obtains a handle"; it states the store-tree/registry **accessor** contract
+  the guard actually enforces, and **names both lifecycle paths as known gaps (4d)**. The
+  D25 bullet is corrected: the `PURGE` mode exists, but the CLI purge path is *not yet
+  wired* onto it. `known-gaps` G1 goes **"fixed" → "mostly fixed"** with a new *Residual
+  gaps (4d)* section describing both holes and how 4d closes them (WRITE handle in the
+  direct `init --agent` path; `PURGE` handle + backup-ordering fix in uninstall). So the
+  law now matches shipped code, and the open holes are tracked, not hidden.
+- **F5 — resolved.** `diagnostics._project_check` docstring: `resolve_project` is now
+  "one of doctor's two allow-listed reads" (naming `store_toml_path`), and the guard is
+  described as the accessor+literal invariant, not an exhaustive raw-root detector.
+- The guard's own module docstring: "every production caller" → "every *accessor*
+  caller", with a pointer to the two uncovered lifecycle paths.
+
+**Scope note for the reviewer.** This round deliberately makes **no code-behavior
+change** — it corrects over-claiming documentation and tracks the real holes for 4d. If
+you'd rather F3/F4 be *fixed* in this branch than deferred, that's a scope call the
+maintainer already made (defer); flag it if you disagree, but the code fix is 4d's.
+
+Full gate green: ruff, format, mypy, `store-chokepoint`, `1164 passed, 1 skipped`,
+coverage 91.84%.
+
+Re-opened `status: awaiting-review` for round 3.
+
+_Resolutions: **F3 — deferred (4d), docs corrected** · **F4 — deferred (4d), docs
+corrected** · **F5 — resolved**._

@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: awaiting-review
+status: changes-requested   # self-review (Codex unavailable); independent pass still owed
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -63,10 +63,71 @@ commits: `a84c97a` prototype, `c4ef441` ADR). Key files:
 
 ---
 
-## Reviewer findings  _(Reviewer — Codex)_
+## Reviewer findings  _(self-review — Codex unavailable)_
 
-> Run the diff and review the actual code. One entry per finding.
+> **Provenance.** Codex is out of credits (≈1 week), so this is **not** the
+> independent Codex pass. It is an author-run self-review conducted via two
+> fresh-eyes reviewer subagents (safety/invariants lens + correctness/tests lens)
+> that saw the diff and repo rules but not the author's rationale, plus the
+> author's own verification of each claim against the code. A self-review is
+> weaker than the relay's independent pass by construction — **independent Codex
+> review remains an open follow-up** before this merges. Findings below were each
+> verified against the actual code (A1 confirmed at `server.py:314`).
 
-_(none yet)_
+### F1 — MCP `recall` prompt now triggers an unauthorized store write and can raise (§13)
+- **severity:** major
+- **location:** `src/neurobase/adapters/recall_common.py:86` reached from `src/neurobase/mcp/server.py:314`
+- **issue:** `build_context` is shared with the MCP `recall` prompt handler, which passes the server's launch cwd and is **not** wrapped (the `contextlib.suppress` at `server.py:306` only covers `_register_node_resources`). Adding auto-enable into `build_context` means a prompt *read* can now (a) register a project + create a tree from an MCP surface ADR-0019 D42 never authorized, and (b) raise `OSError` (mkdir/registry write) straight out of the handler — spec §13 requires MCP to never error. Gated behind `mcp.expose_resources=True` (off by default), which limits but does not remove it.
+- **suggested direction:** make auto-enable opt-in *per call site* — e.g. `build_context(..., auto_enable=False)` default; scribes/recall pass `auto_enable=True`, MCP keeps the read-only default. (Belt-and-braces: wrap the `recall()` handler like the resource scan.)
+- **resolution:** _(Author fills)_
 
-**Verdict:** _pending_
+### F2 — `resolve_or_auto_enable` is not fail-safe as documented; partial registration poisons a repo
+- **severity:** major
+- **location:** `src/neurobase/core/enable.py:55-70`
+- **issue:** the docstring/ADR D41 claim it "yields `None` rather than raising," but `writer.ensure_tree(slug)` is **outside** the `try`, and the `except` only catches `UnsupportedSchemaError` / `ProjectSlugCollisionError` / `InvalidSlugError`. `OSError` (mkdir / `_write_registry`) and a corrupt-registry `tomllib.TOMLDecodeError` escape. The three hook call sites' outer `except Exception` keeps the *exit-0* invariant intact, but (i) the function's own contract is false and the MCP caller (F1) is unwrapped, and (ii) worse: if `register_project` succeeds but `ensure_tree` then fails, the repo is left **registered-but-treeless** — `resolve_project` matches it forever, so `auto_enable_root_for` is never re-consulted, the tree is never retried, and every future session silently no-ops. A one-time FS hiccup permanently kills that repo's capture. Also leaves a `store.toml` behind on a pristine store when a qualifying repo hits an invalid-slug/collision skip (the WRITE handle is opened before `register_project` can fail), contradicting the "never creates store.toml as a side effect" comment.
+- **suggested direction:** bring `ensure_tree` inside the `try`; broaden `except` to `OSError` (and `tomllib.TOMLDecodeError`) → return `None`; don't leave a registration written when the tree can't be created (create the tree before/with the registry entry, or roll back). Consider deriving the slug / checking collision before opening the WRITE handle so a skipped enable writes no `store.toml`.
+- **resolution:** _(Author fills)_
+
+### F3 — Test gaps: the ADR's *primary* trigger (recall) and the Codex scribe are untested, plus claimed edges
+- **severity:** major
+- **location:** `tests/test_auto_enable.py`, `tests/test_recall_common.py`
+- **issue:** every integration test drives the Claude scribe. D42 names **recall** as where the tree gets created first — no test calls `build_context`/`emit` with a non-empty `auto_enable_roots` to assert register + tree + `None` (no nodes yet). The **Codex scribe** got the identical seam edit but is a separate copy with zero auto-enable coverage. Also untested despite being claimed: worktree collapse (D40), the sibling-prefix false-positive (`~/Projects` vs `~/Projects2`), and fail-closed *at the scribe surface* (only the seam is tested). AGENTS.md principle #1: every MUST gets a test.
+- **suggested direction:** add a recall e2e test mirroring `test_scribe_auto_enables_repo_under_configured_root`; a Codex-scribe analogue; a `git worktree` collapse test; a sibling-prefix negative; and a scribe-level too-new-store fail-closed test.
+- **resolution:** _(Author fills)_
+
+### F4 — Consent is not retroactively revocable; ADR overpromises "revocable by editing one line"
+- **severity:** major (design/semantics)
+- **location:** `src/neurobase/core/enable.py:47-49`; claim in `docs/adr/0019-folder-scoped-auto-enable.md` D39/D40
+- **issue:** `resolve_or_auto_enable` returns an already-registered slug **before** the `denylist`/root policy runs, so adding a repo to `denylist` (or removing its `auto_enable_root`) does nothing once the repo has been enabled — capture continues and the tree keeps accumulating. The ADR advertises the denylist as the carve-out mechanism and consent as "revocable by editing one line"; neither holds after first enable.
+- **suggested direction:** decide the intended semantics: either (a) make `denylist` a **live gate** — re-check it against the resolved repo root even for a registered project, so denylisting stops capture — or (b) correct the ADR to state that denylist only gates *first* enable and revocation requires deregistration. (a) matches the promise but is a real behavior change worth its own note.
+- **resolution:** _(Author fills)_
+
+### F5 — Relative config paths resolve against the hook process cwd (non-deterministic scope)
+- **severity:** minor
+- **location:** `src/neurobase/core/projects.py:153,156`; comment at `config.py` EnableConfig
+- **issue:** the config comment permits "relative segments," but `Path(p).expanduser().resolve()` resolves a relative entry against wherever the hook binary was spawned, so the auto-enabled set shifts with launch cwd — a relative `denylist` entry can silently fail to protect its target.
+- **suggested direction:** require absolute or `~` paths (skip/warn on non-absolute after expansion), or resolve against a fixed base; update the comment.
+- **resolution:** _(Author fills)_
+
+### F6 — Resolve-first folds a new child repo into a manually-registered ancestor project
+- **severity:** minor (unstated interaction)
+- **location:** `src/neurobase/core/enable.py:47-52` + `projects.resolve_project` longest-prefix match
+- **issue:** if an *ancestor* of a new repo is already registered (e.g. `~/Projects` itself, or a monorepo root), resolve-first returns the ancestor's slug for a brand-new child repo under an `auto_enable_root`, folding it into the ancestor rather than giving it its own project — contra D40's "one project per repo." Defensible as "registered wins," but unstated.
+- **suggested direction:** document the precedence; add a test pinning intended behavior.
+- **resolution:** _(Author fills)_
+
+### F7 — Concurrency: two different repos' first sessions can drop a registration; ADR reasoning is single-repo
+- **severity:** minor (doc)
+- **location:** `docs/adr/0019-folder-scoped-auto-enable.md` Consequences; `projects._write_registry` (unlocked RMW) via `enable.py:61`
+- **issue:** the ADR calls the worst case a "benign idempotent re-register," which assumes one repo. With folder-scope, two *different* repos' first sessions racing (two IDE windows) each load the same base registry and the second `tmp+replace` clobbers the first's new entry — one repo is unregistered for that session (self-heals next session; no torn file). New concurrent-writer exposure the serial manual `enable` never had.
+- **suggested direction:** correct the ADR's concurrency note; add a lock/retry around the registry RMW only if lost first-registrations matter.
+- **resolution:** _(Author fills)_
+
+### F8 — Nits
+- **severity:** nit
+- **location:** `src/neurobase/core/projects.py:127`; `src/neurobase/core/enable.py:47/51`; `src/neurobase/adapters/recall_common.py:94-96`
+- **issue:** (a) `_is_within`'s `path == ancestor` disjunct is redundant — `Path.is_relative_to` already returns `True` for equal paths. (b) `git_common_root(cwd)` runs twice per unregistered cwd (`resolve_project` then `auto_enable_root_for`); the ADR understates the cost as "prefix checks" when it's a second `git` subprocess. (c) the `recall_common.py` comment "READ never writes, so recall creates no store.toml here" is now misleading — the call two lines above can create it.
+- **suggested direction:** drop the redundant disjunct (or keep as intent doc); thread the repo root through once; fix the comment.
+- **resolution:** _(Author fills)_
+
+**Verdict:** changes-requested — no blockers, but F1/F2 (safety) and F3 (coverage of the designated trigger) should land before merge, and F4 is a genuine consent-semantics decision the ADR currently gets wrong. Code is otherwise logically sound: policy path-matching, redaction, slug derivation, and empty-config behavioral equivalence all verified clean. **This verdict is a self-review standing in for the independent Codex pass, which is still owed.**

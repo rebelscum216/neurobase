@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from neurobase.core import locks
+from neurobase.core.store_handle import StoreMode, open_store
 
 
 def test_file_lock_is_nonblocking_and_releases(tmp_path: Path) -> None:
@@ -58,7 +59,9 @@ with try_file_lock(Path(sys.argv[1])) as acquired:
 
 
 def test_curate_lock_is_scoped_by_store_and_project(tmp_path: Path) -> None:
-    first = locks.curate_lock_path(tmp_path / "one", "project")
-    second_store = locks.curate_lock_path(tmp_path / "two", "project")
-    second_project = locks.curate_lock_path(tmp_path / "one", "other")
+    one = open_store(tmp_path / "one", StoreMode.READ)
+    two = open_store(tmp_path / "two", StoreMode.READ)
+    first = locks.curate_lock_path(one, "project")
+    second_store = locks.curate_lock_path(two, "project")
+    second_project = locks.curate_lock_path(one, "other")
     assert len({first, second_store, second_project}) == 3

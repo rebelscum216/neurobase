@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import BinaryIO
 
-from neurobase.core import store
+from neurobase.core.store_handle import StoreHandle
 
 
 def _try_lock(handle: BinaryIO) -> bool:
@@ -66,10 +66,19 @@ def try_file_lock(path: Path) -> Iterator[bool]:
         handle.close()
 
 
-def curate_lock_path(root: Path, project: str) -> Path:
-    return store.memory_dir(project, root) / ".locks" / "curate.lock"
+def curate_lock_path(handle: StoreHandle, project: str) -> Path:
+    return handle.memory_dir(project) / ".locks" / "curate.lock"
 
 
-def try_curate_lock(root: Path, project: str) -> contextlib.AbstractContextManager[bool]:
-    """Non-blocking, per-store/project single-flight lock for curation."""
-    return try_file_lock(curate_lock_path(root, project))
+def try_curate_lock(
+    handle: StoreHandle, project: str
+) -> contextlib.AbstractContextManager[bool]:
+    """Non-blocking, per-store/project single-flight lock for curation.
+
+    Takes a validated ``StoreHandle`` (not a raw root): the lock path is built
+    from ``handle.memory_dir(project)``, keeping store-path construction behind
+    the schema chokepoint (ADR-0015). The sole production caller (``cli.curate``)
+    already holds a READ handle, so threading it here is strictly cleaner than a
+    self-open — the same call it made passing ``handle.root`` now passes ``handle``.
+    """
+    return try_file_lock(curate_lock_path(handle, project))

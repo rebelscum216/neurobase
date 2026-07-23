@@ -217,7 +217,7 @@ def curate(
         typer.echo("Not an enabled project (no registered root matches this directory).")
         raise typer.Exit(code=1)
 
-    with locks.try_curate_lock(handle.root, project_slug) as acquired:
+    with locks.try_curate_lock(handle, project_slug) as acquired:
         if not acquired:
             typer.echo(f"Curate already running for project {project_slug!r}; skipping.")
             return

@@ -13,6 +13,7 @@ import neurobase.cli as cli
 from neurobase.brain.base import Brain
 from neurobase.cli import app
 from neurobase.core import locks, store
+from neurobase.core.store_handle import StoreMode, open_store
 
 runner = CliRunner()
 
@@ -123,7 +124,7 @@ def test_curate_busy_lock_skips_before_brain(
         raise AssertionError("a lock loser must not resolve or invoke a brain")
 
     monkeypatch.setattr(cli, "resolve_brain", fail_if_resolved)
-    with locks.try_curate_lock(root, "myrepo") as acquired:
+    with locks.try_curate_lock(open_store(root, StoreMode.READ), "myrepo") as acquired:
         assert acquired
         result = runner.invoke(app, ["curate", "--root", str(root), "--cwd", str(repo)])
     assert result.exit_code == 0

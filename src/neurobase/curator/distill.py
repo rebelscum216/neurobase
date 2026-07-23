@@ -29,6 +29,7 @@ from typing import Any
 from neurobase.brain.base import Brain, BrainError
 from neurobase.core import store
 from neurobase.core.redact import redact, redact_command
+from neurobase.core.store_handle import StoreMode, open_store
 from neurobase.curator import budget
 
 # Tuned defaults (spec §8).
@@ -239,7 +240,16 @@ def _bound(digest: str) -> str:
 
 
 def _digests_dir(root: Path, project: str) -> Path:
-    return store.memory_dir(project, root) / "raw" / _DIGESTS_DIRNAME
+    # ADR-0015 4b: build the digest-cache path behind the schema chokepoint by
+    # self-opening a READ handle rather than calling ``store.memory_dir`` on a raw
+    # root. ``distill_docs`` keeps its ``root`` signature (~20 test call sites), so
+    # self-open here — the 3.7 recommender precedent (self-open when there are many
+    # callers) rather than 4a/locks threading (thread when the sole caller holds a
+    # handle). The engine already runs distill under its own validated curate
+    # handle, so this is a redundant-but-cheap guard; the open sits inside
+    # ``_distill_one``'s try, so a would-be schema failure degrades that raw to its
+    # skim (D16: distill never aborts a pass) instead of raising.
+    return open_store(root, StoreMode.READ).memory_dir(project) / "raw" / _DIGESTS_DIRNAME
 
 
 def _source_fingerprint(

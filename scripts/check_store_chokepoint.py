@@ -3,35 +3,48 @@
 
 The ``StoreHandle`` chokepoint (ADR-0015) only closes G1 if it is *unavoidable*:
 production code must reach the store through a validated handle, never by calling a
-raw-``root`` store/registry accessor or by hand-building a store path. Steps 3/4a/4b
-converted every production caller onto ``open_store(...)`` + handle methods; this
-check is what keeps them there — a new call site that reconstructs the old
-bare-``root`` footgun fails CI instead of silently re-opening the hole.
+raw-``root`` store/registry accessor or referencing the store-metadata filenames.
+Steps 3/4a/4b converted every production caller onto ``open_store(...)`` + handle
+methods; this check is what keeps them there — a new call site that reintroduces a
+raw-``root`` accessor fails CI instead of silently re-opening the hole.
 
 **Scope (deliberately ``src/`` only).** The raw-``root`` functions still *exist* on
 ``core.store`` / ``core.projects`` — the ADR's "remove the signatures" step is
 deferred (they remain the low-level implementation the handle methods delegate to,
 and the test suite's store-setup helpers). This guard enforces the invariant where
 it matters — production modules under ``src/neurobase/`` — and exempts the three core
-modules that legitimately construct store paths.
+modules that ARE the store/registry implementation.
 
-**What is forbidden** outside the exempt modules:
-- calling a project-scoped store path-builder / tree accessor (``memory_dir``,
-  ``ensure_tree``, ``list_raw``, ``upsert_curated``, ``write_node``, …) with a raw
-  root, or a registry accessor (``load_registry`` / ``register_project`` /
-  ``resolve_project``) — these are exactly "construct a store path from a bare root"
-  and "read ``registry.toml``";
+**What is forbidden** outside the exempt modules — the *accessor* contract, stated to
+exactly match what is mechanically enforceable:
+- calling a raw-``root`` store tree/metadata accessor (``memory_dir``, ``ensure_tree``,
+  ``list_raw``, ``list_curated``, ``write_raw``, ``upsert_curated``, ``write_node``,
+  ``rebuild_index``, …) or a registry accessor (``load_registry`` /
+  ``register_project`` / ``resolve_project``) — whether reached as ``store.x`` /
+  ``projects.x``, via a dotted module (``neurobase.core.store.memory_dir``), or by a
+  direct/relative import (``from ..core.store import memory_dir``);
 - the store-metadata filename literals ``"store.toml"`` / ``"registry.toml"``.
 
-Appending a subdir to a *handle-derived* path (``handle.memory_dir(p) / "nodes"``) is
-fine and intentionally not matched — the chokepoint already ran to produce that path.
+**What is deliberately *not* matched** (and why the contract is scoped to accessors,
+not "any store path from a bare root"): appending a subdir to a *handle-derived* path
+(``handle.memory_dir(p) / "nodes"``) is the sanctioned pattern; and a bare
+``root / "projects" / … / "memory"`` layout cannot be distinguished by shape from the
+Claude app's own ``~/.claude/projects/<x>/memory`` (``recommender/seed.py``) without
+data-flow analysis — so path-fragment matching would false-positive. The guard keys on
+the named accessors + metadata literals instead, and the §10 contract says exactly
+that. See ``docs/neurobase-spec-appendix.md`` §10.
 
-**The one sanctioned exception** (ADR-0015 registry carve-out, F1): ``doctor`` must
-report on a store whose ``store.toml`` is corrupt — when *no* handle can open — and
-project resolution is a ``registry.toml`` concern, independent of the store-schema
-guard. So ``cli/diagnostics.py`` may call ``projects.resolve_project(root, cwd)`` and
-``store.store_toml_path(root)`` on the no-handle path. Those two are allow-listed
-here by (file, name); nothing else is.
+**Sanctioned raw-``root`` residuals** (pending the deferred signature removal — not
+covered by this guard, documented in §10):
+- ``doctor``'s two corrupt-``store.toml`` reads — ``projects.resolve_project(root, cwd)``
+  and ``store.store_toml_path(root)`` in ``cli/diagnostics.py`` — allow-listed here by
+  (file, name). Project resolution is a ``registry.toml`` concern, independent of the
+  store-schema guard (ADR-0015 registry carve-out, F1), so it is legitimate when no
+  handle can open.
+- the recommender's ``proposals``/``ledger`` **path-builders**
+  (``corpus.proposals_dir`` / ``proposal_path`` / ``ledger_path``), which stay
+  root-taking but are guarded at the command entry that opens their handle. Not in the
+  forbidden set (they are not the accessors this guard tracks).
 """
 
 from __future__ import annotations
@@ -86,6 +99,41 @@ ALLOW: frozenset[tuple[str, str]] = frozenset(
 )
 
 
+def _dotted(node: ast.expr) -> str | None:
+    """The dotted name of a ``Name`` or nested ``Attribute`` chain, else ``None``.
+    ``store`` → ``"store"``; ``neurobase.core.store`` → ``"neurobase.core.store"``.
+    Lets the visitor treat a bare-``Name`` receiver and a dotted-module receiver
+    (``import neurobase.core.store``) uniformly (Codex round-1 F1)."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _module_kind(module: str | None, level: int) -> str | None:
+    """Classify a ``from <module> import …`` target as the ``core`` package, the
+    ``store`` module, or the ``projects`` module — matching absolute *and* relative
+    spellings (``from ..core import store``), since a relative import reaches the
+    same code and must be caught the same way (Codex round-1 F1)."""
+    m = module or ""
+    relative = level > 0
+    if m == "neurobase.core" or (relative and (m == "core" or m.endswith(".core"))):
+        return "core"
+    if m == "neurobase.core.store" or (
+        relative and (m == "core.store" or m.endswith(".core.store"))
+    ):
+        return "store"
+    if m == "neurobase.core.projects" or (
+        relative and (m == "core.projects" or m.endswith(".core.projects"))
+    ):
+        return "projects"
+    return None
+
+
 class _Visitor(ast.NodeVisitor):
     def __init__(self, relpath: str) -> None:
         self.relpath = relpath
@@ -99,18 +147,18 @@ class _Visitor(ast.NodeVisitor):
         self.violations: list[tuple[int, str]] = []
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        mod = node.module or ""
-        if mod == "neurobase.core":
+        kind = _module_kind(node.module, node.level)
+        if kind == "core":
             for alias in node.names:
                 if alias.name == "store":
                     self.store_names.add(alias.asname or "store")
                 elif alias.name == "projects":
                     self.projects_names.add(alias.asname or "projects")
-        elif mod == "neurobase.core.store":
+        elif kind == "store":
             for alias in node.names:
                 if alias.name in STORE_FORBIDDEN:
                     self.direct[alias.asname or alias.name] = alias.name
-        elif mod == "neurobase.core.projects":
+        elif kind == "projects":
             for alias in node.names:
                 if alias.name in PROJECTS_FORBIDDEN:
                     self.direct[alias.asname or alias.name] = alias.name
@@ -130,16 +178,15 @@ class _Visitor(ast.NodeVisitor):
         self.violations.append((lineno, detail))
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if isinstance(node.value, ast.Name):
-            base = node.value.id
-            if base in self.store_names and node.attr in STORE_FORBIDDEN:
-                self._flag(
-                    node.lineno, node.attr, f"store.{node.attr}(...) — raw-root store access"
-                )
-            elif base in self.projects_names and node.attr in PROJECTS_FORBIDDEN:
-                self._flag(
-                    node.lineno, node.attr, f"projects.{node.attr}(...) — raw-root registry access"
-                )
+        # The receiver may be a bare Name (``store.memory_dir``) or a dotted chain
+        # (``neurobase.core.store.memory_dir``) — resolve both to one string.
+        base = _dotted(node.value)
+        if base in self.store_names and node.attr in STORE_FORBIDDEN:
+            self._flag(node.lineno, node.attr, f"store.{node.attr}(...) — raw-root store access")
+        elif base in self.projects_names and node.attr in PROJECTS_FORBIDDEN:
+            self._flag(
+                node.lineno, node.attr, f"projects.{node.attr}(...) — raw-root registry access"
+            )
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:

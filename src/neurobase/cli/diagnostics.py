@@ -92,6 +92,10 @@ def _agent_check(binary: str, which: Callable[[str], str | None]) -> Check:
 
 def _store_checks(root: Path, cwd: Path) -> list[Check]:
     checks: list[Check] = []
+    # Sanctioned raw-root call #1 of doctor's two (the other is resolve_project in
+    # _project_check): the store.toml path is the report *label*, needed even when the
+    # store is corrupt and no handle can open. Allow-listed by (file, name) in the
+    # step-5 chokepoint guard and named in spec §10; see _project_check's docstring.
     meta = store.store_toml_path(root)
     # D26: doctor inspects store health through a DOCTOR handle. DOCTOR never
     # writes store.toml and — unlike READ/WRITE — carries a schema *newer* than we

@@ -73,6 +73,37 @@ def test_flags_directly_imported_forbidden_accessor() -> None:
     assert len(details) == 1 and "memory_dir" in details[0]
 
 
+def test_flags_relative_import_of_store_module() -> None:
+    """A future caller reaching the module via a relative import
+    (``from ..core import store``) must be caught, not just the absolute spelling
+    (Codex round-1 F1: the guard recognized only absolute ``neurobase.core``)."""
+    src = "from ..core import store\n\ndef f(root, p):\n    return store.memory_dir(p, root)\n"
+    details = _details("recommender/x.py", src)
+    assert len(details) == 1 and "memory_dir" in details[0]
+
+
+def test_flags_dotted_module_attribute_access() -> None:
+    """``import neurobase.core.store`` then ``neurobase.core.store.memory_dir(...)``
+    — the receiver is a dotted Attribute chain, not a bare Name (Codex round-1 F1)."""
+    src = (
+        "import neurobase.core.store\n\n"
+        "def f(root, p):\n    return neurobase.core.store.memory_dir(p, root)\n"
+    )
+    details = _details("curator/x.py", src)
+    assert len(details) == 1 and "memory_dir" in details[0]
+
+
+def test_flags_relative_direct_import_of_accessor() -> None:
+    """``from ..core.store import list_raw`` then ``list_raw(root, project)`` (Codex
+    round-1 F1: only the absolute direct-import spelling was recognized)."""
+    src = (
+        "from ..core.store import list_raw\n\n"
+        "def f(root, project):\n    return list_raw(root, project)\n"
+    )
+    details = _details("adapters/x.py", src)
+    assert len(details) == 1 and "list_raw" in details[0]
+
+
 def test_flags_store_toml_literal() -> None:
     src = 'from pathlib import Path\n\ndef f(root):\n    return Path(root) / "store.toml"\n'
     details = _details("mcp/server.py", src)

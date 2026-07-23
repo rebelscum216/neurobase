@@ -668,11 +668,35 @@ handle's constructor is private; `open_store` is the sole entry point.
   project directly from the registry when `store.toml` itself is corrupt and no handle
   can open.
 
-**Enforcement.** Production code (`src/neurobase/`) MUST NOT construct a store path
-from a bare root or read `store.toml`/`registry.toml` outside `core/store.py`,
-`core/store_handle.py`, and `core/projects.py`; the CI guard
-`scripts/check_store_chokepoint.py` fails the gate on any violation. The single
-allow-listed exception is `doctor`'s corrupt-store registry fallback above.
+**Enforcement.** Production store-tree and registry access (`src/neurobase/`) goes
+through `open_store(...)` + a `StoreHandle`. The CI guard
+`scripts/check_store_chokepoint.py` fails the gate when a module **outside** the three
+implementation modules (`core/store.py`, `core/store_handle.py`, `core/projects.py`)
+calls a raw-`root` store/registry **accessor** — `memory_dir`, `ensure_tree`,
+`list_raw` / `list_curated`, `write_raw`, `upsert_curated`, `write_node`,
+`rebuild_index`, `load_registry`, `register_project`, `resolve_project`, … (whether
+reached as `store.x` / `projects.x`, via a dotted module, or by a direct/relative
+import) — or references the `store.toml` / `registry.toml` metadata filenames. The
+guard keys on those accessors and literals, **not** on path shape: a handle-derived
+`handle.memory_dir(p) / "nodes"` is fine, and a bare `root / "projects" / … / "memory"`
+layout is not shape-distinguishable from the Claude app's own
+`~/.claude/projects/<x>/memory`, so it is not matched (the accessor contract is exactly
+what is mechanically enforceable without false positives).
+
+Two categories of raw-`root` construction **remain**, pending the deferred removal of
+the raw-`Path` signatures, and are the guard's documented exceptions rather than
+violations:
+
+- **`doctor`'s two corrupt-`store.toml` reads** — `projects.resolve_project(root, cwd)`
+  (project resolution is a `registry.toml` concern, independent of the store-schema
+  guard, and must survive when no handle can open) and `store.store_toml_path(root)`
+  (the report label, built before `open_store`). Both live only in `cli/diagnostics.py`
+  and are allow-listed in the guard by (file, name).
+- **the recommender's proposal/ledger path-builders** —
+  `corpus.proposals_dir` / `proposal_path` / `ledger_path` build `<root>/proposals/…`
+  and `<root>/recommender/ledger.jsonl` from a bare root, but every caller is guarded by
+  the command entry that opens the handle first. They stay root-taking until the
+  signature removal lands.
 
 ### Project registry
 `<root>/registry.toml`:

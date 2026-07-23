@@ -138,11 +138,15 @@ MCP surfaces a **structured tool error** (D24), `uninstall --purge-store` opens 
 `PURGE` handle (D25, written into spec §10), and `doctor` opens a read-only `DOCTOR`
 handle instead of re-implementing the comparison (D26). The pre-guard registry-read
 pattern can no longer compile — `resolve_project`/`load_registry` production callers
-go through the handle. The **one** sanctioned raw-root survivor is `doctor`'s
-corrupt-`store.toml` project fallback (`cli/diagnostics.py`, a `registry.toml` read
-independent of the store-schema guard), allow-listed by (file, name) in the step-5
-guard; every other raw-root store/registry access in `src/` fails CI. The literal
-removal of the raw-`Path` `store.py`/`projects.py` signatures (they remain the
-low-level implementation the handle methods delegate to, and the test suite's
-store-setup helpers) is deferred; the CI guard is what makes production omission
-impossible in the meantime.
+go through the handle. The step-5 guard forbids the raw-`root` store/registry
+**accessors** and the `store.toml`/`registry.toml` literals outside the three
+implementation modules; two documented residuals remain, pending the deferred
+signature removal (spec §10): `doctor`'s two corrupt-`store.toml` reads
+(`resolve_project` + `store_toml_path` in `cli/diagnostics.py`, `registry.toml`/label
+reads independent of the store-schema guard, allow-listed by (file, name)), and the
+recommender's `proposals`/`ledger` path-builders (`corpus.proposals_dir`/`proposal_path`/
+`ledger_path`), which stay root-taking but are guarded at the command entry that opens
+their handle. The literal removal of the raw-`Path` `store.py`/`projects.py` signatures
+(they remain the low-level implementation the handle methods delegate to, and the test
+suite's store-setup helpers) is deferred; the CI guard is what makes production
+accessor-level omission impossible in the meantime.

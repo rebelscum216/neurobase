@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from neurobase.cli import app
@@ -177,3 +178,67 @@ def test_skill_foreign_ownership_and_redaction(
     assert artifact.foreign is True
     assert "AKIAIOSFODNN7EXAMPLE" not in artifact.after
     assert "neurobase_managed: true" in artifact.after
+
+
+def _skill_artifact_frontmatter(after: str) -> tuple[dict[str, object], str]:
+    """Split a rendered skill artifact into (our frontmatter mapping, body). The
+    body must not itself reopen a `---` block — that would be the G3 doubling."""
+    assert after.startswith("---\n")
+    our_fm, sep, body = after[4:].partition("\n---\n")
+    assert sep, "artifact has no closing frontmatter fence"
+    parsed = yaml.safe_load(our_fm)
+    assert isinstance(parsed, dict)
+    return parsed, body
+
+
+def test_skill_description_prefers_title_over_candidate_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G3: `description` is a human title (the draft's `#` heading), never the
+    `candidate_type` mining label (`repeated-instruction`)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    candidate = _candidate(kind="skill", target="user-skill")
+    candidate = RankedCandidate(
+        **{**candidate.__dict__, "draft": "# Stage git changes surgically\n\nDo the thing."}
+    )
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    fm, _body = _skill_artifact_frontmatter(emitters.prepare(root, doc, skill_scope="user").after)
+
+    assert fm["description"] == "Stage git changes surgically"
+    assert fm["description"] != candidate.candidate_type
+
+
+def test_skill_strips_draft_own_frontmatter_no_doubling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G3: a draft carrying its own `---` frontmatter must not yield a SKILL.md
+    with two frontmatter blocks; our managed keys win and a `description` the draft
+    sets is salvaged (better than the heading or the label)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    candidate = _candidate(kind="skill", target="user-skill")
+    draft = "---\ndescription: A precise git staging helper\nname: bogus\n---\n\n# Heading\n\nBody."
+    candidate = RankedCandidate(**{**candidate.__dict__, "draft": draft})
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    artifact = emitters.prepare(root, doc, skill_scope="user")
+    fm, body = _skill_artifact_frontmatter(artifact.after)
+
+    # exactly one frontmatter block — the body never reopens one
+    assert not body.lstrip().startswith("---")
+    # our managed keys win; the draft's `name: bogus` never leaks in
+    assert fm["name"] == "durable-rule"
+    assert fm["neurobase_managed"] is True
+    assert "bogus" not in artifact.after
+    # the draft's own description is salvaged; its real content survives
+    assert fm["description"] == "A precise git staging helper"
+    assert "# Heading" in body
+    assert "Body." in body

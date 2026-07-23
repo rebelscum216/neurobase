@@ -63,6 +63,28 @@ def _project_root(root: Path, doc: store.Document) -> Path:
     return Path(roots[0])
 
 
+def _split_leading_frontmatter(text: str) -> tuple[dict[str, Any] | None, str]:
+    """Split a leading ``---`` YAML frontmatter block off ``text``.
+
+    Returns ``(mapping, body)`` when ``text`` opens with a well-fenced block —
+    ``mapping`` is the parsed dict (``{}`` when the block parses to a non-mapping),
+    ``body`` is everything after the closing fence with leading blank lines
+    trimmed. Returns ``(None, text)`` when there is no leading block or its YAML is
+    unparseable. Lets ``_skill`` drop a draft's *own* frontmatter before wrapping
+    it, so the installed SKILL.md carries exactly one (our) block instead of two —
+    G3; a consumer reads only the first block, so an embedded second one is
+    silently-dropped content, not a second document."""
+    if not text.startswith("---\n") or "\n---\n" not in text[4:]:
+        return None, text
+    frontmatter, body = text[4:].split("\n---\n", 1)
+    try:
+        parsed = yaml.safe_load(frontmatter)
+    except yaml.YAMLError:
+        return None, text
+    mapping = parsed if isinstance(parsed, dict) else {}
+    return mapping, body.lstrip("\n")
+
+
 def _skill(root: Path, doc: store.Document, slug: str, draft: str, scope: str) -> Artifact:
     if scope not in {"user", "project"}:
         raise ValueError("skill target must be user or project")
@@ -70,15 +92,22 @@ def _skill(root: Path, doc: store.Document, slug: str, draft: str, scope: str) -
     path = base / ".claude" / "skills" / slug / "SKILL.md"
     before = _read_preserving(path)
     foreign = bool(before) and not _owned_skill(before, slug)
-    title = next((line[2:].strip() for line in draft.splitlines() if line.startswith("# ")), slug)
-    body = (
-        draft
-        if any(line.startswith("# ") for line in draft.splitlines())
-        else f"# {title}\n\n{draft}"
+    # A draft that carries its own `---` frontmatter would otherwise be embedded
+    # verbatim under our generated block — two frontmatter blocks, of which a
+    # consumer reads only the first (G3). Strip it; salvage only its `description`,
+    # the one field a draft author might legitimately set better than we can.
+    draft_fm, body_src = _split_leading_frontmatter(draft)
+    heading = next(
+        (line[2:].strip() for line in body_src.splitlines() if line.startswith("# ")), None
     )
+    body = body_src if heading is not None else f"# {slug}\n\n{body_src}"
+    # `candidate_type` is a mining taxonomy label (`repeated-correction`), not a
+    # description — prefer a human title: the draft's own `description`, else its
+    # `#` heading; fall back to `candidate_type` only for a draft with neither (G3).
+    draft_description = str(draft_fm.get("description") or "").strip() if draft_fm else ""
     fm: dict[str, Any] = {
         "name": slug,
-        "description": str(doc.get("candidate_type") or title),
+        "description": draft_description or heading or str(doc.get("candidate_type") or slug),
         "neurobase_managed": True,
         "neurobase_slug": slug,
     }

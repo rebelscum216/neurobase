@@ -216,7 +216,14 @@ fix). Needs a small §12 note either way.
 
 ### G3 — the skill emitter can double frontmatter and misuses `candidate_type` as `description`
 
-- **status:** open
+- **status:** fixed (2026-07-23) — `_skill` (`recommender/emitters.py`) now strips a
+  draft's own leading `---` frontmatter via `_split_leading_frontmatter` before wrapping
+  (so exactly one block ships, salvaging a draft-set `description`), and derives
+  `description` from the draft's `description`/`#` heading, falling to `candidate_type`
+  only as a last resort. Regression-tested (`test_emitters.py` —
+  `test_skill_strips_draft_own_frontmatter_no_doubling`,
+  `test_skill_description_prefers_title_over_candidate_type`; both mutation-verified to
+  fail pre-fix).
 - **severity:** minor — the installed artifact is valid enough for Claude to
   load, but reads wrong.
 - **found:** 2026-07-16 by Andrew (same live smoke; emitted SKILL.md had two

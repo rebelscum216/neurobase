@@ -79,7 +79,10 @@ def resolve_or_auto_enable(
     try:
         slug = projects.derive_slug(repo_root)
         registry = handle.load_registry()
-        if slug in registry and str(repo_root) not in registry[slug]:
+        # Mirror register_project's collision guard exactly (truthy roots list, not
+        # mere key presence) so a corrupt empty-roots entry can't false-skip.
+        existing_roots = registry.get(slug) or []
+        if existing_roots and str(repo_root) not in existing_roots:
             return None  # collides with a different registered root — don't guess
         writer = open_store(root, StoreMode.WRITE)
         writer.ensure_tree(slug)

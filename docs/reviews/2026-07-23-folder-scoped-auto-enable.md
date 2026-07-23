@@ -155,7 +155,7 @@ All findings addressed; full CI gate green (ruff + format + mypy + **1175 passed
 
 ## Round 3 — second self-review pass + resolution
 
-A second fresh-eyes review (two subagents) ran against the *resolved* code — the point being that the round-2 fixes were themselves unreviewed. It found a **blocker** and showed the round-1 F4 fix was over-claimed. All addressed; full CI gate green; test count 27 → **32**.
+A second fresh-eyes review (two subagents) ran against the *resolved* code — the point being that the round-2 fixes were themselves unreviewed. It found a **blocker** and showed the round-1 F4 fix was over-claimed. All addressed; full CI gate green; test count 27 → **30**.
 
 | # | Sev | Finding | Disposition |
 |---|---|---|---|
@@ -169,4 +169,15 @@ A second fresh-eyes review (two subagents) ran against the *resolved* code — t
 | R2-6 | minor | No non-matching-denylist / read-path denylist tests. | **resolved** — both added. |
 | R2-7 | nit | `git rev-parse` runs up to 3–4× on the qualifying path. | **deferred** — negligible; noted in ADR latency bullet. |
 
-**Still owed:** the genuine independent Codex pass. Two author-run self-review rounds are not a substitute — they share the author's blind spots. Prompt re-emitted to the Router.
+**Still owed:** the genuine independent Codex pass. Author-run self-review rounds are not a substitute — they share the author's blind spots. Prompt re-emitted to the Router.
+
+---
+
+## Round 4 — third self-review pass (verification)
+
+A third fresh-eyes pass verified the round-2 fixes against the code (config coercion, collision pre-check, read-path denylist gate, MCP handler wrap, `enable` warning) and the ADR/docstring consistency. **Verdict: approve.** All round-2 fixes confirmed correct and complete; no new regressions. Two residuals, both handled:
+
+- **Doc-count nit** — the docs said "32 tests"; the real count is **30** (27 + 3). Corrected across the ADR + this baton.
+- **Collision pre-check nit** — the pre-check keyed on `slug in registry` rather than a truthy roots list, so a *corrupt empty-roots* registry entry could false-skip (benign — retries next hook). Tightened to `registry.get(slug) or []` to mirror `register_project` exactly.
+
+State: full CI gate green, 30 tests, self-review converged (round 3 = approve). The one thing still outstanding is the **independent Codex pass**, which no amount of self-review replaces.

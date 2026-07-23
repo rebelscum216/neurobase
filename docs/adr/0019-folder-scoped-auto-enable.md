@@ -200,13 +200,13 @@ the store or raises a registry/FS error out of that fail-soft surface (spec §13
   rule; §4/§5's opt-in line becomes *"write only if the resolved project's tree
   exists **or the repo qualifies for folder-scoped auto-enable (§10), which creates
   the tree**"*; §3/§7's consent narrative gains the folder-consent model.
-- **Implemented + two self-review rounds.** On `feat/folder-scoped-auto-enable`
-  (full CI gate green; 32 tests in
-  [`tests/test_auto_enable.py`](../../tests/test_auto_enable.py)). Two rounds of
-  fresh-eyes self-review (Codex was unavailable) surfaced F1–F8 then R2-1…R2-7,
-  recorded in
-  [`docs/reviews/2026-07-23-folder-scoped-auto-enable.md`](../reviews/2026-07-23-folder-scoped-auto-enable.md);
-  round 2 caught a **blocker** (scalar-config → whole-filesystem capture, now
+- **Implemented + three self-review rounds.** On `feat/folder-scoped-auto-enable`
+  (full CI gate green; 30 tests in
+  [`tests/test_auto_enable.py`](../../tests/test_auto_enable.py)). Three rounds of
+  fresh-eyes self-review (Codex was unavailable) surfaced F1–F8, then R2-1…R2-7,
+  then a round-3 **approve** (only a doc-count nit) — all recorded in
+  [`docs/reviews/2026-07-23-folder-scoped-auto-enable.md`](../reviews/2026-07-23-folder-scoped-auto-enable.md).
+  Round 2 caught a **blocker** (scalar-config → whole-filesystem capture, now
   coerced) and that the denylist gate was over-claimed (now honestly scoped +
   MCP-recall inject gated + `enable` warns). **An independent Codex review is still
   owed** before merge — self-review is weaker by construction.

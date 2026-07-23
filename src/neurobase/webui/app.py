@@ -18,6 +18,18 @@ from neurobase.webui.security import CSRF_FORM_FIELD, CSRFMiddleware, new_csrf_t
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
+def _store_root_label(root: Path) -> str:
+    """The store path as shown in the rail brand badge: ``~``-collapsed
+    when under the user's home directory (matches how every other Neurobase
+    surface — the CLI, the vault docs — refers to a store), the resolved
+    absolute path otherwise."""
+    resolved = root.resolve()
+    try:
+        return f"~/{resolved.relative_to(Path.home())}"
+    except ValueError:
+        return str(resolved)
+
+
 def build_app(root: Path) -> Starlette:
     """Build the Suggestions-review Starlette app rooted at a Neurobase
     store (``root``). Mounts Jinja2 templates from ``webui/templates/``,
@@ -30,6 +42,9 @@ def build_app(root: Path) -> Starlette:
     # its own context, so it can never drift out of sync with
     # ``security.CSRFMiddleware``'s expectation.
     templates.env.globals["CSRF_FORM_FIELD"] = CSRF_FORM_FIELD
+    # The rail brand badge shows the real store path (base.html) — a Jinja
+    # global for the same reason as CSRF_FORM_FIELD above.
+    templates.env.globals["store_root_label"] = _store_root_label(root)
 
     app = Starlette(routes=suggestions_routes())
     app.state.root = root

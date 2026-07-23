@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Neurobase UI — accept {{ slug }}{% endblock %}
+{% block page_class %}narrow{% endblock %}
 {% block content %}
 <section class="panel">
   <h1>Accept <span class="mono">{{ slug }}</span></h1>
@@ -19,7 +20,7 @@
     <input type="hidden" name="fingerprint" value="{{ fingerprint }}" />
     {% if is_skill %}<input type="hidden" name="target" value="{{ requested_target }}" />{% endif %}
     <div class="actions">
-      <button class="btn" type="submit">Install and accept</button>
+      <button class="btn primary" type="submit">Install and accept</button>
     </div>
   </form>
   {% endif %}

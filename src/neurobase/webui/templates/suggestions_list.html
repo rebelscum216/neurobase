@@ -1,66 +1,120 @@
 {% extends "base.html" %}
 {% block title %}Neurobase UI — Suggestions{% endblock %}
 {% block content %}
-<section class="panel">
-  <h1>Suggestions</h1>
-  <div class="metrics-strip">
-    <div class="metric">
-      <span class="label">Decided</span>
-      <span class="value">{{ metrics.decided }} (accepted {{ metrics.accepted }}, rejected {{ metrics.rejected }})</span>
-    </div>
-    <div class="metric">
-      <span class="label">Precision</span>
-      <span class="value">{{ metrics.precision }}</span>
-    </div>
-    <div class="metric">
-      <span class="label">Edited rate</span>
-      <span class="value">{{ metrics.edited_rate }}</span>
-    </div>
-    <div class="metric">
-      <span class="label">Reviewed events</span>
-      <span class="value">{{ metrics.reviewed_events }}</span>
-    </div>
-    <div class="metric">
-      <span class="label">Survival</span>
-      <span class="value">{{ metrics.survival_summary }}</span>
-    </div>
-    <div class="metric">
-      <span class="label">Recurrence reduction</span>
-      <span class="value">{{ metrics.recurrence_reduction }}</span>
-    </div>
-  </div>
-</section>
+{% set total = rows | length %}
+{% set denom = total if total > 0 else 1 %}
+{% set pending = total - metrics.decided %}
 
-<section class="panel">
-  {% if rows %}
-  <table>
-    <thead>
-      <tr>
-        <th>Name</th>
-        <th>Status</th>
-        <th>Type</th>
-        <th>Target</th>
-        <th>Project</th>
-        <th>Score</th>
-        <th>Created</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in rows %}
-      <tr>
-        <td><a class="mono" href="/suggestions/{{ row.slug }}">{{ row.slug }}</a></td>
-        <td><span class="status-chip {{ row.status }}">{{ row.status }}</span></td>
-        <td>{{ row.type }}</td>
-        <td class="mono">{{ row.target }}</td>
-        <td>{{ row.project or "multiple" }}</td>
-        <td class="mono">{{ row.total }}</td>
-        <td class="mono">{{ row.created_at }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p>No proposals yet. Run <code class="mono">neurobase recommend run</code> to mine some.</p>
-  {% endif %}
-</section>
+<div class="hero">
+  <div>
+    <h1>Suggestions</h1>
+    <p class="hero-sub">Review → diff → install. Nothing lands without a click.</p>
+  </div>
+  <div class="hero-pills">
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ total }} in queue</span>
+    <span class="hero-pill">{{ metrics.reviewed_events }} events reviewed</span>
+  </div>
+</div>
+
+<div class="dash-grid">
+  <section class="card">
+    <div class="card-head">
+      <div><h2>Suggestion queue</h2><p>Every proposal, auto-scored — highest first</p></div>
+      <div class="right"><span class="tiny-pill">{{ total }} total</span></div>
+    </div>
+    {% if rows %}
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Status</th>
+          <th>Type</th>
+          <th>Target</th>
+          <th>Project</th>
+          <th>Score</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td><a class="mono" href="/suggestions/{{ row.slug }}">{{ row.slug }}</a></td>
+          <td><span class="status-chip {{ row.status }}">{{ row.status }}</span></td>
+          <td>{{ row.type }}</td>
+          <td class="mono">{{ row.target }}</td>
+          <td>{{ row.project or "multiple" }}</td>
+          <td class="mono">{{ row.total }}</td>
+          <td class="mono">{{ row.created_at[:10] if row.created_at else "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No proposals yet. Run <code class="mono">neurobase recommend run</code> to mine some.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div><h2>Signal quality</h2><p>Health of the recommender loop</p></div>
+      <div class="right"><span class="tiny-pill ok">healthy</span></div>
+    </div>
+    <div class="signal-grid">
+      <div class="signal-tile">
+        <div class="signal-label">Precision</div>
+        <div class="signal-value">{{ metrics.precision }}</div>
+      </div>
+      <div class="signal-tile">
+        <div class="signal-label">Edited rate</div>
+        <div class="signal-value">{{ metrics.edited_rate }}</div>
+      </div>
+      <div class="signal-tile">
+        <div class="signal-label">Decided</div>
+        <div class="signal-value">{{ metrics.decided }}</div>
+      </div>
+      <div class="signal-tile">
+        <div class="signal-label">Reviewed</div>
+        <div class="signal-value">{{ metrics.reviewed_events }}</div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="dash-lower">
+  <section class="card">
+    <div class="card-head">
+      <div><h2>Review loop</h2><p>Where the queue has landed</p></div>
+    </div>
+    <div class="proc">
+      <div>
+        <div class="proc-top"><span class="proc-name">Accepted</span><span class="proc-val">{{ metrics.accepted }}</span></div>
+        <div class="bar"><i class="green" style="width: {{ (metrics.accepted / denom * 100) | round | int }}%"></i></div>
+      </div>
+      <div>
+        <div class="proc-top"><span class="proc-name">Rejected</span><span class="proc-val">{{ metrics.rejected }}</span></div>
+        <div class="bar"><i class="red" style="width: {{ (metrics.rejected / denom * 100) | round | int }}%"></i></div>
+      </div>
+      <div>
+        <div class="proc-top"><span class="proc-name">Awaiting review</span><span class="proc-val">{{ pending }}</span></div>
+        <div class="bar"><i class="amber" style="width: {{ (pending / denom * 100) | round | int }}%"></i></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div><h2>Durability</h2><p>Do accepted facts survive?</p></div>
+    </div>
+    <div class="signal-grid">
+      <div class="signal-tile wide">
+        <div class="signal-label">Survival</div>
+        <div class="signal-value small">{{ metrics.survival_summary }}</div>
+      </div>
+      <div class="signal-tile wide">
+        <div class="signal-label">Recurrence reduction</div>
+        <div class="signal-value small">{{ metrics.recurrence_reduction }}</div>
+      </div>
+    </div>
+  </section>
+</div>
 {% endblock %}

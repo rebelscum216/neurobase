@@ -556,6 +556,41 @@ def accept_proposal(
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def revert_proposal(root: Path, slug: str, *, now: datetime | None = None) -> str:
+    """Undo an acceptance (§12.7, G2): flip an ``accepted`` proposal back to
+    ``proposed`` and clear its now-dangling ``installed_path``, appending exactly
+    one ``reverted`` ledger event. Returns the prior status (always ``"accepted"``
+    on success).
+
+    The installed artifact on disk is **never touched** — revert is a store-state
+    correction, not an uninstall (v1 has no uninstall-by-command; ADR-0007). It
+    exists precisely for the drift the blocked ``reject``-on-``accepted`` rule
+    otherwise leaves unrepairable: a proposal reading ``accepted`` whose artifact
+    the user has removed or replaced by hand. Returning it to ``proposed`` puts it
+    back in the review queue (re-``accept`` re-installs, ``reject`` retires it) and,
+    because the survival/precision metrics key on current frontmatter status not
+    the ledger (§12.9), removes it from those metrics cleanly while the ledger keeps
+    the full proposed→accepted→reverted history. Only an ``accepted`` proposal can
+    be reverted."""
+    doc = load_proposal(root, slug)
+    if doc is None:
+        raise ValueError(f"proposal {slug!r} not found or malformed")
+    status = str(doc.get("status") or "proposed")
+    if status != "accepted":
+        raise ValueError(
+            f"cannot revert proposal {slug!r}: status is {status} "
+            "(only an accepted proposal can be reverted)"
+        )
+    stamp = _iso(now if now is not None else datetime.now(UTC))
+    frontmatter = dict(doc.frontmatter)
+    frontmatter["status"] = "proposed"
+    frontmatter["installed_path"] = None
+    frontmatter["updated_at"] = stamp
+    store.write_doc(doc.file_path, frontmatter, doc.body)
+    _append_ledger(root, slug, "reverted", stamp, None)
+    return status
+
+
 # --- body rendering + redaction ---------------------------------------------
 
 

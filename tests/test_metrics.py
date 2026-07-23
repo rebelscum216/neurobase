@@ -554,3 +554,24 @@ def test_recurrence_reduction_skips_proposal_with_unparseable_acceptance(tmp_pat
 
     assert result.decided == 1  # still decided; only the timestamp is unusable
     assert result.recurrence_reduction is None
+
+
+def test_reverted_proposal_drops_out_of_metrics(tmp_path: Path) -> None:
+    """G2: metrics key on current frontmatter status, not the ledger. A reverted
+    proposal (back to `proposed`) must count as neither accepted nor decided, even
+    though its `accepted` ledger event still exists — so revert repairs drift
+    without corrupting precision or survival."""
+    root = tmp_path / "store"
+    installed = tmp_path / "AGENTS.md"
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW)
+    _accept(root, "prefer-uv-run", installed_path=installed, now=NOW)
+
+    before = metrics.compute_metrics(root, now=NOW)
+    assert before.accepted == 1 and before.decided == 1
+
+    proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    after = metrics.compute_metrics(root, now=NOW + timedelta(minutes=2))
+    assert after.accepted == 0
+    assert after.decided == 0
+    assert after.precision is None  # no decided proposals → insufficient data

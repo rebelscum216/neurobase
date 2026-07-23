@@ -447,3 +447,86 @@ def test_draft_markers_extract_verbatim_and_fail_closed_on_duplicates() -> None:
     assert proposals.extract_draft(body) == "# Exact draft\n\n- keep markdown"
     assert proposals.extract_draft(body + proposals.DRAFT_START) is None
     assert proposals.replace_draft(body + proposals.DRAFT_END, "replacement") is None
+
+
+# --- G2: revert an acceptance back to the review queue -----------------------
+
+
+def _accept(root: Path, slug: str = "prefer-uv-run", *, now: datetime = NOW) -> None:
+    proposals.accept_proposal(
+        root,
+        slug,
+        target="AGENTS.md",
+        installed_path=Path("/repo/AGENTS.md"),
+        installed_hash="deadbeef",
+        now=now,
+    )
+
+
+def test_revert_flips_accepted_to_proposed_and_clears_install(tmp_path: Path) -> None:
+    """G2: revert returns an accepted proposal to `proposed`, clears the dangling
+    `installed_path`, and appends exactly one `reverted` event while keeping the
+    full proposed→accepted→reverted ledger history."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    _accept(root, now=NOW)
+
+    prior = proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    assert prior == "accepted"
+    doc = _read(root, "prefer-uv-run")
+    assert doc.get("status") == "proposed"
+    assert doc.get("installed_path") is None
+    events = [e["event"] for e in _ledger_events(root)]
+    assert events == ["proposed", "accepted", "reverted"]
+
+
+def test_revert_never_deletes_the_artifact_on_disk(tmp_path: Path) -> None:
+    """G2: revert corrects the store record only — a real installed file is left
+    exactly where it is (revert is not an uninstall)."""
+    root = tmp_path / "store"
+    installed = tmp_path / "repo" / "AGENTS.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("managed rule block", encoding="utf-8")
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    proposals.accept_proposal(
+        root, "prefer-uv-run", target="AGENTS.md", installed_path=installed, now=NOW
+    )
+
+    proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    assert installed.exists()
+    assert installed.read_text(encoding="utf-8") == "managed rule block"
+
+
+def test_revert_only_allowed_on_accepted(tmp_path: Path) -> None:
+    """G2: revert is defined only on `accepted`; every other status is a hard,
+    named-status error (mirrors the blocked-status rules of §12.7)."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+
+    with pytest.raises(ValueError, match="only an accepted proposal"):
+        proposals.revert_proposal(root, "prefer-uv-run")  # still proposed
+
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW)
+    with pytest.raises(ValueError, match="status is rejected"):
+        proposals.revert_proposal(root, "prefer-uv-run")
+
+
+def test_revert_missing_proposal_raises(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    with pytest.raises(ValueError, match="not found or malformed"):
+        proposals.revert_proposal(root, "does-not-exist")
+
+
+def test_reverted_proposal_can_be_reaccepted(tmp_path: Path) -> None:
+    """G2: a reverted proposal is a normal `proposed` one again — re-accepting it
+    reinstalls and flips it back to `accepted`."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    _accept(root, now=NOW)
+    proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    _accept(root, now=NOW + timedelta(minutes=2))
+
+    assert _read(root, "prefer-uv-run").get("status") == "accepted"

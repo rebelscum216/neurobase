@@ -191,7 +191,15 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
 
 ### G2 — accepted-proposal state can drift from disk; there is no revert path
 
-- **status:** open
+- **status:** fixed (2026-07-23) — added `recommend revert <slug>` +
+  `proposals.revert_proposal`: on an `accepted` proposal it flips status back to
+  `proposed`, clears the dangling `installed_path`, and appends a `reverted` ledger
+  event, **without deleting the artifact** (revert corrects the store record, it is
+  not an uninstall). Only `accepted` can be reverted (else a named-status error).
+  Because the survival/precision metrics key on current frontmatter status not the
+  ledger (§12.9), a reverted proposal drops out of them cleanly. Spec §12.7 updated
+  (command table + blocked-status rule + transitions table). Regression-tested in
+  `test_proposals.py`, `test_metrics.py` (drops-out-of-metrics), `test_cli_recommend.py`.
 - **severity:** minor — nothing corrupts, but the store's view of the present is
   wrong: a proposal stays `accepted` with a dangling `installed_path` after its
   artifact is removed by hand, and §12.7 makes reject-on-accepted a hard error,

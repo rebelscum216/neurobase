@@ -1546,6 +1546,7 @@ accumulates.
 | `recommend edit <slug>` | — | Opens `$EDITOR` (or, non-interactively, prints for redirection) on the proposal body/draft; on save, overwrites body/draft and appends an `edited` ledger event | Writes proposal file + ledger only; `status` unchanged |
 | `recommend accept <slug>` | `[--target user\|project]` `[--yes]` | Renders the artifact (§12.8), diffs against the current target, asks consent (`--yes` skips the prompt, never the diff), backs up touched files, writes, flips `status: accepted`, sets `installed_path` (and, for `type: skill`, resolves `target` to the scope actually used), appends `accepted` | Writes artifact(s) + proposal + ledger; backup first (workstream F: "accept requires consent unless `--yes`") |
 | `recommend reject <slug>` | `[--reason TEXT]` | Flips `status: rejected`, records `reason`, appends `rejected` | Writes proposal + ledger only (workstream F: "reject updates proposal + ledger") |
+| `recommend revert <slug>` | `[--yes]` | Only on an `accepted` proposal: flips `status: accepted` → `proposed`, clears `installed_path`, appends `reverted`. The installed artifact is **never deleted** — revert corrects the store record, it does not uninstall (G2) | Writes proposal + ledger only; consent-gated (`--yes` skips the prompt) |
 | `status --recommender` | — | Prints precision, edited rate, survival, recurrence-reduction, or "insufficient data" per §12.9 | Read-only; may opportunistically refresh a survival check |
 
 `--target` is meaningful only for `type: skill` proposals (it selects
@@ -1569,6 +1570,18 @@ named-status CLI error" to workstream F's test list before this ships):**
   `reject` must not be usable as a backdoor that flips an accepted proposal's
   metadata to `rejected` while the real installed artifact sits untouched and
   now out of sync with its own proposal record.
+- `revert` is the sanctioned way back from `accepted` that the blocked `reject`
+  rule above leaves open (G2). It is allowed **only** on an `accepted` proposal
+  (any other status is a hard, named-status CLI error) and flips it back to
+  `proposed` — the review queue — while clearing `installed_path`. Crucially it
+  is *not* an uninstall: it never deletes or rewrites the artifact on disk, so it
+  is not the `reject`-backdoor the rule above forbids. It repairs the specific
+  drift where the store still reads `accepted` but the user has removed or
+  replaced the installed file by hand: the record becomes honest (`proposed`, no
+  `installed_path`), the ledger keeps the full proposed→accepted→reverted history,
+  and the survival/precision metrics — which key on current status, not the
+  ledger (§12.9) — drop it cleanly. A reverted proposal can be re-`accept`ed
+  (re-installs) or `reject`ed (retires) like any other `proposed` one.
 - `accept` on an already-`accepted` proposal is the one case that stays
   allowed — re-running it re-renders the artifact and re-diffs against
   whatever is on disk now, which is what makes the no-op rule below possible
@@ -1768,6 +1781,8 @@ behavior" in one place without re-reading the whole section.
 | No `<root>/proposals/` at all | `list`/`show`/`metrics` degrade to empty — matches `recommendations_list`'s own `[]` contract | Invariants |
 | `accept`/`edit` on `rejected`/`superseded` | Hard CLI error naming the blocking status; never reopened | §12.7 |
 | `reject` on `accepted`/`rejected`/`superseded` | Hard CLI error naming the blocking status; no v1 uninstall-by-reject | §12.7 |
+| `revert` on any non-`accepted` status | Hard CLI error naming the blocking status; revert is defined only on `accepted` | §12.7 |
+| `revert` on an `accepted` proposal | Flips to `proposed`, clears `installed_path`, appends `reverted`; never deletes the artifact on disk | §12.7 (G2) |
 | `accept` with an unchanged diff | No-op, "already up to date," no write, no backup, no ledger event | §12.7 |
 | `accept --target project` with no `project` on the proposal | Hard CLI error; never guesses a project | §12.8 |
 | `accept` where `proposal.project` no longer exists in `registry.toml` | Hard CLI error naming the stale project; never a bare `KeyError` | §12.8 |

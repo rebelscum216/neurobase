@@ -331,3 +331,60 @@ def test_status_recommender_on_populated_ledger_prints_real_numbers(tmp_path: Pa
     assert "Edited rate: 0.0000" in result.output
     assert "Reviewed events: 2" in result.output
     assert "prefer-uv-run: insufficient data" in result.output
+
+
+# --- G2: recommend revert ----------------------------------------------------
+
+
+def _accept_for_revert(root: Path) -> None:
+    proposals.accept_proposal(
+        root, "prefer-uv-run", target="AGENTS.md", installed_path=Path("/repo/AGENTS.md")
+    )
+
+
+def test_revert_returns_accepted_proposal_to_queue(tmp_path: Path) -> None:
+    """G2: `recommend revert --yes` flips accepted→proposed, clears installed_path,
+    and records a `reverted` ledger event."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()])
+    _accept_for_revert(root)
+
+    result = runner.invoke(
+        app, ["recommend", "revert", "prefer-uv-run", "--yes", "--root", str(root)]
+    )
+
+    assert result.exit_code == 0
+    doc = proposals.load_proposal(root, "prefer-uv-run")
+    assert doc is not None and doc.get("status") == "proposed"
+    assert doc.get("installed_path") is None
+    assert proposals.ledger_history(root, "prefer-uv-run")[-1]["event"] == "reverted"
+
+
+def test_revert_non_accepted_is_hard_error(tmp_path: Path) -> None:
+    """G2: revert on a still-proposed proposal is a hard, named-status error."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()])
+
+    result = runner.invoke(
+        app, ["recommend", "revert", "prefer-uv-run", "--yes", "--root", str(root)]
+    )
+
+    assert result.exit_code == 1
+    assert "status is proposed" in result.output
+
+
+def test_revert_prompt_abort_makes_no_change(tmp_path: Path) -> None:
+    """G2: without `--yes`, declining the consent prompt leaves the proposal
+    accepted and writes nothing."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()])
+    _accept_for_revert(root)
+
+    result = runner.invoke(
+        app, ["recommend", "revert", "prefer-uv-run", "--root", str(root)], input="n\n"
+    )
+
+    assert result.exit_code == 0
+    assert "Aborted" in result.output
+    doc = proposals.load_proposal(root, "prefer-uv-run")
+    assert doc is not None and doc.get("status") == "accepted"

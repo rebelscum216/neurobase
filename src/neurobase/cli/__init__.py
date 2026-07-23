@@ -1017,6 +1017,44 @@ def recommend_reject(
     typer.echo(f"Rejected proposal {slug}.")
 
 
+@recommend_app.command("revert")
+def recommend_revert(
+    slug: str,
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    root: str | None = typer.Option(None, "--root"),
+) -> None:
+    """Undo an acceptance: return an accepted proposal to the review queue (G2).
+
+    Flips `status: accepted` → `proposed` and clears the recorded `installed_path`,
+    so a proposal whose artifact you removed or replaced by hand no longer reads
+    `accepted` out of sync with disk. The installed file itself is left untouched —
+    revert corrects the store's record, it does not uninstall.
+    """
+    resolved_root = store.resolve_root(root)
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
+    doc = proposals.load_proposal(handle.root, slug)
+    if doc is None:
+        typer.secho(f"proposal {slug!r} not found or malformed", err=True)
+        raise typer.Exit(code=1)
+    status = str(doc.get("status") or "proposed")
+    if status != "accepted":
+        typer.secho(
+            f"cannot revert proposal {slug!r}: status is {status} "
+            "(only an accepted proposal can be reverted)",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    installed = doc.get("installed_path")
+    if installed:
+        typer.echo(f"Recorded install: {installed}  (left on disk — revert does not delete it)")
+    if not yes and not typer.confirm(f"Revert proposal {slug} to proposed?"):
+        typer.echo("Aborted — no changes made.")
+        return
+    proposals.revert_proposal(handle.root, slug)
+    typer.echo(f"Reverted proposal {slug} to proposed.")
+
+
 @recommend_app.command("accept")
 def recommend_accept(
     slug: str,

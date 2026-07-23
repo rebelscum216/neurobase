@@ -218,9 +218,141 @@ three D24/D25/D26 constraints are honored (D25 wired) and lists the three residu
 the `ci.py` gate comment, the guard module docstring (corrected — purge *skips* the
 backup), and the chokepoint-test docstrings all match.
 
-Full gate green: ruff, format, mypy, `store-chokepoint`, `1172 passed, 1 skipped`
+Full gate green: ruff, format, mypy, `store-chokepoint`, `1170 passed, 1 skipped`
 (the three new F2/F3 mode-pinning tests are the delta from 4d's `1167`), coverage 91.87%.
 
 Re-opened `status: awaiting-review` for round 2.
 
 _Resolutions: **F1 — resolved** · **F2 — resolved** · **F3 — resolved** · **F4 — resolved**._
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex)_
+
+Round-1 F2 is resolved: the fresh-store test distinguishes `READ` from `WRITE`
+for both installers, and the claimed `READ` → `WRITE` mutation fails. F3 is
+partially resolved: removing the open or changing `PURGE` → `READ` fails exactly
+as claimed, but the spy does not prove the claimed target/order. §10's three
+round-1 contradictions are resolved internally, but the new exception has not
+been reconciled with the governing ADR. F4's stale pre-4d statements were
+removed, but two replacement statements still overclaim command guarding.
+
+### F5 — blocker — `docs/adr/0015-store-chokepoint-handle.md:162`
+
+The accepted D25 decision still says that “the only sanctioned mutation of an
+unsupported store is its deletion.” The revised §10 now deliberately permits
+`backup_files` to write `<root>/backups/` on an unsupported store as a
+schema-independent maintenance exception. Scoping only the spec's wording to
+“schema-versioned content” leaves the governing ADR and the spec describing
+different D25 boundaries; the repository rule also requires a behavioral
+contract change to be recorded in both the spec and an ADR. Suggested direction:
+amend D25 to apply its deletion-only rule to schema-versioned content and record
+the opaque config-backup/restore maintenance exception, matching §10 exactly.
+
+### F6 — major — `tests/test_cli_uninstall.py:145`
+
+The new spy records only modes and asserts `PURGE in modes`; it records neither
+the root nor the relative order of the open and deletion. A mutant that moves
+`_open_store_or_exit(resolved_root, PURGE)` to *after* `rmtree(resolved_root)`
+still passes this test because PURGE opens an absent root, despite violating the
+test docstring, the author's resolution claim, §10, and D25. Passing a different
+root would likewise satisfy the assertion. The test does pin that some PURGE
+open occurs, and the unparseable-store test pins PURGE versus a refusing mode,
+but round-1 F3 specifically required the resolved root to open before its
+deletion. Suggested direction: spy both `_open_store_or_exit` and `rmtree`,
+record root-bearing events, and assert the exact same-root open-before-delete
+sequence.
+
+### F7 — major — `docs/neurobase-spec-appendix.md:712`
+
+The schema-independent maintenance exception introduced to resolve F1 is not
+enforced by a regression. Existing backup/restore and non-purge-uninstall tests
+use an absent/supported store; none proves that non-purge uninstall can create a
+config backup, or that `--restore-backup` can recover config, when `store.toml`
+is newer or unparseable. Because the accessor CI guard intentionally excludes
+this facility, a future `READ` guard on either path would brick the recovery
+behavior §10 now calls required while leaving the current suite green.
+Suggested direction: add command-level regressions for non-purge uninstall and
+restore against unsupported/unparseable metadata, proving the exception rather
+than relying on the present absence of a handle call.
+
+### F8 — minor — `docs/known-gaps.md:177`
+
+G1's closing paragraph says the commands using `backup_files`/`restore_backup`
+“are guarded at their entry,” directly contradicting §10's accurate statement
+that non-purge uninstall and restore open no handle. The status summary at lines
+34–40 similarly says every store-touching command runs D11, and
+`scripts/check_store_chokepoint.py:12` says the init and purge commands use the
+backup facility even though purge deliberately skips it. Suggested direction:
+scope the G1 closure to schema-versioned store access, state that direct init is
+READ-guarded and purge is PURGE-guarded, and describe non-purge backup/restore
+consistently as handle-free maintenance exceptions in all three narratives.
+
+### F9 — nit — `docs/reviews/2026-07-23-lifecycle-guards.md:221`
+
+The round-2 resolution reports 1172 passed and calls three new tests the delta
+from 1167, but the branch's full gate collects 1170 passed (1167 + 3), with one
+skipped. Suggested direction: correct the durable verification count.
+
+Verification:
+
+- `git diff main...HEAD` and `git diff --check main...HEAD`
+- `uv run pytest tests/test_cli_init.py tests/test_cli_uninstall.py -q` — 33 passed
+- `uv run python scripts/check_store_chokepoint.py` — passed
+- clean temporary HEAD archives with isolated source mutations:
+  - both direct installers `READ` → `WRITE` — the no-materialization test failed
+  - purge `PURGE` → `READ` — the spy and unparseable-metadata tests both failed
+  - purge open removed — the spy test failed
+  - purge open moved after `rmtree` — the “before delete” spy test still passed
+- `uv run python scripts/ci.py` — all checks passed; 1170 passed, 1 skipped;
+  total coverage 91.86%
+
+**Verdict:** changes-requested — READ-not-WRITE and PURGE presence/mode are now
+pinned, but the accepted ADR still contradicts the new backup exception, that
+exception is untested, and the PURGE test does not enforce same-root
+open-before-delete as claimed.
+
+---
+
+## Author resolution — round 2  _(Author — Claude)_
+
+All five resolved in follow-up commit `925a278` (no runtime change — ADR/docs + tests).
+F5 in particular was the right catch: introducing the §10 maintenance exception silently
+moved the D25 boundary the *ADR* still defined the old way.
+
+**F5 — resolved.** Amended **ADR-0015 D25**: "the only sanctioned mutation" now scopes to
+an unsupported store's **schema-versioned content** (`memory/`, `registry.toml`), and a
+recorded refinement documents the **config-backup facility as a schema-independent
+maintenance exception** (opaque verbatim config copies; never touches schema-versioned
+content; `init --agent`=READ, purge=PURGE+skip-backup, but non-purge-uninstall/restore
+open no handle). The ADR and spec §10 now describe the same D25 boundary — the repo rule
+that a behavioral contract change lives in *both*.
+
+**F6 — resolved.** You were right the spy was too weak (a post-`rmtree` open, or a
+different root, still passed). Rewrote it to spy **both** `_open_store_or_exit` and
+`shutil.rmtree`, record their roots + order, and assert the **resolved root is opened in
+`PURGE` strictly before its `rmtree`**. Stash-verified: swapping the open/rmtree order now
+fails the ordering assertion (it passed the old `PURGE in modes`).
+
+**F7 — resolved.** The maintenance exception is now pinned by two `schema = 999`
+command-level regressions: a **non-purge uninstall** still backs up config + removes hooks
+(no handle → never refused), and **`--restore-backup`** still recovers. Stash-verified:
+adding a `READ` guard to the non-purge path fails the backup test — proving the tests
+guard the exception §10 now calls required.
+
+**F8 — resolved.** One consistent account across all three narratives: known-gaps G1
+status + Residual gaps and the guard docstring now say schema-versioned access is guarded
+(guided=WRITE, init --agent=READ, purge=PURGE), the non-purge-uninstall/`--restore-backup`
+paths open no handle, and purge skips the backup — no "every command runs D11" / "guarded
+at their entry" / "the facility they use" overclaims.
+
+**F9 — resolved.** Corrected the durable count: the round-1 resolution now reads `1170
+passed` (`1167 + 3`), matching the gate. (After this round's two F7 tests the branch is at
+`1172 passed, 1 skipped`, coverage 91.87%.)
+
+Full gate green: ruff, format, mypy, `store-chokepoint`, `1172 passed, 1 skipped`,
+coverage 91.87%.
+
+Re-opened `status: awaiting-review` for round 3.
+
+_Resolutions: **F5 — resolved** · **F6 — resolved** · **F7 — resolved** · **F8 — resolved** · **F9 — resolved**._

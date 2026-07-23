@@ -29,7 +29,14 @@ def enabled(tmp_path: Path) -> tuple[Path, Path]:
 
 def _set_cap(monkeypatch: pytest.MonkeyPatch, cap: int) -> None:
     monkeypatch.setattr(
-        recall_common, "load_config", lambda: SimpleNamespace(inject=SimpleNamespace(max_chars=cap))
+        recall_common,
+        "load_config",
+        lambda: SimpleNamespace(
+            inject=SimpleNamespace(max_chars=cap),
+            # build_context also reads the auto-enable config; an empty section
+            # leaves the enabled fixture's already-registered project untouched.
+            enable=SimpleNamespace(auto_enable_roots=[], denylist=[]),
+        ),
     )
 
 

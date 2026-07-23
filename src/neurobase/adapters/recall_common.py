@@ -17,6 +17,7 @@ from pathlib import Path
 
 from neurobase.core import store
 from neurobase.core.config import load_config
+from neurobase.core.enable import resolve_or_auto_enable
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
 # Fallback cap when config can't be read; the real cap is [inject].max_chars
@@ -75,22 +76,32 @@ def build_context(root: Path, cwd: Path) -> str | None:
     """The ``additionalContext`` string for this cwd, or ``None`` (⇒ emit
     nothing) on no-project / no-nodes / incompatible store. Callers treat any
     exception as ``None``."""
-    # D11 (spec §10): obtain a READ handle up front — the schema guard runs once
-    # here, at the store boundary. A store newer than we support raises, so the
-    # hook fails closed (injects nothing) and never reads an incompatible store.
-    # An uninitialized store opens as empty and simply yields no nodes. READ never
-    # writes, so recall no longer creates store.toml as a side effect (ADR-0015).
+    config = load_config()
+    # Folder-scoped auto-enable: on the first session in a qualifying repo this
+    # registers the project + creates its tree, so this session's §4/§5 capture
+    # has somewhere to land. There are no nodes yet on that first run, so inject
+    # stays empty below — by the next session, curate has produced nodes and
+    # recall injects normally. A too-new store fails closed inside this call
+    # (→ None), preserving the fail-closed contract below (ADR-0015 D11).
+    project = resolve_or_auto_enable(
+        root,
+        cwd,
+        auto_enable_roots=config.enable.auto_enable_roots,
+        denylist=config.enable.denylist,
+    )
+    if project is None:
+        return None
+    # D11 (spec §10): obtain a READ handle for the node read — the schema guard
+    # runs at the store boundary. An uninitialized store opens as empty and simply
+    # yields no nodes; READ never writes, so recall creates no store.toml here.
     try:
         handle = open_store(root, StoreMode.READ)
     except store.UnsupportedSchemaError:
         return None
-    project = handle.resolve_project(cwd)
-    if project is None:
-        return None
     bodies = _node_bodies(handle, project)
     if not bodies:
         return None
-    cap = load_config().inject.max_chars  # spec §10: config-overridable
+    cap = config.inject.max_chars  # spec §10: config-overridable
     header = HEADER.format(memory_dir=handle.memory_dir(project))
     return _assemble(header, bodies, cap)
 

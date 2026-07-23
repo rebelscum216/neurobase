@@ -109,6 +109,21 @@ class RecommendConfig:
 
 
 @dataclass
+class EnableConfig:
+    # Folder-scoped auto-enable (prototype; pending ADR). `neurobase enable` is
+    # per-repo and opt-in by design (a hook captures only when the resolved
+    # project's memory tree exists). This relocates that consent from per-repo to
+    # per-folder: name an `auto_enable_roots` directory once, and any git repo
+    # beneath it is registered as its own project — and given its memory tree —
+    # the first time a hook fires there. Empty roots = today's behavior (per-repo
+    # opt-in only). `denylist` always wins over roots, so a sensitive subtree can
+    # be carved out of an otherwise auto-enabled folder. Both are hand-edited
+    # paths (`~` and relative segments allowed); Neurobase never writes this file.
+    auto_enable_roots: list[str] = field(default_factory=list)
+    denylist: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Config:
     store: StoreConfig = field(default_factory=StoreConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
@@ -117,6 +132,7 @@ class Config:
     redact: RedactConfig = field(default_factory=RedactConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
     recommend: RecommendConfig = field(default_factory=RecommendConfig)
+    enable: EnableConfig = field(default_factory=EnableConfig)
 
 
 def config_path() -> Path:
@@ -142,4 +158,5 @@ def load_config(path: Path | None = None) -> Config:
         redact=RedactConfig(**data.get("redact", {})),
         mcp=McpConfig(**data.get("mcp", {})),
         recommend=RecommendConfig(**data.get("recommend", {})),
+        enable=EnableConfig(**data.get("enable", {})),
     )

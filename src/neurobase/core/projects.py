@@ -121,3 +121,38 @@ def resolve_project(root: Path, cwd: Path) -> str | None:
                 best_len = length
                 best_slug = slug
     return best_slug
+
+
+def _is_within(path: Path, ancestor: Path) -> bool:
+    """True when ``path`` *is* ``ancestor`` or lives beneath it (both already
+    resolved by the caller)."""
+    return path == ancestor or path.is_relative_to(ancestor)
+
+
+def auto_enable_root_for(
+    cwd: Path, auto_enable_roots: list[str], denylist: list[str]
+) -> Path | None:
+    """The repo root to auto-register for ``cwd`` under folder-scoped auto-enable,
+    or ``None`` when it doesn't qualify.
+
+    Auto-enable is **git-repo-scoped**: ``cwd`` must be inside a git repo, and
+    that repo's *common* root becomes its own project — so the umbrella folder is
+    never captured as one giant project, and worktrees collapse to one project
+    exactly like in :func:`resolve_project`. A repo whose root sits under any
+    ``denylist`` path never qualifies (the denylist wins over
+    ``auto_enable_roots``). All configured paths are ``~``-expanded and resolved
+    before comparison; a non-existent configured path simply matches nothing
+    rather than raising."""
+    if not auto_enable_roots:
+        return None  # feature off — never walk git for a repo we won't register
+    repo_root = git_common_root(cwd)
+    if repo_root is None:
+        return None  # not a git repo — auto-enable only registers real repos
+    repo_root = repo_root.resolve()
+    for deny in denylist:
+        if _is_within(repo_root, Path(deny).expanduser().resolve()):
+            return None
+    for allowed in auto_enable_roots:
+        if _is_within(repo_root, Path(allowed).expanduser().resolve()):
+            return repo_root
+    return None

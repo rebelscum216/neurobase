@@ -69,6 +69,19 @@ def test_default_cap_is_6000_when_config_absent(enabled: tuple[Path, Path]) -> N
     assert "small body" in ctx
 
 
+def test_recall_skips_unreadable_node(enabled: tuple[Path, Path]) -> None:
+    """A directory named ``*.md`` in nodes/ (read_doc's read_text raises
+    IsADirectoryError, an OSError) must be skipped, never crash recall —
+    build_context runs in the SessionStart hook and has to fail safe. The healthy
+    node still reaches the injected context."""
+    root, repo = enabled
+    store.write_node(root, "myrepo", "good-node", "the good body")
+    (store.memory_dir("myrepo", root) / "nodes" / "bad.md").mkdir()
+    ctx = claude_recall.build_context(root, repo)
+    assert ctx is not None
+    assert "the good body" in ctx
+
+
 def test_read_recall_does_not_create_store_toml(tmp_path: Path) -> None:
     # ADR-0015: build_context now opens a READ handle, which never writes. A
     # project can be registered (registry.toml) before the store is initialized

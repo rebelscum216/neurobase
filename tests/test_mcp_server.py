@@ -236,6 +236,18 @@ def test_memory_list_projects_counts(root: Path, tmp_path: Path) -> None:
     assert out == [{"project": "alpha", "curated_count": 1, "node_count": 1}]
 
 
+def test_memory_list_projects_fail_soft_on_unreadable_entry(root: Path, tmp_path: Path) -> None:
+    """spec §13 MUST: an unreadable curated entry (a directory named ``*.md``, so
+    list_curated's read_doc raises IsADirectoryError) must not turn
+    memory_list_projects into a FastMCP ToolError — the healthy fact is still
+    counted and the call returns normally."""
+    _register(root, tmp_path, "alpha")
+    store.upsert_curated(root, "alpha", "f1", "a", provenance=["t"])
+    (store.memory_dir("alpha", root) / "curated" / "bad.md").mkdir()
+    out = _result(_server(root), "memory_list_projects")
+    assert out == [{"project": "alpha", "curated_count": 1, "node_count": 0}]
+
+
 # --- memory_remember -----------------------------------------------------
 
 

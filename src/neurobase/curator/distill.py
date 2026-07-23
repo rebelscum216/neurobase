@@ -277,7 +277,7 @@ def _cache_read(cache_path: Path, fingerprint: str) -> str | None:
         return None
     try:
         doc = store.read_doc(cache_path)
-    except ValueError:
+    except (ValueError, OSError):  # malformed frontmatter or unreadable entry
         return None
     if doc.get(_FINGERPRINT_KEY) != fingerprint:
         return None  # stale (raw body or transcript changed) ⇒ miss

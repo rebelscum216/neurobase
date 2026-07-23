@@ -170,6 +170,54 @@ def test_list_raw_oldest_first_and_skips_unparseable(root: Path) -> None:
     assert [d.body for d in docs] == ["first", "second"]
 
 
+def test_list_raw_skips_unreadable_entry(root: Path) -> None:
+    """A directory named ``*.md`` makes read_doc's read_text raise
+    IsADirectoryError (an OSError, not the ValueError the malformed skip already
+    handled) — list_raw must skip it, never raise, per its 'never fatal' contract."""
+    store.ensure_tree("proj", root)
+    store.write_raw(
+        root,
+        "proj",
+        agent="claude",
+        session_id="s1",
+        cwd="/x",
+        branch="",
+        captured_at=datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC),
+        body="first",
+    )
+    (store.memory_dir("proj", root) / "raw" / "0000-bad.md").mkdir()
+
+    docs = store.list_raw(root, "proj", unconsumed_only=False)
+    assert [d.body for d in docs] == ["first"]
+
+
+def test_list_curated_skips_unreadable_entry(root: Path) -> None:
+    """list_curated skips an unreadable curated entry (OSError) as well as a
+    malformed one — this is the read behind MCP memory_search/list_projects, which
+    spec §13 requires to be fail-soft on a hostile tree."""
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "good", "a good fact", provenance=["t"])
+    (store.memory_dir("proj", root) / "curated" / "bad.md").mkdir()
+
+    docs = store.list_curated(root, "proj")
+    assert [d.get("name") for d in docs] == ["good"]
+
+
+def test_rebuild_index_survives_unreadable_node_and_fact(root: Path) -> None:
+    """Neither loop of rebuild_index may crash on an unreadable node/fact — one
+    corrupt entry cannot break the index rebuild every curate depends on."""
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "good", "a good fact", provenance=["t"])
+    store.write_node(root, "proj", "proj-status", "# Status\n\nthe status body")
+    (store.memory_dir("proj", root) / "nodes" / "bad.md").mkdir()
+    (store.memory_dir("proj", root) / "curated" / "bad.md").mkdir()
+
+    index_path = store.rebuild_index(root, "proj")  # must not raise
+    text = index_path.read_text(encoding="utf-8")
+    assert "proj-status" in text  # healthy node still indexed
+    assert "1 active curated facts" in text  # healthy fact counted, bad one skipped
+
+
 def test_mark_consumed_preserves_other_fields_and_body(root: Path) -> None:
     store.ensure_tree("proj", root)
     path = store.write_raw(

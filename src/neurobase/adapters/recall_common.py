@@ -42,7 +42,10 @@ def _node_bodies(handle: StoreHandle, project: str) -> list[str]:
     for path in sorted(nodes_dir.glob("*.md")):
         try:
             doc = store.read_doc(path)
-        except ValueError:
+        except (ValueError, OSError):
+            # A malformed or unreadable node (dir-named *.md, permission error)
+            # must never crash recall — this runs in the SessionStart hook, which
+            # has to fail safe. read_doc reads bytes, so OSError is possible.
             continue
         body = doc.body.strip()
         if body:

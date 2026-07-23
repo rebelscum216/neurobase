@@ -160,7 +160,7 @@ def _existing_seed_state(root: Path, project: str, slug: str) -> tuple[str | Non
         return None, None
     try:
         doc = store.read_doc(path)
-    except ValueError:
+    except (ValueError, OSError):  # malformed frontmatter or unreadable entry
         return None, None
     digest = doc.get("source_digest")
     agent_last = doc.get("agent_last")

@@ -135,7 +135,7 @@ def status(
         for path in curated_dir.glob("*.md"):
             try:
                 doc = store.read_doc(path)
-            except ValueError:
+            except (ValueError, OSError):  # malformed frontmatter or unreadable entry
                 continue
             if doc.get("status") == "active":
                 active_facts += 1

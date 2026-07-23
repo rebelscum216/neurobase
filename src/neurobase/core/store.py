@@ -228,7 +228,7 @@ def write_raw(
 
 def list_raw(root: Path, project: str, unconsumed_only: bool = True) -> list[Document]:
     """Oldest-first (filename timestamp prefix sorts chronologically).
-    Unparseable files are skipped, never fatal."""
+    Unparseable *or* unreadable files are skipped, never fatal."""
     raw_dir = memory_dir(project, root) / "raw"
     if not raw_dir.exists():
         return []
@@ -236,7 +236,10 @@ def list_raw(root: Path, project: str, unconsumed_only: bool = True) -> list[Doc
     for path in sorted(raw_dir.glob("*.md")):
         try:
             doc = read_doc(path)
-        except ValueError:
+        except (ValueError, OSError):
+            # ValueError = malformed frontmatter; OSError = unreadable entry
+            # (a directory named *.md, a permission error) — read_doc reads bytes,
+            # so both are possible on a hostile tree and both are skippable here.
             continue
         if unconsumed_only and doc.get("consumed"):
             continue
@@ -313,7 +316,10 @@ def list_curated(root: Path, project: str, active_only: bool = True) -> list[Doc
     """Curated facts, sorted by slug (stable order for plan payloads + node
     synthesis). Unparseable files are skipped, never fatal. ``active_only``
     keeps only ``status: active`` (all files in ``curated/`` should be active —
-    tombstoned facts live in ``.tombstones/`` — but filter defensively)."""
+    tombstoned facts live in ``.tombstones/`` — but filter defensively).
+    Unparseable *or* unreadable files are skipped, never fatal — this is the read
+    behind the MCP ``memory_list_projects``/``memory_search`` tools, which spec §13
+    requires to be fail-soft on a hostile tree rather than raising."""
     curated_dir = memory_dir(project, root) / "curated"
     if not curated_dir.exists():
         return []
@@ -321,7 +327,7 @@ def list_curated(root: Path, project: str, active_only: bool = True) -> list[Doc
     for path in sorted(curated_dir.glob("*.md")):
         try:
             doc = read_doc(path)
-        except ValueError:
+        except (ValueError, OSError):  # malformed frontmatter or unreadable entry
             continue
         if active_only and doc.get("status") != "active":
             continue
@@ -355,7 +361,7 @@ def prune_tombstones(root: Path, project: str, older_than_days: int = 14) -> lis
     for path in sorted(tomb_dir.glob("*.md")):
         try:
             doc = read_doc(path)
-        except ValueError:
+        except (ValueError, OSError):  # malformed frontmatter or unreadable entry
             continue
         tombstoned_at = doc.get("tombstoned_at")
         if not tombstoned_at:
@@ -391,12 +397,17 @@ def _first_body_line(body: str, max_chars: int = 120) -> str:
 
 def rebuild_index(root: Path, project: str) -> Path:
     """Regenerate ``index.md`` from ``nodes/`` + active ``curated/`` — a pure
-    function of on-disk state, run after every curate."""
+    function of on-disk state, run after every curate. A malformed or unreadable
+    node/fact is skipped, never fatal (both loops), so one corrupt file cannot
+    crash the index rebuild that every curate depends on."""
     mem = memory_dir(project, root)
     lines = [f"# Memory index — {project}", ""]
     nodes_dir = mem / "nodes"
     for node_path in sorted(nodes_dir.glob("*.md")) if nodes_dir.exists() else []:
-        doc = read_doc(node_path)
+        try:
+            doc = read_doc(node_path)
+        except (ValueError, OSError):  # malformed frontmatter or unreadable entry
+            continue
         name = doc.get("name", node_path.stem)
         lines.append(f"- [{name}](nodes/{node_path.name}) — {_first_body_line(doc.body)}")
     lines.append("")
@@ -405,7 +416,7 @@ def rebuild_index(root: Path, project: str) -> Path:
     for path in curated_dir.glob("*.md") if curated_dir.exists() else []:
         try:
             doc = read_doc(path)
-        except ValueError:
+        except (ValueError, OSError):  # malformed frontmatter or unreadable entry
             continue
         if doc.get("status") == "active":
             active_count += 1

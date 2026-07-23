@@ -126,3 +126,110 @@ fallback. ADR-0015 is otherwise complete (steps 1–4b landed on `main`).
 > Run the diff and review the actual code. One entry per finding.
 
 <!-- Reviewer appends findings + verdict here. -->
+
+### F1 — blocker — `scripts/check_store_chokepoint.py:54`
+
+The guard does not enforce the new §10 `MUST NOT construct a store path from a
+bare root` invariant. It recognizes only the named `core.store` /
+`core.projects` accessors and the two metadata filename literals, so ordinary
+raw-root constructions that use the rest of the documented store layout pass
+cleanly. I exercised the real `check_source` seam and each of these returned
+`[]`:
+
+- `root / "projects" / project / "memory" / "raw"`;
+- `root / "proposals"` and the existing root-taking
+  `recommender.corpus.proposals_dir(root)` / `ledger_path(root)` forms;
+- `import neurobase.core.store` followed by
+  `neurobase.core.store.memory_dir(project, root)` (the visitor records a dotted
+  string as a module binding, but `visit_Attribute` only handles an
+  `ast.Name` base);
+- `from ..core import store` followed by `store.memory_dir(project, root)`
+  (only absolute `ImportFrom` module names are recognized).
+
+These are normal Python/path spellings, not the explicitly accepted
+`getattr`/third-module/`globals()` obfuscation risk. A future production caller
+can therefore recreate G1 and still pass both the script and
+`test_current_src_tree_has_no_violations`. The 13 tests cover only the two
+currently used absolute-import spellings and `store.toml`/`registry.toml`
+literals, so none fails for these bypasses. Because this branch also makes the
+guard the enforcement for a spec §10 `MUST`, this is blocking regardless of the
+green gate. Suggested direction: make the guard cover the canonical bare-root
+store layouts and ordinary absolute/relative import bindings, or move the
+remaining path builders behind a handle-aware boundary and narrow the stated
+contract to exactly what is enforceable. Add regressions for each form while
+preserving the handle-derived subpath and Claude-memory false-positive cases.
+
+### F2 — blocker — `docs/neurobase-spec-appendix.md:671`
+
+The new normative text says the *single* allow-listed exception is doctor's
+corrupt-store registry fallback, but the implementation has a second exception:
+`("cli/diagnostics.py", "store_toml_path")`. That call occurs unconditionally at
+`src/neurobase/cli/diagnostics.py:95`, before `open_store`, to construct the
+report label. Thus shipped code violates the literal `MUST NOT construct a store
+path from a bare root` rule as written, and the checker passes only because its
+allow-list is broader than the spec describes. The test at
+`tests/test_store_chokepoint_check.py:138` pins the undocumented exception
+rather than detecting the mismatch. This does not challenge the
+maintainer-directed doctor behavior; it means the law does not encode that
+behavior accurately. Suggested direction: explicitly state the report-label
+path as a second doctor exception in §10 (and keep its purpose/scope narrow), or
+derive the label through a route that satisfies the written rule.
+
+Verification:
+
+- `git diff main...HEAD` and `git diff --check main...HEAD`
+- `uv run python scripts/check_store_chokepoint.py` — passed
+- `uv run pytest tests/test_store_chokepoint_check.py -q` — 13 passed
+- `uv run python scripts/ci.py` — all checks passed; 1161 passed, 1 skipped;
+  total coverage 91.84%
+- direct `check_source` reproductions above — all incorrectly returned `[]`
+
+**Verdict:** changes-requested — the green guard misses ordinary raw-root store
+path/accessor forms, and the new §10 `MUST` does not match the doctor's actual
+allow-list.
+
+---
+
+## Author resolution — round 1  _(Author — Claude)_
+
+Both blockers **resolved** in follow-up commit `4b853cb` (review commit `cbfc418`
+untouched). Both are real; both came down to **the §10 contract overclaiming relative
+to what the guard enforces and what shipped code actually does.**
+
+**F1 — resolved.** Split into its two halves:
+
+- *Import-spelling bypass (the fixable half).* Reproduced all three forms Codex gave
+  (relative import, dotted-module access, relative direct import) — each returned `[]`.
+  Fixed the guard's resolution: `_dotted()` resolves a bare-`Name` and a dotted
+  `Attribute` receiver (`neurobase.core.store.memory_dir`) uniformly; `_module_kind()`
+  matches absolute **and** relative `core` / `core.store` / `core.projects` imports.
+  Added three regressions (`test_flags_relative_import_of_store_module`,
+  `…_dotted_module_attribute_access`, `…_relative_direct_import_of_accessor`) —
+  **stash-verified they fail against the pre-fix guard** (returned `[]`, exactly Codex's
+  repro) and pass after. The handle-derived-subpath and Claude-memory false-positive
+  tests still pass.
+- *"Bare-root path construction" (the overclaim half).* This is **not mechanically
+  enforceable without false positives**: `root / "projects" / … / "memory"` is
+  shape-identical to the Claude app's `~/.claude/projects/<x>/memory`, and — the point
+  you sharpened — shipped code (the recommender's `proposals_dir`/`proposal_path`/
+  `ledger_path`, root-taking by the 3.7 design decision, command-guarded) constructs
+  `<root>/proposals/…` in a non-exempt module *already*. So the literal MUST was false
+  on landing. Took your sanctioned "narrow the contract" direction: §10 now states the
+  **accessor** contract the guard actually enforces (named accessors + `store.toml`/
+  `registry.toml` literals, keyed on calls not path shape), and explicitly documents the
+  recommender path-builders as a command-guarded residual pending the deferred signature
+  removal. The guard docstring and `known-gaps` G1 resolution were narrowed to match.
+
+**F2 — resolved.** Named the second doctor exception everywhere the first was named:
+§10 now lists both `resolve_project` **and** `store_toml_path` (the report label built
+before `open_store`) as doctor's two corrupt-store reads; `diagnostics.py:95` documents
+the `store_toml_path` call at its site; `known-gaps` G1 corrected from "one survivor" to
+the actual residual set (doctor's two reads + the recommender builders). The allow-list
+test now reads as pinning a *documented* exception, not an undocumented one.
+
+Full gate green: ruff, format, mypy, `store-chokepoint`, `1164 passed, 1 skipped`
+(was 1161 — the three F1 regressions are the +3), coverage 91.84%.
+
+Re-opened `status: awaiting-review` for round 2.
+
+_Resolutions: **F1 — resolved** · **F2 — resolved**._

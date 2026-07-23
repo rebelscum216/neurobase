@@ -9,8 +9,10 @@ onto ``open_store(...)`` + handle methods; this check is what keeps them there �
 call site that reintroduces a raw-``root`` accessor fails CI instead of silently
 re-opening the hole. (The ``init --agent`` and ``uninstall --purge-store`` lifecycle
 commands run the D11 guard command-side — a ``READ`` handle before installing hooks, a
-``PURGE`` handle before deleting — ADR-0015 step 4d. The config-backup facility they use
-is a schema-independent maintenance exception, not tracked here; see spec §10.)
+``PURGE`` handle before deleting — ADR-0015 step 4d. The config-backup facility
+(``backups.backup_files``/``restore_backup``) is a schema-independent maintenance
+exception, not tracked here; its non-purge-uninstall/restore callers open no handle, and
+purge deliberately skips the backup entirely — see spec §10.)
 
 **Scope (deliberately ``src/`` only).** The raw-``root`` functions still *exist* on
 ``core.store`` / ``core.projects`` — the ADR's "remove the signatures" step is

@@ -32,12 +32,15 @@ This file exists because nothing else in `docs/` was the right home for it:
 ### G1 — the D11 store-schema guard is enforced per-command by hand, not at the store boundary
 
 - **status:** fixed (ADR-0015 — the `StoreHandle` chokepoint; migration steps 1–5 +
-  4d, `docs/reviews/2026-07-2*-*handle*.md`, `*-lifecycle-guards.md`). Every
-  store-touching command now runs the D11 guard: the store-tree/registry **accessor**
-  class is closed and CI-enforced by `scripts/check_store_chokepoint.py`, and the
-  remaining lifecycle commands open the appropriate handle at their entry (guided `init`
-  = `WRITE`; `init --agent` = `READ`; `uninstall --purge-store` = `PURGE`). Step 4d
-  closed the last two paths (see *Resolution* / *Residual gaps* below).
+  4d, `docs/reviews/2026-07-2*-*handle*.md`, `*-lifecycle-guards.md`). Every command that
+  touches **schema-versioned store content** (`memory/`, `registry.toml`) now runs the
+  D11 guard: the store-tree/registry **accessor** class is closed and CI-enforced by
+  `scripts/check_store_chokepoint.py`, and the lifecycle commands open the appropriate
+  handle command-side (guided `init` = `WRITE`; `init --agent` = `READ`; `uninstall
+  --purge-store` = `PURGE`). The config-backup facility is a schema-independent
+  maintenance exception (opaque config copies; its non-purge-uninstall/`--restore-backup`
+  callers open no handle — see *Resolution* / *Residual gaps* below). Step 4d closed the
+  last two paths.
 - **severity:** major — spec §10 says *"refuse to **operate** on a schema newer
   than the binary."* No read-only exemption exists in the contract. At least one
   path **mutates** a newer-schema store before the guard runs, which is the exact
@@ -176,6 +179,10 @@ blast radius. Both are now closed:
 
 Each is pinned by a `schema = 999` integration regression (stash-verified to fail
 pre-4d). The config-backup facility itself (`backups.backup_files`/`restore_backup`)
-stays root-taking by design — uninstall/recovery must work on a store of any schema, so
-it cannot sit behind the schema-refusing handle; the *commands* that use it are guarded
-at their entry (spec §10).
+stays root-taking by design — it copies agent-config files *verbatim* (never touching
+`memory/`/`registry.toml`), so it is safe on a store of any schema, which
+uninstall/recovery **require**. Where D11 matters for these commands is installing hooks
+(`init --agent` = `READ`) and deleting (`uninstall --purge-store` = `PURGE`, which also
+skips the backup); the **non-purge uninstall and `--restore-backup` paths open no
+handle** — the backup/restore itself is a schema-independent maintenance exception
+(spec §10).

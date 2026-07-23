@@ -162,7 +162,20 @@ schema** only; a corrupt **registry** is not conflated with it — that stays fa
 **D25 — `uninstall --purge-store` is exempt.** It opens a `PURGE` handle and may
 `rmtree(<root>)` even when the schema is unsupported or unparseable — with the
 existing explicit user confirmation. **Spec §10 gains this exemption in writing**
-(the only sanctioned mutation of an unsupported store is its deletion).
+(the only sanctioned mutation of an unsupported store's **schema-versioned content**
+— `memory/`, `registry.toml` — is its deletion).
+
+*Refined during step-4d implementation (recorded here and in spec §10 to keep the two
+in step):* the **config-backup facility** (`backups.backup_files` / `restore_backup`,
+under `<root>/backups/`) is a **schema-independent maintenance exception**, not a
+mutation of schema-versioned content. It copies agent-config files *verbatim* and never
+reads or writes `memory/` / `registry.toml`, so it is safe on a store of any schema —
+which is required, because uninstall and disaster-recovery must not be bricked by a
+store whose schema the binary cannot operate on. It therefore stays outside the
+schema-refusing handle: `init --agent` opens a `READ` handle before installing hooks and
+`uninstall --purge-store` opens a `PURGE` handle before deleting (and skips the backup),
+but the non-purge-uninstall and `--restore-backup` paths that use the facility open no
+handle. "Deletion is the only mutation" governs schema-versioned content only.
 
 **D26 — `doctor` reuses the guard, read-only.** `cli/diagnostics._store_checks`
 stops re-implementing the schema comparison and instead opens a `DOCTOR` handle,

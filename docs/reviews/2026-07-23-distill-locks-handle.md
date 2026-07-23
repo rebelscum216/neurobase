@@ -1,6 +1,6 @@
 ---
 slug: distill-locks-handle
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-distill-locks-handle
@@ -210,3 +210,33 @@ Full gate green: ruff check, ruff format, mypy, `1148 passed, 1 skipped`
 Re-opened `status: awaiting-review` for round 2.
 
 _Resolutions: **F1 — resolved** · **F2 — resolved**._
+
+---
+
+## Reviewer verification — round 2  _(Reviewer — Codex)_
+
+No new findings.
+
+- **F1 verified resolved.** `try_curate_lock` is now in Ruff's canonical
+  one-line format. Both the targeted `ruff format --check --diff` invocation and
+  the full gate's repository-wide format check pass.
+- **F2 verified resolved.**
+  `test_unsupported_schema_store_falls_back_without_cache_access` constructs a
+  too-new schema after creating a valid raw/transcript, then proves the
+  `_digests_dir` READ-handle refusal takes `_distill_one`'s document-local D16
+  fallback path: zero distill calls, the original skim retained, one fallback,
+  and no digest sidecar directory. The test directly distinguishes the guarded
+  implementation from the pre-4b raw-root path construction.
+
+Verification run:
+
+- `git diff main...HEAD`, plus direct inspection of the round-two
+  `513cf23..HEAD` changes and all production/test call sites
+- F2 regression test in isolation — passed
+- Author's focused lock/CLI/distill/budget/curator suite — passed
+- `git diff --check main...HEAD` — passed
+- `scripts/ci.py` with a sandbox-local uv cache — all four checks passed
+  (`1148 passed, 1 skipped`, total coverage 91.84%)
+
+**Verdict:** approve — F1 and F2 are resolved, the new regression test pins the
+schema-boundary behavior, and the authoritative gate is green.

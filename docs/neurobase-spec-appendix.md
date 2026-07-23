@@ -637,6 +637,43 @@ through — the lookup never prompts or raises into the caller.
 At `<root>/store.toml`: `schema = 1`, `created_at = <ISO8601>`. `neurobase
 migrate` owns future bumps; refuse to operate on a schema newer than the binary.
 
+### Store access — the `open_store` chokepoint (ADR-0015, D23–D26)
+Every store and registry access MUST first obtain a validated `StoreHandle` from
+`open_store(root, mode)` (`core/store_handle.py`). `open_store` is the **one** place
+the D11 schema comparison runs — "refuse to operate on a schema newer than the binary"
+is enforced at the boundary, not per command, so a new call site cannot forget it. The
+handle's constructor is private; `open_store` is the sole entry point.
+
+`mode` governs how a schema the binary does not support is treated:
+
+| Mode | On a supported schema | On a newer / unsupported schema | Writes `store.toml`? |
+|---|---|---|---|
+| `READ` | opens; missing `store.toml` ⇒ uninitialized (`schema=None`), not an error | raises `UnsupportedSchemaError` | never |
+| `WRITE` / `MIGRATE` | opens | raises `UnsupportedSchemaError` | creates it on first use |
+| `DOCTOR` | opens | opens, carrying the newer `schema` to **report** (never refuses) | never |
+| `PURGE` | opens | opens even an unparseable store, so it can be **deleted** | never |
+
+- **`uninstall --purge-store` is the one sanctioned mutation of an unsupported store**
+  (D25): it opens a `PURGE` handle and may delete `<root>` even when the schema is
+  newer or `store.toml` is unparseable, behind the existing explicit confirmation.
+- **MCP never hard-fails at startup** (D24): an unsupported-schema store surfaces as a
+  **structured tool error** per tool, not an exception — `resources/list` still returns
+  a valid array (spec §13).
+- **`doctor` reports, never refuses** (D26): it opens a `DOCTOR` handle and maps
+  `schema=None` → "not initialized", `schema > max` → "unsupported", else ok — one
+  comparison, reused, never re-implemented.
+- **Registry parseability is a separate, fail-soft concern** — a corrupt
+  `registry.toml` is *not* folded into the schema guard: registry reads
+  (`load_registry`, `resolve_project`) treat it as empty, and `doctor` may resolve a
+  project directly from the registry when `store.toml` itself is corrupt and no handle
+  can open.
+
+**Enforcement.** Production code (`src/neurobase/`) MUST NOT construct a store path
+from a bare root or read `store.toml`/`registry.toml` outside `core/store.py`,
+`core/store_handle.py`, and `core/projects.py`; the CI guard
+`scripts/check_store_chokepoint.py` fails the gate on any violation. The single
+allow-listed exception is `doctor`'s corrupt-store registry fallback above.
+
 ### Project registry
 `<root>/registry.toml`:
 

@@ -31,7 +31,9 @@ This file exists because nothing else in `docs/` was the right home for it:
 
 ### G1 — the D11 store-schema guard is enforced per-command by hand, not at the store boundary
 
-- **status:** open
+- **status:** fixed (ADR-0015 — the `StoreHandle` chokepoint; migration steps 1–5,
+  `docs/reviews/2026-07-2*-*handle*.md`). Kept fixed by the step-5 CI guard
+  `scripts/check_store_chokepoint.py` (see *Resolution* below).
 - **severity:** major — spec §10 says *"refuse to **operate** on a schema newer
   than the binary."* No read-only exemption exists in the contract. At least one
   path **mutates** a newer-schema store before the guard runs, which is the exact
@@ -125,3 +127,22 @@ Constraints any fix must respect:
 
 **This needs an ADR** — either route changes the contract (exemptions) or the
 architecture (a store chokepoint). It cannot be settled by quietly editing code.
+
+**Resolution (ADR-0015).** Fix-direction 1, in the strongest form: a single
+validated `StoreHandle` every path must obtain via `open_store(root, mode)`, which is
+the one place the D11 comparison lives. Landed as five reviewed migration PRs — (1)
+`store_handle.py` + `open_store`; (2) handle methods; (3) every production module
+converted onto the handle; (4a/4b) the deferred `search`/`linkify` and
+`distill`/`locks` edges; (5) this CI guard. All three constraints above are honored:
+MCP surfaces a **structured tool error** (D24), `uninstall --purge-store` opens a
+`PURGE` handle (D25, written into spec §10), and `doctor` opens a read-only `DOCTOR`
+handle instead of re-implementing the comparison (D26). The pre-guard registry-read
+pattern can no longer compile — `resolve_project`/`load_registry` production callers
+go through the handle. The **one** sanctioned raw-root survivor is `doctor`'s
+corrupt-`store.toml` project fallback (`cli/diagnostics.py`, a `registry.toml` read
+independent of the store-schema guard), allow-listed by (file, name) in the step-5
+guard; every other raw-root store/registry access in `src/` fails CI. The literal
+removal of the raw-`Path` `store.py`/`projects.py` signatures (they remain the
+low-level implementation the handle methods delegate to, and the test suite's
+store-setup helpers) is deferred; the CI guard is what makes production omission
+impossible in the meantime.

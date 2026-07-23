@@ -40,6 +40,9 @@ CHECKS: list[tuple[str, list[str]]] = [
     ("ruff check", ["uv", "run", "ruff", "check", "."]),
     ("ruff format --check", ["uv", "run", "ruff", "format", "--check", "."]),
     ("mypy src tests", ["uv", "run", "mypy", "src", "tests"]),
+    # ADR-0015 step 5: forbid raw-root store/registry access in production (src/)
+    # outside the three exempt core modules — the enforcement that keeps G1 closed.
+    ("store-chokepoint", ["uv", "run", "python", "scripts/check_store_chokepoint.py"]),
     # Coverage rides along with the test run rather than being a separate check:
     # a second pytest invocation would double the slowest step for no new signal.
     # The floor itself (`fail_under`) lives in pyproject.toml's [tool.coverage.report]

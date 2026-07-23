@@ -144,6 +144,33 @@ def test_missing_transcript_falls_back(root: Path) -> None:
     assert out[0].body == "skim"
 
 
+def test_unsupported_schema_store_falls_back_without_cache_access(
+    root: Path, tmp_path: Path
+) -> None:
+    """§10 chokepoint + D16: ``_digests_dir`` self-opens a validated handle, so a
+    store whose ``store.toml`` schema is newer than this binary supports refuses
+    the digest cache and the raw degrades to its skim — no brain call, no cache
+    write, no aborted pass. This pins the guard ``_digests_dir`` gained in 4b:
+    with the pre-4b raw-root ``store.memory_dir`` the schema was unchecked and this
+    raw would have distilled normally (``UnsupportedSchemaError`` from the self-open
+    is neither ``BrainError`` nor ``BudgetExhausted``, so it lands on
+    ``_distill_one``'s terminal skim path, not a pass-level breaker)."""
+    t = _write_transcript(tmp_path / "t.jsonl", _claude_events())
+    doc = _write_raw(root, "proj", "r1.md", body="skim", transcript_path=str(t))
+    # A schema newer than the binary supports: open_store(READ) refuses it.
+    (root / "store.toml").write_text(
+        f'schema = {store.STORE_SCHEMA_VERSION + 1}\ncreated_at = "2020-01-01T00:00:00Z"\n',
+        encoding="utf-8",
+    )
+    brain = DistillBrain()
+    out, counts = distill.distill_docs(root, "proj", [doc], brain)
+    assert counts == {"distilled": 0, "fallback": 1}
+    assert brain.distill_calls == 0
+    assert out[0].body == "skim"
+    # The refusal happens before any cache access, so no digest sidecar is written.
+    assert not (store.memory_dir("proj", root) / "raw" / distill._DIGESTS_DIRNAME).exists()
+
+
 def test_brain_error_falls_back(root: Path, tmp_path: Path) -> None:
     t = _write_transcript(tmp_path / "t.jsonl", _claude_events())
     doc = _write_raw(root, "proj", "r1.md", body="skim", transcript_path=str(t))

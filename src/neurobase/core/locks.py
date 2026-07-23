@@ -70,9 +70,7 @@ def curate_lock_path(handle: StoreHandle, project: str) -> Path:
     return handle.memory_dir(project) / ".locks" / "curate.lock"
 
 
-def try_curate_lock(
-    handle: StoreHandle, project: str
-) -> contextlib.AbstractContextManager[bool]:
+def try_curate_lock(handle: StoreHandle, project: str) -> contextlib.AbstractContextManager[bool]:
     """Non-blocking, per-store/project single-flight lock for curation.
 
     Takes a validated ``StoreHandle`` (not a raw root): the lock path is built

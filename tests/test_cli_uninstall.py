@@ -9,10 +9,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import neurobase.cli as cli
 from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.codex import install as codex_install
 from neurobase.cli import app
 from neurobase.core import backups
+from neurobase.core.store_handle import StoreHandle, StoreMode
 
 runner = CliRunner()
 SHIM = "/abs/shim/neurobase"
@@ -138,6 +140,48 @@ def test_uninstall_purge_deletes_newer_schema_store_without_pre_delete_backup(
     assert "Deleted store" in result.output
     assert "Backed up" not in result.output  # the pre-delete backup was skipped
     assert not store_root.exists()  # gone despite the unsupported schema
+
+
+def test_uninstall_purge_opens_purge_handle_before_delete(
+    env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D25 (4d): purge must go through the chokepoint — open a PURGE handle — before
+    `rmtree`, not delete around it. A PURGE open has no observable effect on the happy
+    path (it never refuses), so it is pinned by spying the mode: dropping the open would
+    otherwise leave every other purge assertion green (Codex round-1 F3)."""
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    (store_root / "store.toml").write_text(
+        'schema = 1\ncreated_at = "2020-01-01T00:00:00Z"\n', encoding="utf-8"
+    )
+    modes: list[StoreMode] = []
+    real = cli._open_store_or_exit
+
+    def spy(root: Path, mode: StoreMode) -> StoreHandle:
+        modes.append(mode)
+        return real(root, mode)
+
+    monkeypatch.setattr(cli, "_open_store_or_exit", spy)
+
+    result = runner.invoke(app, ["uninstall", "--agent", "claude", "--purge-store", "--yes"])
+
+    assert result.exit_code == 0
+    assert not store_root.exists()
+    assert StoreMode.PURGE in modes  # the delete went through open_store(..., PURGE)
+
+
+def test_uninstall_purge_deletes_store_with_unparseable_metadata(env: Path, tmp_path: Path) -> None:
+    """PURGE opens even an *unparseable* store.toml (READ/WRITE/DOCTOR would raise), the
+    D25 escape hatch: you can always delete a store you cannot parse. If the purge path
+    used a refusing mode instead, this would exit 1 rather than deleting."""
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    (store_root / "store.toml").write_text("this is not = valid = toml ][", encoding="utf-8")
+
+    result = runner.invoke(app, ["uninstall", "--agent", "claude", "--purge-store", "--yes"])
+
+    assert result.exit_code == 0
+    assert not store_root.exists()
 
 
 def test_uninstall_no_hooks_found(env: Path) -> None:

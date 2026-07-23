@@ -2,8 +2,9 @@
 
 The guard closes G1's *accessor* class: production code must reach the store-tree /
 registry accessors through ``open_store(...)`` + a ``StoreHandle``, never a raw-``root``
-call. (Two lifecycle paths — ``init --agent`` backup, ``uninstall --purge-store`` —
-remain outside it, tracked for ADR-0015 step 4d.) These tests exercise the REAL guard
+call. (The ``init --agent`` and ``uninstall --purge-store`` lifecycle commands are
+command-guarded instead — a ``READ``/``PURGE`` handle at the command — ADR-0015 step 4d;
+they are outside this accessor guard's scope.) These tests exercise the REAL guard
 module (imported by path, like ``test_redact_audit``) so the check the developer runs is
 the one under test — not a copy free to drift.
 """
@@ -30,7 +31,8 @@ def _details(relpath: str, source: str) -> list[str]:
 def test_current_src_tree_has_no_violations() -> None:
     """The whole shipped ``src/neurobase`` tree passes — production reaches the
     store-tree/registry accessors through the handle, so the guard enforces a true
-    invariant, not aspirational (the 4d lifecycle paths are outside its accessor scope)."""
+    invariant, not aspirational (the lifecycle commands are command-guarded, outside
+    this accessor guard's scope)."""
     failures: list[str] = []
     for path in sorted(guard.SRC.rglob("*.py")):
         relpath = path.relative_to(guard.SRC).as_posix()

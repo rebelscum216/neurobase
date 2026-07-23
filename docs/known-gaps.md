@@ -137,21 +137,24 @@ validated `StoreHandle` every path must obtain via `open_store(root, mode)`, whi
 the one place the D11 comparison lives. Landed as five reviewed migration PRs — (1)
 `store_handle.py` + `open_store`; (2) handle methods; (3) every production module
 converted onto the handle; (4a/4b) the deferred `search`/`linkify` and
-`distill`/`locks` edges; (5) this CI guard. Two of the three constraints above are
-honored: MCP surfaces a **structured tool error** (D24), and `doctor` opens a read-only
-`DOCTOR` handle instead of re-implementing the comparison (D26). The third — D25's
-`uninstall --purge-store` → `PURGE` handle — is **specified but not yet wired** (the CLI
-still deletes directly); see *Residual gaps* below. The pre-guard registry-read
+`distill`/`locks` edges; (5) this CI guard; (4d) the two lifecycle guards. All three
+constraints above are honored: MCP surfaces a **structured tool error** (D24), `doctor`
+opens a read-only `DOCTOR` handle instead of re-implementing the comparison (D26), and
+`uninstall --purge-store` opens a `PURGE` handle before deleting (D25 — wired in 4d,
+which also made `init --agent` open a `READ` handle before installing hooks). The
+pre-guard registry-read
 pattern can no longer compile — `resolve_project`/`load_registry` production callers
 go through the handle. The step-5 guard forbids the raw-`root` store/registry
 **accessors** and the `store.toml`/`registry.toml` literals outside the three
-implementation modules; two documented residuals remain, pending the deferred
-signature removal (spec §10): `doctor`'s two corrupt-`store.toml` reads
-(`resolve_project` + `store_toml_path` in `cli/diagnostics.py`, `registry.toml`/label
-reads independent of the store-schema guard, allow-listed by (file, name)), and the
-recommender's `proposals`/`ledger` path-builders (`corpus.proposals_dir`/`proposal_path`/
-`ledger_path`), which stay root-taking but are guarded at the command entry that opens
-their handle. The literal removal of the raw-`Path` `store.py`/`projects.py` signatures
+implementation modules. Three documented raw-`root` residuals remain outside that
+accessor coverage (none an unguarded write to schema-versioned content — spec §10):
+`doctor`'s two corrupt-`store.toml` reads (`resolve_project` + `store_toml_path` in
+`cli/diagnostics.py`, `registry.toml`/label reads independent of the store-schema guard,
+allow-listed by (file, name)); the recommender's `proposals`/`ledger` path-builders
+(`corpus.proposals_dir`/`proposal_path`/`ledger_path`), command-guarded; and the
+config-backup facility (`backups.backup_files`/`restore_backup`), a schema-independent
+maintenance exception (opaque config-file copies to/from `<root>/backups/`, safe on any
+schema). The literal removal of the raw-`Path` `store.py`/`projects.py` signatures
 (they remain the low-level implementation the handle methods delegate to, and the test
 suite's store-setup helpers) is deferred; the CI guard is what makes production
 accessor-level omission impossible in the meantime.

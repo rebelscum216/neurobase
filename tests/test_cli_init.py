@@ -246,6 +246,27 @@ def test_init_agent_codex_refuses_newer_schema(env: Path, tmp_path: Path) -> Non
     assert not (store_root / "backups").exists()
 
 
+def test_init_agent_does_not_materialize_store_toml(env: Path, tmp_path: Path) -> None:
+    """READ-not-WRITE (4d): installing hooks must refuse an *unsupported* store but must
+    NOT *create* one — a successful `init --agent` against a not-yet-initialized store
+    leaves `store.toml` absent (the store is created later, on first capture / `enable`).
+    A WRITE handle would materialize it; this pins the mode choice behaviorally, for both
+    installers. (The guided flow keeps WRITE because it enables a repo = real store writes.)"""
+    store_toml = tmp_path / "store" / "store.toml"
+
+    claude_repo = tmp_path / "claude_repo"
+    claude_repo.mkdir()
+    claude = runner.invoke(app, ["init", "--agent", "claude", "--cwd", str(claude_repo), "--yes"])
+    assert claude.exit_code == 0
+    assert not store_toml.exists()
+
+    codex_repo = tmp_path / "codex_repo"
+    codex_repo.mkdir()
+    codex = runner.invoke(app, ["init", "--agent", "codex", "--cwd", str(codex_repo), "--yes"])
+    assert codex.exit_code == 0
+    assert not store_toml.exists()
+
+
 # --- init --agent codex (spec §7) -----------------------------------------
 
 

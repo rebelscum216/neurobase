@@ -644,9 +644,12 @@ Store-tree and registry access obtains a validated `StoreHandle` from
 on a schema newer than the binary" is enforced at the boundary, not per command, so a
 new call site cannot forget it. The handle's constructor is private; `open_store` is the
 sole entry point. The store-tree and registry **accessors** (below) are all behind the
-handle and CI-enforced; the two lifecycle paths (`init --agent`, `uninstall
---purge-store`) open the appropriate handle at the command entry (ADR-0015 step 4d) —
-command-guarded like the recommender path-builders, not accessor-CI-enforced.
+handle and CI-enforced. The two lifecycle commands run the D11 guard too, command-side
+(ADR-0015 step 4d): `init --agent` opens a `READ` handle at its entry before installing
+hooks; `uninstall --purge-store` opens a `PURGE` handle immediately before deleting the
+root. Both are command-guarded (not accessor-CI-enforced), like the recommender
+path-builders. Separately, the **config-backup facility** (`<root>/backups/`) is
+schema-independent by design — see the maintenance exception below.
 
 `mode` governs how a schema the binary does not support is treated:
 
@@ -657,12 +660,14 @@ command-guarded like the recommender path-builders, not accessor-CI-enforced.
 | `DOCTOR` | opens | opens, carrying the newer `schema` to **report** (never refuses) | never |
 | `PURGE` | opens | opens even an unparseable store, so it can be **deleted** | never |
 
-- **`uninstall --purge-store` is the one sanctioned mutation of an unsupported store**
-  (D25): it opens a `PURGE` handle (which never refuses — it opens even a newer-schema or
-  unparseable store) and then deletes `<root>`, behind the existing explicit
-  confirmation. When purging it **skips the config backup**, which would otherwise be
-  written *into* the store being deleted — so deletion stays the only mutation of an
-  unsupported store (ADR-0015 step 4d).
+- **Deleting an unsupported store's schema-versioned content is only ever done by
+  `uninstall --purge-store`** (D25): it opens a `PURGE` handle (which never refuses — it
+  opens even a newer-schema or unparseable store) immediately before `rmtree(<root>)`,
+  behind the existing explicit confirmation. When purging it **skips the config backup**,
+  so nothing is written *into* the store before its deletion. (The
+  schema-versioned content — `memory/`, `registry.toml` — is never *written* on an
+  unsupported store; deletion is the only thing done to it. The config-backup facility
+  below is a separate, schema-independent channel.)
 - **MCP never hard-fails at startup** (D24): an unsupported-schema store surfaces as a
   **structured tool error** per tool, not an exception — `resources/list` still returns
   a valid array (spec §13).
@@ -690,27 +695,32 @@ layout is not shape-distinguishable from the Claude app's own
 `~/.claude/projects/<x>/memory`, so it is not matched (the accessor contract is exactly
 what is mechanically enforceable without false positives).
 
-Some raw-`root` constructions **remain** outside the accessor guard's coverage; all are
-**command-guarded** (the command opens a handle at its entry) rather than
-accessor-CI-enforced, consistent with how the guard is scoped:
+Some raw-`root` constructions **remain** outside the accessor guard's coverage, in three
+kinds — none is an unguarded write to **schema-versioned store content** (`memory/`,
+`registry.toml`):
 
-- **`doctor`'s two corrupt-`store.toml` reads** (sanctioned, allow-listed) —
+- **`doctor`'s two corrupt-`store.toml` reads** (allow-listed) —
   `projects.resolve_project(root, cwd)` (project resolution is a `registry.toml`
   concern, independent of the store-schema guard, and must survive when no handle can
   open) and `store.store_toml_path(root)` (the report label, built before `open_store`).
   Both live only in `cli/diagnostics.py` and are allow-listed in the guard by (file, name).
-- **the recommender's proposal/ledger path-builders** —
+- **the recommender's proposal/ledger path-builders** (command-guarded) —
   `corpus.proposals_dir` / `proposal_path` / `ledger_path` build `<root>/proposals/…`
   and `<root>/recommender/ledger.jsonl` from a bare root, but every caller is guarded by
   the command entry that opens the handle first. They stay root-taking until the
   raw-`Path` signature removal lands.
-- **the config-backup facility** (`backups.backup_files` / `restore_backup`, writing
-  `<root>/backups/…`) — deliberately **not** behind the schema-refusing handle, because
-  uninstall and disaster-recovery must work on a store of *any* schema (refusing a backup
-  on a newer schema would block hook removal). The `init --agent` and
-  `uninstall --purge-store` commands that use it open the appropriate handle at their
-  entry (`READ` and `PURGE` respectively — ADR-0015 step 4d), so the store-schema guard
-  runs even though the backup call itself stays root-taking.
+- **the config-backup facility** (schema-independent maintenance exception) —
+  `backups.backup_files` / `restore_backup` copy agent-config files **verbatim** to/from
+  `<root>/backups/`. The copies are opaque: they never read or write `memory/` or
+  `registry.toml`, so they are safe on a store of *any* schema — which is **required**,
+  because uninstall and disaster-recovery must not be blocked by a store whose schema we
+  cannot operate on. The facility is therefore deliberately *not* behind the
+  schema-refusing handle, and its non-purge-uninstall and restore callers open no handle.
+  Where D11 *does* matter for these commands is (a) **installing hooks** — `init --agent`
+  opens a `READ` handle first, so hooks are never wired onto a store we can't operate on
+  — and (b) **purging** — `uninstall --purge-store` opens a `PURGE` handle immediately
+  before the delete and skips the backup, so an unsupported store is only ever deleted,
+  never written (ADR-0015 step 4d).
 
 ### Project registry
 `<root>/registry.toml`:

@@ -534,6 +534,14 @@ def _init_guided(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bo
 
 
 def _init_claude(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: bool) -> None:
+    # G1 closure (ADR-0015 step 4d): refuse to install hooks onto a store whose schema
+    # is newer than this binary supports — those hooks would then capture into a store
+    # we cannot operate on (spec §10, D11). A READ handle is the right guard: it raises
+    # on a newer/corrupt schema but treats an *absent* store.toml as uninitialized
+    # (schema=None, not an error), and never writes — so `init --agent` still installs
+    # against a not-yet-created store without materializing one as a side effect (unlike
+    # the guided flow's WRITE handle, which enables a repo and so creates store state).
+    _open_store_or_exit(resolved_root, StoreMode.READ)
     config = load_config()
     shim = claude_install.shim_path()
     writes: list[_PendingWrite] = []
@@ -604,6 +612,9 @@ def _init_codex(resolved_root: Path, resolved_cwd: Path, *, user: bool, yes: boo
     scope, the ``[projects.*]`` trust/discovery table; and — always, user-scope —
     the ``[mcp_servers.neurobase]`` table so ``neurobase mcp serve`` is available.
     """
+    # G1 closure (step 4d) — same READ guard as _init_claude: refuse to install hooks
+    # onto a newer-than-supported store before any backup/config write (spec §10, D11).
+    _open_store_or_exit(resolved_root, StoreMode.READ)
     project_root = resolved_cwd if user else projects.git_common_root(resolved_cwd) or resolved_cwd
     hooks_path = codex_install.hooks_json_path(user=user, cwd=project_root)
     try:
@@ -765,12 +776,20 @@ def uninstall(
         typer.echo("Aborted — no changes made.")
         return
 
-    backup_dir = backups.backup_files(resolved_root, [path for path, *_rest in writes])
-    if backup_dir is not None:
-        typer.echo(f"Backed up existing config to {backup_dir}")
+    # Skip the config backup when purging: it would be written *into* the store we are
+    # about to delete (so it is both moot and — on an unsupported store — a write before
+    # deletion, when D25 makes deletion the one sanctioned mutation of such a store).
+    if not purge_store:
+        backup_dir = backups.backup_files(resolved_root, [path for path, *_rest in writes])
+        if backup_dir is not None:
+            typer.echo(f"Backed up existing config to {backup_dir}")
     for _path, _before, _after, writer in writes:
         writer()
     if purge_store and resolved_root.exists():
+        # D25 (ADR-0015 step 4d): open a PURGE handle before deleting. PURGE opens even a
+        # newer-schema or unparseable store (it never refuses), so purge works on any
+        # store, and the delete goes through the chokepoint rather than around it.
+        _open_store_or_exit(resolved_root, StoreMode.PURGE)
         shutil.rmtree(resolved_root)
         typer.echo(f"Deleted store {resolved_root}")
     typer.secho("Uninstalled Neurobase-owned hooks.", fg=typer.colors.GREEN)

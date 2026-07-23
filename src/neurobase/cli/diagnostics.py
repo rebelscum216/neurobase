@@ -92,6 +92,10 @@ def _agent_check(binary: str, which: Callable[[str], str | None]) -> Check:
 
 def _store_checks(root: Path, cwd: Path) -> list[Check]:
     checks: list[Check] = []
+    # Sanctioned raw-root call #1 of doctor's two (the other is resolve_project in
+    # _project_check): the store.toml path is the report *label*, needed even when the
+    # store is corrupt and no handle can open. Allow-listed by (file, name) in the
+    # step-5 chokepoint guard and named in spec §10; see _project_check's docstring.
     meta = store.store_toml_path(root)
     # D26: doctor inspects store health through a DOCTOR handle. DOCTOR never
     # writes store.toml and — unlike READ/WRITE — carries a schema *newer* than we
@@ -138,11 +142,21 @@ def _project_check(handle: StoreHandle | None, root: Path, cwd: Path) -> Check:
     """Project resolution is a registry concern, independent of store.toml health.
     Resolve through the DOCTOR handle when we have one; if store.toml was corrupt
     (no handle), fall back to the registry directly so a broken store.toml does
-    not also mask an otherwise-healthy project check."""
+    not also mask an otherwise-healthy project check.
+
+    The no-handle branch is one of doctor's **two** sanctioned raw-root reads (the
+    other is ``store.store_toml_path`` in ``_store_checks``), allow-listed in the
+    step-5 chokepoint guard (``scripts/check_store_chokepoint.py``) by (file, name).
+    It is legitimate here because ``registry.toml`` is a separate concern from the
+    store-schema chokepoint (ADR-0015 registry carve-out, F1), so resolving a project
+    without a validated handle must still work when ``store.toml`` is corrupt. The
+    guard enforces the store/registry **accessor + metadata-literal** invariant in
+    ``src/`` (spec §10); it is not an exhaustive raw-root detector."""
     try:
         slug = (
             handle.resolve_project(cwd)
             if handle is not None
+            # Sanctioned raw-root fallback — see the docstring above and the guard's ALLOW.
             else projects.resolve_project(root, cwd)
         )
     except (OSError, tomllib.TOMLDecodeError) as exc:

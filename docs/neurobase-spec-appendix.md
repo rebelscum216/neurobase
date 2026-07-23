@@ -637,6 +637,91 @@ through — the lookup never prompts or raises into the caller.
 At `<root>/store.toml`: `schema = 1`, `created_at = <ISO8601>`. `neurobase
 migrate` owns future bumps; refuse to operate on a schema newer than the binary.
 
+### Store access — the `open_store` chokepoint (ADR-0015, D23–D26)
+Store-tree and registry access obtains a validated `StoreHandle` from
+`open_store(root, mode)` (`core/store_handle.py`) before touching the store.
+`open_store` is the **one** place the D11 schema comparison runs — "refuse to operate
+on a schema newer than the binary" is enforced at the boundary, not per command, so a
+new call site cannot forget it. The handle's constructor is private; `open_store` is the
+sole entry point. The store-tree and registry **accessors** (below) are all behind the
+handle and CI-enforced. The two lifecycle commands run the D11 guard too, command-side
+(ADR-0015 step 4d): `init --agent` opens a `READ` handle at its entry before installing
+hooks; `uninstall --purge-store` opens a `PURGE` handle immediately before deleting the
+root. Both are command-guarded (not accessor-CI-enforced), like the recommender
+path-builders. Separately, the **config-backup facility** (`<root>/backups/`) is
+schema-independent by design — see the maintenance exception below.
+
+`mode` governs how a schema the binary does not support is treated:
+
+| Mode | On a supported schema | On a newer / unsupported schema | Writes `store.toml`? |
+|---|---|---|---|
+| `READ` | opens; missing `store.toml` ⇒ uninitialized (`schema=None`), not an error | raises `UnsupportedSchemaError` | never |
+| `WRITE` / `MIGRATE` | opens | raises `UnsupportedSchemaError` | creates it on first use |
+| `DOCTOR` | opens | opens, carrying the newer `schema` to **report** (never refuses) | never |
+| `PURGE` | opens | opens even an unparseable store, so it can be **deleted** | never |
+
+- **Deleting an unsupported store's schema-versioned content is only ever done by
+  `uninstall --purge-store`** (D25): it opens a `PURGE` handle (which never refuses — it
+  opens even a newer-schema or unparseable store) immediately before `rmtree(<root>)`,
+  behind the existing explicit confirmation. When purging it **skips the config backup**,
+  so nothing is written *into* the store before its deletion. (The
+  schema-versioned content — `memory/`, `registry.toml` — is never *written* on an
+  unsupported store; deletion is the only thing done to it. The config-backup facility
+  below is a separate, schema-independent channel.)
+- **MCP never hard-fails at startup** (D24): an unsupported-schema store surfaces as a
+  **structured tool error** per tool, not an exception — `resources/list` still returns
+  a valid array (spec §13).
+- **`doctor` reports, never refuses** (D26): it opens a `DOCTOR` handle and maps
+  `schema=None` → "not initialized", `schema > max` → "unsupported", else ok — one
+  comparison, reused, never re-implemented.
+- **Registry parseability is a separate, fail-soft concern** — a corrupt
+  `registry.toml` is *not* folded into the schema guard: registry reads
+  (`load_registry`, `resolve_project`) treat it as empty, and `doctor` may resolve a
+  project directly from the registry when `store.toml` itself is corrupt and no handle
+  can open.
+
+**Enforcement.** Production store-tree and registry access (`src/neurobase/`) goes
+through `open_store(...)` + a `StoreHandle`. The CI guard
+`scripts/check_store_chokepoint.py` fails the gate when a module **outside** the three
+implementation modules (`core/store.py`, `core/store_handle.py`, `core/projects.py`)
+calls a raw-`root` store/registry **accessor** — `memory_dir`, `ensure_tree`,
+`list_raw` / `list_curated`, `write_raw`, `upsert_curated`, `write_node`,
+`rebuild_index`, `load_registry`, `register_project`, `resolve_project`, … (whether
+reached as `store.x` / `projects.x`, via a dotted module, or by a direct/relative
+import) — or references the `store.toml` / `registry.toml` metadata filenames. The
+guard keys on those accessors and literals, **not** on path shape: a handle-derived
+`handle.memory_dir(p) / "nodes"` is fine, and a bare `root / "projects" / … / "memory"`
+layout is not shape-distinguishable from the Claude app's own
+`~/.claude/projects/<x>/memory`, so it is not matched (the accessor contract is exactly
+what is mechanically enforceable without false positives).
+
+Some raw-`root` constructions **remain** outside the accessor guard's coverage, in three
+kinds — none is an unguarded write to **schema-versioned store content** (`memory/`,
+`registry.toml`):
+
+- **`doctor`'s two corrupt-`store.toml` reads** (allow-listed) —
+  `projects.resolve_project(root, cwd)` (project resolution is a `registry.toml`
+  concern, independent of the store-schema guard, and must survive when no handle can
+  open) and `store.store_toml_path(root)` (the report label, built before `open_store`).
+  Both live only in `cli/diagnostics.py` and are allow-listed in the guard by (file, name).
+- **the recommender's proposal/ledger path-builders** (command-guarded) —
+  `corpus.proposals_dir` / `proposal_path` / `ledger_path` build `<root>/proposals/…`
+  and `<root>/recommender/ledger.jsonl` from a bare root, but every caller is guarded by
+  the command entry that opens the handle first. They stay root-taking until the
+  raw-`Path` signature removal lands.
+- **the config-backup facility** (schema-independent maintenance exception) —
+  `backups.backup_files` / `restore_backup` copy agent-config files **verbatim** to/from
+  `<root>/backups/`. The copies are opaque: they never read or write `memory/` or
+  `registry.toml`, so they are safe on a store of *any* schema — which is **required**,
+  because uninstall and disaster-recovery must not be blocked by a store whose schema we
+  cannot operate on. The facility is therefore deliberately *not* behind the
+  schema-refusing handle, and its non-purge-uninstall and restore callers open no handle.
+  Where D11 *does* matter for these commands is (a) **installing hooks** — `init --agent`
+  opens a `READ` handle first, so hooks are never wired onto a store we can't operate on
+  — and (b) **purging** — `uninstall --purge-store` opens a `PURGE` handle immediately
+  before the delete and skips the backup, so an unsupported store is only ever deleted,
+  never written (ADR-0015 step 4d).
+
 ### Project registry
 `<root>/registry.toml`:
 

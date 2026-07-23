@@ -31,7 +31,16 @@ This file exists because nothing else in `docs/` was the right home for it:
 
 ### G1 — the D11 store-schema guard is enforced per-command by hand, not at the store boundary
 
-- **status:** open
+- **status:** fixed (ADR-0015 — the `StoreHandle` chokepoint; migration steps 1–5 +
+  4d, `docs/reviews/2026-07-2*-*handle*.md`, `*-lifecycle-guards.md`). Every command that
+  touches **schema-versioned store content** (`memory/`, `registry.toml`) now runs the
+  D11 guard: the store-tree/registry **accessor** class is closed and CI-enforced by
+  `scripts/check_store_chokepoint.py`, and the lifecycle commands open the appropriate
+  handle command-side (guided `init` = `WRITE`; `init --agent` = `READ`; `uninstall
+  --purge-store` = `PURGE`). The config-backup facility is a schema-independent
+  maintenance exception (opaque config copies; its non-purge-uninstall/`--restore-backup`
+  callers open no handle — see *Resolution* / *Residual gaps* below). Step 4d closed the
+  last two paths.
 - **severity:** major — spec §10 says *"refuse to **operate** on a schema newer
   than the binary."* No read-only exemption exists in the contract. At least one
   path **mutates** a newer-schema store before the guard runs, which is the exact
@@ -125,3 +134,55 @@ Constraints any fix must respect:
 
 **This needs an ADR** — either route changes the contract (exemptions) or the
 architecture (a store chokepoint). It cannot be settled by quietly editing code.
+
+**Resolution (ADR-0015).** Fix-direction 1, in the strongest form: a single
+validated `StoreHandle` every path must obtain via `open_store(root, mode)`, which is
+the one place the D11 comparison lives. Landed as five reviewed migration PRs — (1)
+`store_handle.py` + `open_store`; (2) handle methods; (3) every production module
+converted onto the handle; (4a/4b) the deferred `search`/`linkify` and
+`distill`/`locks` edges; (5) this CI guard; (4d) the two lifecycle guards. All three
+constraints above are honored: MCP surfaces a **structured tool error** (D24), `doctor`
+opens a read-only `DOCTOR` handle instead of re-implementing the comparison (D26), and
+`uninstall --purge-store` opens a `PURGE` handle before deleting (D25 — wired in 4d,
+which also made `init --agent` open a `READ` handle before installing hooks). The
+pre-guard registry-read
+pattern can no longer compile — `resolve_project`/`load_registry` production callers
+go through the handle. The step-5 guard forbids the raw-`root` store/registry
+**accessors** and the `store.toml`/`registry.toml` literals outside the three
+implementation modules. Three documented raw-`root` residuals remain outside that
+accessor coverage (none an unguarded write to schema-versioned content — spec §10):
+`doctor`'s two corrupt-`store.toml` reads (`resolve_project` + `store_toml_path` in
+`cli/diagnostics.py`, `registry.toml`/label reads independent of the store-schema guard,
+allow-listed by (file, name)); the recommender's `proposals`/`ledger` path-builders
+(`corpus.proposals_dir`/`proposal_path`/`ledger_path`), command-guarded; and the
+config-backup facility (`backups.backup_files`/`restore_backup`), a schema-independent
+maintenance exception (opaque config-file copies to/from `<root>/backups/`, safe on any
+schema). The literal removal of the raw-`Path` `store.py`/`projects.py` signatures
+(they remain the low-level implementation the handle methods delegate to, and the test
+suite's store-setup helpers) is deferred; the CI guard is what makes production
+accessor-level omission impossible in the meantime.
+
+**Residual gaps — CLOSED by ADR-0015 step 4d** (`docs/reviews/2026-07-23-lifecycle-guards.md`).
+The step-5 review (Codex, round 2) found two lifecycle paths the accessor conversion
+never reached — the same mutate-before-guard *class* as the original G1, narrower in
+blast radius. Both are now closed:
+
+1. **`init --agent claude|codex`** — the direct per-agent installers now open a `READ`
+   handle at their entry, before any backup/config write, so a store whose schema is
+   newer than we support is refused before hooks are installed (`READ`, not `WRITE`:
+   installing hooks must not *materialize* a store, but must still refuse an unsupported
+   one). Pre-4d only the *guided* flow guarded.
+2. **`uninstall --purge-store`** — now opens a `PURGE` handle (which never refuses, so
+   purge works on any schema) before `shutil.rmtree`, and **skips the config backup when
+   purging** so nothing is written into the store before its deletion — restoring D25's
+   "deletion is the one sanctioned mutation of an unsupported store".
+
+Each is pinned by a `schema = 999` integration regression (stash-verified to fail
+pre-4d). The config-backup facility itself (`backups.backup_files`/`restore_backup`)
+stays root-taking by design — it copies agent-config files *verbatim* (never touching
+`memory/`/`registry.toml`), so it is safe on a store of any schema, which
+uninstall/recovery **require**. Where D11 matters for these commands is installing hooks
+(`init --agent` = `READ`) and deleting (`uninstall --purge-store` = `PURGE`, which also
+skips the backup); the **non-purge uninstall and `--restore-backup` paths open no
+handle** — the backup/restore itself is a schema-independent maintenance exception
+(spec §10).

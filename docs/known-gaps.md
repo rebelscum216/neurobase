@@ -31,13 +31,13 @@ This file exists because nothing else in `docs/` was the right home for it:
 
 ### G1 — the D11 store-schema guard is enforced per-command by hand, not at the store boundary
 
-- **status:** open — the store-tree/registry **accessor** class is closed and
-  CI-enforced (ADR-0015 — the `StoreHandle` chokepoint; migration steps 1–5,
-  `docs/reviews/2026-07-2*-*handle*.md`; guard `scripts/check_store_chokepoint.py`), and
-  the guided `init` flow guards before mutating. It stays `open` because **two lifecycle
-  paths remain**, tracked for **ADR-0015 step 4d** (see *Residual gaps* below):
-  `init --agent`'s backup write and `uninstall --purge-store`'s direct delete both touch
-  the store without the guard. Flips to `fixed` when 4d closes both.
+- **status:** fixed (ADR-0015 — the `StoreHandle` chokepoint; migration steps 1–5 +
+  4d, `docs/reviews/2026-07-2*-*handle*.md`, `*-lifecycle-guards.md`). Every
+  store-touching command now runs the D11 guard: the store-tree/registry **accessor**
+  class is closed and CI-enforced by `scripts/check_store_chokepoint.py`, and the
+  remaining lifecycle commands open the appropriate handle at their entry (guided `init`
+  = `WRITE`; `init --agent` = `READ`; `uninstall --purge-store` = `PURGE`). Step 4d
+  closed the last two paths (see *Resolution* / *Residual gaps* below).
 - **severity:** major — spec §10 says *"refuse to **operate** on a schema newer
   than the binary."* No read-only exemption exists in the contract. At least one
   path **mutates** a newer-schema store before the guard runs, which is the exact
@@ -156,20 +156,23 @@ their handle. The literal removal of the raw-`Path` `store.py`/`projects.py` sig
 suite's store-setup helpers) is deferred; the CI guard is what makes production
 accessor-level omission impossible in the meantime.
 
-**Residual gaps (tracked for ADR-0015 step 4d).** The step-5 review (Codex, round 2)
-found two lifecycle paths the accessor conversion never reached — the same
-mutate-before-guard *class* as the original G1, narrower in blast radius:
+**Residual gaps — CLOSED by ADR-0015 step 4d** (`docs/reviews/2026-07-23-lifecycle-guards.md`).
+The step-5 review (Codex, round 2) found two lifecycle paths the accessor conversion
+never reached — the same mutate-before-guard *class* as the original G1, narrower in
+blast radius. Both are now closed:
 
-1. **`init --agent claude|codex`** reaches `backups.backup_files(root, …)` (writing
-   `<root>/backups/…`) and the agent-config writes without opening a handle, so an
-   unsupported-schema store is not refused on this path. (The *guided* `init` flow
-   already guards via a WRITE handle before `register_project`.) 4d opens a handle in
-   the direct per-agent path before any write.
-2. **`uninstall --purge-store`** deletes `<root>` with a direct `shutil.rmtree` rather
-   than the `PURGE` handle D25 specifies, and can `backup_files` into the store *before*
-   deleting it (so deletion is not the only mutation of an unsupported store). 4d wires
-   the purge path onto a `PURGE` handle and resolves the pre-delete backup ordering.
+1. **`init --agent claude|codex`** — the direct per-agent installers now open a `READ`
+   handle at their entry, before any backup/config write, so a store whose schema is
+   newer than we support is refused before hooks are installed (`READ`, not `WRITE`:
+   installing hooks must not *materialize* a store, but must still refuse an unsupported
+   one). Pre-4d only the *guided* flow guarded.
+2. **`uninstall --purge-store`** — now opens a `PURGE` handle (which never refuses, so
+   purge works on any schema) before `shutil.rmtree`, and **skips the config backup when
+   purging** so nothing is written into the store before its deletion — restoring D25's
+   "deletion is the one sanctioned mutation of an unsupported store".
 
-Both are covered by the guard only once 4d moves them behind a handle (or a specified
-exception); until then §10 and this entry name them explicitly rather than claiming the
-class is fully closed.
+Each is pinned by a `schema = 999` integration regression (stash-verified to fail
+pre-4d). The config-backup facility itself (`backups.backup_files`/`restore_backup`)
+stays root-taking by design — uninstall/recovery must work on a store of any schema, so
+it cannot sit behind the schema-refusing handle; the *commands* that use it are guarded
+at their entry (spec §10).

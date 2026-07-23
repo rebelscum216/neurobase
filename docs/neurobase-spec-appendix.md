@@ -644,8 +644,9 @@ Store-tree and registry access obtains a validated `StoreHandle` from
 on a schema newer than the binary" is enforced at the boundary, not per command, so a
 new call site cannot forget it. The handle's constructor is private; `open_store` is the
 sole entry point. The store-tree and registry **accessors** (below) are all behind the
-handle and CI-enforced; two lifecycle paths are **not yet converted** and are called out
-as known gaps below (`init --agent` backup, `uninstall --purge-store`).
+handle and CI-enforced; the two lifecycle paths (`init --agent`, `uninstall
+--purge-store`) open the appropriate handle at the command entry (ADR-0015 step 4d) —
+command-guarded like the recommender path-builders, not accessor-CI-enforced.
 
 `mode` governs how a schema the binary does not support is treated:
 
@@ -657,11 +658,11 @@ as known gaps below (`init --agent` backup, `uninstall --purge-store`).
 | `PURGE` | opens | opens even an unparseable store, so it can be **deleted** | never |
 
 - **`uninstall --purge-store` is the one sanctioned mutation of an unsupported store**
-  (D25): deleting `<root>` even when the schema is newer or `store.toml` is unparseable,
-  behind the existing explicit confirmation. The `PURGE` mode exists for exactly this;
-  **wiring the CLI purge path onto a `PURGE` handle** (it deletes directly today, and can
-  back up config *into* the store before deleting) **is a tracked gap** — see
-  known-gaps, deferred to ADR-0015 step 4d.
+  (D25): it opens a `PURGE` handle (which never refuses — it opens even a newer-schema or
+  unparseable store) and then deletes `<root>`, behind the existing explicit
+  confirmation. When purging it **skips the config backup**, which would otherwise be
+  written *into* the store being deleted — so deletion stays the only mutation of an
+  unsupported store (ADR-0015 step 4d).
 - **MCP never hard-fails at startup** (D24): an unsupported-schema store surfaces as a
   **structured tool error** per tool, not an exception — `resources/list` still returns
   a valid array (spec §13).
@@ -689,29 +690,27 @@ layout is not shape-distinguishable from the Claude app's own
 `~/.claude/projects/<x>/memory`, so it is not matched (the accessor contract is exactly
 what is mechanically enforceable without false positives).
 
-Several raw-`root` constructions **remain** outside the accessor contract. The first
-two are the guard's documented exceptions (sanctioned); the last two are **known gaps**
-where a lifecycle path still touches the store without the guard, tracked for
-ADR-0015 step 4d (see known-gaps):
+Some raw-`root` constructions **remain** outside the accessor guard's coverage; all are
+**command-guarded** (the command opens a handle at its entry) rather than
+accessor-CI-enforced, consistent with how the guard is scoped:
 
-- **`doctor`'s two corrupt-`store.toml` reads** (sanctioned) —
+- **`doctor`'s two corrupt-`store.toml` reads** (sanctioned, allow-listed) —
   `projects.resolve_project(root, cwd)` (project resolution is a `registry.toml`
   concern, independent of the store-schema guard, and must survive when no handle can
   open) and `store.store_toml_path(root)` (the report label, built before `open_store`).
   Both live only in `cli/diagnostics.py` and are allow-listed in the guard by (file, name).
-- **the recommender's proposal/ledger path-builders** (sanctioned) —
+- **the recommender's proposal/ledger path-builders** —
   `corpus.proposals_dir` / `proposal_path` / `ledger_path` build `<root>/proposals/…`
   and `<root>/recommender/ledger.jsonl` from a bare root, but every caller is guarded by
   the command entry that opens the handle first. They stay root-taking until the
   raw-`Path` signature removal lands.
-- **`init --agent claude|codex` backup** (gap, 4d) — the direct per-agent installers
-  reach `backups.backup_files(root, …)` (writing `<root>/backups/…`) without first
-  opening a handle, so an unsupported-schema store is not refused on this path (the
-  *guided* `init` flow does open a WRITE handle first). A mutate-before-guard of the G1
-  class, narrower than the original but not yet closed.
-- **`uninstall --purge-store`** (gap, 4d) — deletes `<root>` via a direct `rmtree`
-  without opening the `PURGE` handle D25 specifies, and may `backup_files` into the
-  store before deleting it.
+- **the config-backup facility** (`backups.backup_files` / `restore_backup`, writing
+  `<root>/backups/…`) — deliberately **not** behind the schema-refusing handle, because
+  uninstall and disaster-recovery must work on a store of *any* schema (refusing a backup
+  on a newer schema would block hook removal). The `init --agent` and
+  `uninstall --purge-store` commands that use it open the appropriate handle at their
+  entry (`READ` and `PURGE` respectively — ADR-0015 step 4d), so the store-schema guard
+  runs even though the backup call itself stays root-taking.
 
 ### Project registry
 `<root>/registry.toml`:

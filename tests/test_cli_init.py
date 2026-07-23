@@ -203,6 +203,49 @@ def test_guided_init_refuses_newer_schema_without_registering(
     assert not (store_root / "projects" / "repo").exists()
 
 
+def test_init_agent_claude_refuses_newer_schema_before_any_write(env: Path, tmp_path: Path) -> None:
+    """G1 closure (ADR-0015 step 4d): the direct `init --agent claude` path must refuse
+    a store whose schema is newer than we support — BEFORE it backs up or installs the
+    hooks that would then capture into a store we cannot operate on (spec §10, D11).
+    Pre-4d only the *guided* flow guarded; the `--agent` path backed up + installed."""
+    repo = tmp_path / "repo"
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    original = '{"model": "claude-opus-4-8"}\n'
+    settings.write_text(original, encoding="utf-8")
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    (store_root / "store.toml").write_text(
+        'schema = 999\ncreated_at = "2020-01-01T00:00:00Z"\n', encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["init", "--agent", "claude", "--cwd", str(repo), "--yes"])
+
+    assert result.exit_code == 1
+    assert "schema" in result.output
+    # Refused before touching anything: settings unchanged, no backup written into the store.
+    assert settings.read_text(encoding="utf-8") == original
+    assert not (store_root / "backups").exists()
+
+
+def test_init_agent_codex_refuses_newer_schema(env: Path, tmp_path: Path) -> None:
+    """The same 4d guard on the Codex installer (refuses at the top, before config
+    parsing or the backup)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    (store_root / "store.toml").write_text(
+        'schema = 999\ncreated_at = "2020-01-01T00:00:00Z"\n', encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["init", "--agent", "codex", "--cwd", str(repo), "--yes"])
+
+    assert result.exit_code == 1
+    assert "schema" in result.output
+    assert not (store_root / "backups").exists()
+
+
 # --- init --agent codex (spec §7) -----------------------------------------
 
 

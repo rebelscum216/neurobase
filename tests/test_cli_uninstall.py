@@ -113,6 +113,33 @@ def test_uninstall_purge_store_requires_explicit_flag(env: Path, tmp_path: Path)
     assert "Deleted store" in result.output
 
 
+def test_uninstall_purge_deletes_newer_schema_store_without_pre_delete_backup(
+    env: Path, tmp_path: Path
+) -> None:
+    """D25 (ADR-0015 step 4d): `--purge-store` must delete even a store whose schema is
+    newer than we support (PURGE opens anything, never refuses), and must NOT write a
+    config backup *into* that store before deleting it — deletion is the one sanctioned
+    mutation of an unsupported store. Pre-4d the purge path backed up first, into the
+    doomed (and unsupported) store."""
+    repo = tmp_path / "repo"
+    settings = repo / ".claude" / "settings.json"
+    claude_install.write_settings(settings, claude_install.build_settings({}, SHIM, ["startup"]))
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    (store_root / "store.toml").write_text(
+        'schema = 999\ncreated_at = "2020-01-01T00:00:00Z"\n', encoding="utf-8"
+    )
+
+    result = runner.invoke(
+        app, ["uninstall", "--agent", "claude", "--cwd", str(repo), "--purge-store", "--yes"]
+    )
+
+    assert result.exit_code == 0
+    assert "Deleted store" in result.output
+    assert "Backed up" not in result.output  # the pre-delete backup was skipped
+    assert not store_root.exists()  # gone despite the unsupported schema
+
+
 def test_uninstall_no_hooks_found(env: Path) -> None:
     result = runner.invoke(app, ["uninstall", "--agent", "all", "--yes"])
     assert result.exit_code == 0

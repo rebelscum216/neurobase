@@ -232,6 +232,230 @@ def test_scribe_denylisted_repo_is_not_captured(
     assert not (root / "store.toml").exists()
 
 
+# --- F3: recall (session-start) is the ADR's *primary* trigger --------------
+
+
+def test_recall_auto_enables_at_session_start(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D42: recall creates the tree on the first session in a qualifying repo and
+    injects nothing that run (no nodes yet); by the next session it injects."""
+    from neurobase.adapters import recall_common
+
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    cfg = tmp_path / "config.toml"
+    _write_config(cfg, roots=[str(workspace)], denylist=[])
+    monkeypatch.setattr(config_mod, "config_path", lambda: cfg)
+
+    # First session-start: registers + creates the tree, but injects nothing.
+    assert recall_common.emit(root, repo) is None
+    assert store.memory_dir("app", root).exists()
+    assert "app" in projects.load_registry(root)
+
+    # Once a node exists, the next session injects it.
+    store.write_node(root, "app", "status", "# Status\n\nauth.py had a null-check bug.")
+    out = recall_common.emit(root, repo)
+    assert out is not None
+    assert "additionalContext" in out
+
+
+def test_recall_read_only_path_never_auto_enables(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: build_context's default (read-only — the surface the MCP `recall`
+    prompt uses) must never register a project or create a tree; only emit
+    (auto_enable=True) does."""
+    from neurobase.adapters import recall_common
+
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    cfg = tmp_path / "config.toml"
+    _write_config(cfg, roots=[str(workspace)], denylist=[])
+    monkeypatch.setattr(config_mod, "config_path", lambda: cfg)
+
+    assert recall_common.build_context(root, repo) is None  # default auto_enable=False
+    assert not (root / "registry.toml").exists()
+    assert not (root / "store.toml").exists()
+
+
+# --- F3: Codex scribe backstop (separate copy — needs its own test) ---------
+
+
+def _codex_rollout(path: Path, cwd: str) -> Path:
+    events = [
+        {
+            "type": "session_meta",
+            "payload": {
+                "session_id": "019auto",
+                "id": "019auto",
+                "timestamp": "2026-07-05T23:21:06Z",
+                "cwd": cwd,
+                "git": {"branch": "main"},
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Fix the login bug", "images": []},
+        },
+        {"type": "event_msg", "payload": {"type": "agent_message", "message": "Done — null check"}},
+    ]
+    path.write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+    return path
+
+
+def test_codex_scribe_auto_enables_repo_under_configured_root(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neurobase.adapters.codex import scribe as codex_scribe
+
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    cfg = tmp_path / "config.toml"
+    _write_config(cfg, roots=[str(workspace)], denylist=[])
+    monkeypatch.setattr(config_mod, "config_path", lambda: cfg)
+
+    rollout = _codex_rollout(tmp_path / "rollout.jsonl", str(repo))
+    written = codex_scribe.scribe(root, rollout_path=rollout, cwd=str(repo))
+    assert written is not None
+    assert store.memory_dir("app", root).exists()
+    assert "app" in projects.load_registry(root)
+
+
+# --- F4: denylist is a *live* gate (revokes an already-enabled repo) ---------
+
+
+def test_resolve_denylisted_registered_repo_stops(workspace: Path, tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    projects.register_project(root, repo, slug="app")
+    store.ensure_tree("app", root)
+    # Registered — but adding it to the denylist revokes capture (live gate).
+    assert (
+        resolve_or_auto_enable(
+            root, repo, auto_enable_roots=[str(workspace)], denylist=[str(workspace / "app")]
+        )
+        is None
+    )
+    # Without the denylist entry it resolves normally.
+    assert (
+        resolve_or_auto_enable(root, repo, auto_enable_roots=[str(workspace)], denylist=[]) == "app"
+    )
+
+
+def test_scribe_denylisting_an_enabled_repo_stops_capture(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4: a repo that was already enabled stops capturing once denylisted —
+    editing one config line revokes capture, as ADR-0019 promises."""
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    projects.register_project(root, repo, slug="app")
+    store.ensure_tree("app", root)
+    cfg = tmp_path / "config.toml"
+    _write_config(cfg, roots=[str(workspace)], denylist=[str(repo)])
+    monkeypatch.setattr(config_mod, "config_path", lambda: cfg)
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("\n".join(json.dumps(e) for e in _FIXTURE_EVENTS), encoding="utf-8")
+    assert scribe.scribe(root, transcript_path=transcript, cwd=str(repo), reason="x") is None
+
+
+# --- F5: relative config paths are skipped (non-deterministic scope) ---------
+
+
+def test_policy_relative_paths_are_skipped(workspace: Path) -> None:
+    repo = _make_repo(workspace / "app")
+    # A relative root would resolve against the hook's cwd — skip it, don't enable.
+    assert projects.auto_enable_root_for(repo, ["some/relative/dir"], []) is None
+    # A junk relative denylist entry must not block a valid absolute root.
+    assert (
+        projects.auto_enable_root_for(repo, [str(workspace)], ["relative/deny"]) == repo.resolve()
+    )
+
+
+def test_is_denylisted_skips_relative_entries(workspace: Path) -> None:
+    repo = _make_repo(workspace / "app")
+    assert projects.is_denylisted(repo, ["app"]) is False  # relative → skipped
+    assert projects.is_denylisted(repo, [str(workspace / "app")]) is True
+
+
+# --- F2: partial-failure safety (no poisoning, no store.toml on a skip) ------
+
+
+def test_resolve_tree_failure_leaves_no_registration(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tree-before-register: if ensure_tree fails, nothing is registered — so a
+    one-time FS error can't leave a registered-but-treeless repo that matches
+    resolve_project forever and never gets retried (review F2)."""
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+
+    def boom(project: str, r: Path) -> Path:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "ensure_tree", boom)
+    assert (
+        resolve_or_auto_enable(root, repo, auto_enable_roots=[str(workspace)], denylist=[]) is None
+    )
+    assert "app" not in projects.load_registry(root)  # not registered → retryable
+
+
+def test_resolve_unsluggable_repo_writes_nothing(tmp_path: Path) -> None:
+    """A qualifying repo whose name can't be slugified skips out *before* the WRITE
+    handle opens — a pristine store stays pristine (review B3)."""
+    root = tmp_path / "store"
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    bad = _make_repo(ws / "!!!")
+    assert resolve_or_auto_enable(root, bad, auto_enable_roots=[str(ws)], denylist=[]) is None
+    assert not (root / "store.toml").exists()
+    assert not (root / "registry.toml").exists()
+
+
+# --- F3: worktree collapse, sibling prefix, scribe-surface fail-closed -------
+
+
+def test_worktree_collapses_to_main_project(workspace: Path, tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    assert (
+        resolve_or_auto_enable(root, repo, auto_enable_roots=[str(workspace)], denylist=[]) == "app"
+    )
+    wt = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(wt), "-b", "feature", cwd=repo)
+    # The linked worktree resolves to the SAME project; no second registration.
+    assert (
+        resolve_or_auto_enable(root, wt, auto_enable_roots=[str(workspace)], denylist=[]) == "app"
+    )
+    assert list(projects.load_registry(root).keys()) == ["app"]
+
+
+def test_policy_sibling_prefix_does_not_match(tmp_path: Path) -> None:
+    projects_dir = tmp_path / "Projects"
+    projects_dir.mkdir()
+    repo = _make_repo(tmp_path / "Projects2" / "app")  # sibling, NOT under Projects
+    assert projects.auto_enable_root_for(repo, [str(projects_dir)], []) is None
+
+
+def test_scribe_fails_closed_on_too_new_store(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "store.toml").write_text(f"schema = {store.STORE_SCHEMA_VERSION + 1}\n")
+    repo = _make_repo(workspace / "app")
+    cfg = tmp_path / "config.toml"
+    _write_config(cfg, roots=[str(workspace)], denylist=[])
+    monkeypatch.setattr(config_mod, "config_path", lambda: cfg)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("\n".join(json.dumps(e) for e in _FIXTURE_EVENTS), encoding="utf-8")
+    # A too-new store fails closed at the scribe surface — no capture, no registry.
+    assert scribe.scribe(root, transcript_path=transcript, cwd=str(repo), reason="x") is None
+    assert not (root / "registry.toml").exists()
+
+
 def test_scribe_without_config_stays_opt_in(
     workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

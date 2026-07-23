@@ -110,15 +110,17 @@ class RecommendConfig:
 
 @dataclass
 class EnableConfig:
-    # Folder-scoped auto-enable (prototype; pending ADR). `neurobase enable` is
-    # per-repo and opt-in by design (a hook captures only when the resolved
-    # project's memory tree exists). This relocates that consent from per-repo to
-    # per-folder: name an `auto_enable_roots` directory once, and any git repo
-    # beneath it is registered as its own project — and given its memory tree —
-    # the first time a hook fires there. Empty roots = today's behavior (per-repo
-    # opt-in only). `denylist` always wins over roots, so a sensitive subtree can
-    # be carved out of an otherwise auto-enabled folder. Both are hand-edited
-    # paths (`~` and relative segments allowed); Neurobase never writes this file.
+    # Folder-scoped auto-enable (ADR-0019). `neurobase enable` is per-repo and
+    # opt-in by design (a hook captures only when the resolved project's memory
+    # tree exists). This relocates that consent from per-repo to per-folder: name
+    # an `auto_enable_roots` directory once, and any git repo beneath it is
+    # registered as its own project — and given its memory tree — the first time a
+    # hook fires there. Empty roots = today's behavior (per-repo opt-in only).
+    # `denylist` always wins over roots AND is a *live* gate: a denylisted repo
+    # stops capturing/injecting even if already enabled, so editing one line
+    # revokes capture (ADR-0019 F4). Entries must be absolute or `~`-prefixed —
+    # a relative path would resolve against the hook's launch cwd and is skipped.
+    # Both lists are hand-edited; Neurobase never writes this file.
     auto_enable_roots: list[str] = field(default_factory=list)
     denylist: list[str] = field(default_factory=list)
 

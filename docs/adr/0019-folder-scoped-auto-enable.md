@@ -68,11 +68,16 @@ auto_enable_roots = ["~/Projects"]        # folders whose repos auto-enable
 denylist = ["~/Projects/client-work"]     # subtrees carved back out (wins over roots)
 ```
 
-Both are hand-edited lists of paths (`~` and relative segments allowed); Neurobase
-never writes them (invariant preserved). **Naming a directory in
-`auto_enable_roots` *is* the consent act** — deliberate, explicit, and revocable
-by editing one line. An empty (or absent) `auto_enable_roots` is the default and
-means *"per-repo `enable` only"* — byte-for-byte today's behavior.
+Both are hand-edited lists of **absolute or `~`-prefixed** paths (a relative entry
+would resolve against the hook's launch cwd — non-deterministic scope — so it is
+skipped; review F5); Neurobase never writes them (invariant preserved). **Naming a
+directory in `auto_enable_roots` *is* the consent act** — deliberate and explicit.
+`denylist` is a **live gate** (review F4): it wins over `auto_enable_roots` *and*
+revokes an already-enabled repo — adding a repo to `denylist` stops its capture on
+the next hook even though it is still in the registry. So consent is genuinely
+revocable by editing one line, in both directions. An empty (or absent)
+`auto_enable_roots` is the default and means *"per-repo `enable` only"* —
+byte-for-byte today's behavior.
 
 **D40 — Auto-enable is git-repo-scoped: one project per repo, denylist wins.** The
 policy is a pure function,
@@ -93,29 +98,40 @@ policy is a pure function,
 — the single place all three hook surfaces (both scribes §4/§5, recall §3) route
 project resolution through. It:
 
-1. resolves the **registered** project first (READ handle — the D11 guard runs, no
+1. checks the **live `denylist`** first (F4) — a denylisted cwd returns `None`
+   before anything else, so it neither auto-enables nor keeps capturing;
+2. resolves the **registered** project (READ handle — the D11 guard runs, no
    write); returns it if found;
-2. otherwise consults `auto_enable_root_for`; a non-qualifying cwd returns `None`
+3. otherwise consults `auto_enable_root_for`; a non-qualifying cwd returns `None`
    (the caller no-ops exactly as before — and, being READ-only, still creates no
    `store.toml`);
-3. for a qualifying cwd, opens a **WRITE handle** so the schema guard runs *before*
-   `register_project` + `ensure_tree` mutate the registry/tree (closes the same
-   mutate-before-guard class ADR-0015 D23 closes for `init`), then returns the new
-   slug.
+4. for a qualifying cwd, opens a **WRITE handle** so the schema guard runs *before*
+   the registry/tree mutate (closes the same mutate-before-guard class ADR-0015 D23
+   closes for `init`), then returns the new slug.
 
-It is **fail-closed like the hooks that call it**: a store newer than this binary
-supports, a slug collision with a different already-registered repo, or an
-un-sluggable repo name all yield `None` — never a raise into a hook. This
-registration is the **only** registry write on a hook path, reached at most once
-per repo (the first session under an `auto_enable_root`).
+**Fail-safe ordering (review F2).** The qualifying branch derives and validates the
+slug *before* opening the WRITE handle (an un-sluggable name skips out leaving a
+pristine store — no `store.toml`), then creates the **tree before** writing the
+registry entry, all inside one guarded block whose `except` covers
+`UnsupportedSchemaError`, slug collision, `InvalidSlugError`, **and `OSError`** →
+`None`. Writing the registry only *after* the tree exists means a tree failure can
+never leave a **registered-but-treeless** project — which would otherwise match
+`resolve_project` forever and never be retried, silently killing that repo's
+capture. So it is genuinely fail-closed, not merely wrapped by the hook's outer
+`except`. This registration is the **only** registry write on a hook path, reached
+at most once per repo.
 
-**D42 — The trigger is session-start (recall), with the scribes as backstop.**
-Recall runs first in a session, so it is where the tree gets created: on the first
-session in a qualifying repo, recall auto-enables, finds no nodes yet (curate
-hasn't run), and injects nothing — correct. Session-end capture then lands, curate
-folds it, and by the next session recall injects normally. Both scribes carry the
-same seam as a backstop for sessions with no start hook (hooks installed
-mid-session, or a session-end without a session-start).
+**D42 — The trigger is session-start (recall), with the scribes as backstop; the
+seam is opt-in per call site.** Recall runs first in a session, so it is where the
+tree gets created: on the first session in a qualifying repo, recall auto-enables,
+finds no nodes yet (curate hasn't run), and injects nothing — correct. Session-end
+capture then lands, curate folds it, and by the next session recall injects
+normally. Both scribes carry the same seam as a backstop for sessions with no start
+hook. Crucially, auto-enable is **opt-in per call site** (review F1):
+`build_context(..., auto_enable=False)` by default, and only the SessionStart hook
+(`emit`) and the scribes pass `auto_enable=True`. The MCP `recall` prompt shares
+`build_context` but keeps the read-only default, so a prompt *read* never mutates
+the store or raises a registry/FS error out of that fail-soft surface (spec §13).
 
 **Explicitly out of scope (deferred, not decided here):**
 
@@ -142,17 +158,28 @@ mid-session, or a session-end without a session-start).
   folder-level consent, but it is a genuine shift from "nothing is captured until I
   say so" to "everything under here is captured unless I say not to." Accepting
   this ADR is accepting that shift for repos under a named root.
-- **A hook path now performs a registry write** (once per repo). It goes through a
-  WRITE `StoreHandle`, so the schema guard is not bypassed. Concurrency matches
-  today's `enable`: `register_project` is an unlocked read-modify-write with
-  tmp+replace; a worst-case lost update re-registers the same repo idempotently —
-  benign. No new locking is introduced.
-- **Latency.** When `auto_enable_roots` is empty the policy returns immediately
-  (no git call added). When non-empty, an *unregistered* repo pays one
-  `git rev-parse` — but resolution already shells to git, so the marginal cost is
-  the denylist/root prefix checks; the first session additionally pays a registry
-  write + `mkdir`. All within the ADR-0003 budget (it is the same work `enable`
-  does, done once).
+- **A hook path now performs a registry write** (once per repo, through a WRITE
+  `StoreHandle`, so the schema guard is not bypassed). This is a **new
+  concurrent-writer exposure** the serial manual `enable` never had (review F7):
+  `register_project` is an unlocked read-modify-write with tmp+replace, so two
+  *different* repos' first sessions racing (e.g. two IDE windows) can have the
+  second `tmp+replace` clobber the first's just-added entry. The file never tears
+  (atomic replace), and the dropped repo self-heals on its next session — but one
+  repo can be unregistered for one session. If lost first-registrations ever matter,
+  guard the RMW with a lock/retry. No locking is introduced now.
+- **Registered wins over auto-enable (review F6).** Because the seam resolves the
+  registered project first, if an *ancestor* of a new repo is already registered
+  (e.g. `~/Projects` itself, or a monorepo root), a brand-new child repo under an
+  `auto_enable_root` folds into the ancestor's project via longest-prefix match
+  rather than getting its own — a deliberate "registered wins" precedence, noted
+  here so it is not a surprise.
+- **Latency.** When `auto_enable_roots` is empty the policy returns immediately (no
+  git call added). When non-empty, an *unregistered* repo pays a second
+  `git rev-parse` (`resolve_project` then `auto_enable_root_for` each resolve the
+  git root — review F8b; could be threaded through once if it ever matters), plus a
+  registry write + `mkdir` on the first session only. A non-empty `denylist` adds
+  one more git resolve on the live-gate check. All well within the ADR-0003 budget —
+  it is the same work `enable` does, done once per repo.
 - **Redaction and capture fidelity unchanged.** Auto-enabled repos capture through
   the identical scribe path (§4/§5 redaction, bounds, empty-skip).
 - **Spec appendix updates (this ADR is the proposal; the spec is the law — fold in
@@ -160,10 +187,13 @@ mid-session, or a session-end without a session-start).
   rule; §4/§5's opt-in line becomes *"write only if the resolved project's tree
   exists **or the repo qualifies for folder-scoped auto-enable (§10), which creates
   the tree**"*; §3/§7's consent narrative gains the folder-consent model.
-- **Prototype exists.** Implemented on `feat/folder-scoped-auto-enable` (full CI
-  gate green; 15 tests in
-  [`tests/test_auto_enable.py`](../../tests/test_auto_enable.py)) pending this
-  ADR's acceptance.
+- **Implemented + self-reviewed.** On `feat/folder-scoped-auto-enable` (full CI gate
+  green; 27 tests in
+  [`tests/test_auto_enable.py`](../../tests/test_auto_enable.py)). A self-review
+  (Codex was unavailable) surfaced F1–F8, recorded in
+  [`docs/reviews/2026-07-23-folder-scoped-auto-enable.md`](../reviews/2026-07-23-folder-scoped-auto-enable.md);
+  F1/F2/F4/F5/F7/F8 are resolved here, F6 documented above. **An independent Codex
+  review is still owed** before merge — the self-review is weaker by construction.
 
 ## Alternatives considered
 

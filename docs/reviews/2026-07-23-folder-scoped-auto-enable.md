@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: changes-requested   # self-review (Codex unavailable); independent pass still owed
+status: awaiting-review   # round 2: self-review findings resolved; independent Codex pass still owed
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -131,3 +131,22 @@ commits: `a84c97a` prototype, `c4ef441` ADR). Key files:
 - **resolution:** _(Author fills)_
 
 **Verdict:** changes-requested — no blockers, but F1/F2 (safety) and F3 (coverage of the designated trigger) should land before merge, and F4 is a genuine consent-semantics decision the ADR currently gets wrong. Code is otherwise logically sound: policy path-matching, redaction, slug derivation, and empty-config behavioral equivalence all verified clean. **This verdict is a self-review standing in for the independent Codex pass, which is still owed.**
+
+---
+
+## Round 2 — Author resolution  _(commit follows this baton)_
+
+All findings addressed; full CI gate green (ruff + format + mypy + **1175 passed**, coverage 91.79%); test count 15 → **27**. Router chose **F4 option (a)** — the live denylist gate.
+
+| # | Disposition | What changed |
+|---|---|---|
+| F1 | **resolved** | `build_context(..., auto_enable=False)` default; only `emit` + scribes pass `True`. MCP `recall` prompt keeps the read-only default, so a prompt read never writes or raises (§13). Test: `test_recall_read_only_path_never_auto_enables`. |
+| F2 | **resolved** | Derive+validate slug *before* opening the WRITE handle (no `store.toml` on an un-sluggable skip); create the **tree before** the registry entry; `except` broadened to `OSError`. No registered-but-treeless poisoning. Tests: `test_resolve_tree_failure_leaves_no_registration`, `test_resolve_unsluggable_repo_writes_nothing`. |
+| F3 | **resolved** | Added end-to-end tests for recall/session-start (`test_recall_auto_enables_at_session_start`), the Codex scribe, worktree collapse, sibling-prefix, and scribe-surface too-new-store fail-closed. |
+| F4 | **resolved (a)** | `projects.is_denylisted()` is a **live gate** checked first in the seam — denylisting an already-enabled repo stops capture. Tests: `test_resolve_denylisted_registered_repo_stops`, `test_scribe_denylisting_an_enabled_repo_stops_capture`. ADR D39/D41 updated. |
+| F5 | **resolved** | `_resolved_config_dirs()` skips relative/unusable entries (and swallows `~`-no-home / non-string); config comment + ADR say absolute-or-`~` only. Tests: `test_policy_relative_paths_are_skipped`, `test_is_denylisted_skips_relative_entries`. |
+| F6 | **deferred (documented)** | "Registered wins over auto-enable" precedence is now stated in ADR-0019 Consequences; no code change. |
+| F7 | **resolved (doc)** | ADR concurrency note corrected to the real multi-repo race (second first-session can clobber the first; self-heals). |
+| F8 | **resolved** | (a) redundant `path == ancestor` dropped; (b) double `git rev-parse` acknowledged in ADR (deferred as negligible); (c) stale "READ never writes" comment fixed. |
+
+**Independent review still owed:** Codex was out of credits at review time. This round is the author's own resolution of an author-run self-review — the independent Codex pass has **not** happened and should run before merge. Re-relay prompt re-emitted to the Router (below).

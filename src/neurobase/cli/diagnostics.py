@@ -144,12 +144,14 @@ def _project_check(handle: StoreHandle | None, root: Path, cwd: Path) -> Check:
     (no handle), fall back to the registry directly so a broken store.toml does
     not also mask an otherwise-healthy project check.
 
-    The no-handle branch is the *one* sanctioned raw-root store call left in
-    production (ADR-0015 registry carve-out, F1): ``registry.toml`` is a separate
-    concern from the store-schema chokepoint, so resolving a project without a
-    validated handle is legitimate here and only here. The step-5 chokepoint guard
-    (``scripts/check_store_chokepoint.py``) allow-lists this exact call by
-    (file, name); every other raw-root store/registry access in ``src/`` fails CI."""
+    The no-handle branch is one of doctor's **two** sanctioned raw-root reads (the
+    other is ``store.store_toml_path`` in ``_store_checks``), allow-listed in the
+    step-5 chokepoint guard (``scripts/check_store_chokepoint.py``) by (file, name).
+    It is legitimate here because ``registry.toml`` is a separate concern from the
+    store-schema chokepoint (ADR-0015 registry carve-out, F1), so resolving a project
+    without a validated handle must still work when ``store.toml`` is corrupt. The
+    guard enforces the store/registry **accessor + metadata-literal** invariant in
+    ``src/`` (spec §10); it is not an exhaustive raw-root detector."""
     try:
         slug = (
             handle.resolve_project(cwd)

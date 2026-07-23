@@ -638,11 +638,14 @@ At `<root>/store.toml`: `schema = 1`, `created_at = <ISO8601>`. `neurobase
 migrate` owns future bumps; refuse to operate on a schema newer than the binary.
 
 ### Store access — the `open_store` chokepoint (ADR-0015, D23–D26)
-Every store and registry access MUST first obtain a validated `StoreHandle` from
-`open_store(root, mode)` (`core/store_handle.py`). `open_store` is the **one** place
-the D11 schema comparison runs — "refuse to operate on a schema newer than the binary"
-is enforced at the boundary, not per command, so a new call site cannot forget it. The
-handle's constructor is private; `open_store` is the sole entry point.
+Store-tree and registry access obtains a validated `StoreHandle` from
+`open_store(root, mode)` (`core/store_handle.py`) before touching the store.
+`open_store` is the **one** place the D11 schema comparison runs — "refuse to operate
+on a schema newer than the binary" is enforced at the boundary, not per command, so a
+new call site cannot forget it. The handle's constructor is private; `open_store` is the
+sole entry point. The store-tree and registry **accessors** (below) are all behind the
+handle and CI-enforced; two lifecycle paths are **not yet converted** and are called out
+as known gaps below (`init --agent` backup, `uninstall --purge-store`).
 
 `mode` governs how a schema the binary does not support is treated:
 
@@ -654,8 +657,11 @@ handle's constructor is private; `open_store` is the sole entry point.
 | `PURGE` | opens | opens even an unparseable store, so it can be **deleted** | never |
 
 - **`uninstall --purge-store` is the one sanctioned mutation of an unsupported store**
-  (D25): it opens a `PURGE` handle and may delete `<root>` even when the schema is
-  newer or `store.toml` is unparseable, behind the existing explicit confirmation.
+  (D25): deleting `<root>` even when the schema is newer or `store.toml` is unparseable,
+  behind the existing explicit confirmation. The `PURGE` mode exists for exactly this;
+  **wiring the CLI purge path onto a `PURGE` handle** (it deletes directly today, and can
+  back up config *into* the store before deleting) **is a tracked gap** — see
+  known-gaps, deferred to ADR-0015 step 4d.
 - **MCP never hard-fails at startup** (D24): an unsupported-schema store surfaces as a
   **structured tool error** per tool, not an exception — `resources/list` still returns
   a valid array (spec §13).
@@ -683,20 +689,29 @@ layout is not shape-distinguishable from the Claude app's own
 `~/.claude/projects/<x>/memory`, so it is not matched (the accessor contract is exactly
 what is mechanically enforceable without false positives).
 
-Two categories of raw-`root` construction **remain**, pending the deferred removal of
-the raw-`Path` signatures, and are the guard's documented exceptions rather than
-violations:
+Several raw-`root` constructions **remain** outside the accessor contract. The first
+two are the guard's documented exceptions (sanctioned); the last two are **known gaps**
+where a lifecycle path still touches the store without the guard, tracked for
+ADR-0015 step 4d (see known-gaps):
 
-- **`doctor`'s two corrupt-`store.toml` reads** — `projects.resolve_project(root, cwd)`
-  (project resolution is a `registry.toml` concern, independent of the store-schema
-  guard, and must survive when no handle can open) and `store.store_toml_path(root)`
-  (the report label, built before `open_store`). Both live only in `cli/diagnostics.py`
-  and are allow-listed in the guard by (file, name).
-- **the recommender's proposal/ledger path-builders** —
+- **`doctor`'s two corrupt-`store.toml` reads** (sanctioned) —
+  `projects.resolve_project(root, cwd)` (project resolution is a `registry.toml`
+  concern, independent of the store-schema guard, and must survive when no handle can
+  open) and `store.store_toml_path(root)` (the report label, built before `open_store`).
+  Both live only in `cli/diagnostics.py` and are allow-listed in the guard by (file, name).
+- **the recommender's proposal/ledger path-builders** (sanctioned) —
   `corpus.proposals_dir` / `proposal_path` / `ledger_path` build `<root>/proposals/…`
   and `<root>/recommender/ledger.jsonl` from a bare root, but every caller is guarded by
   the command entry that opens the handle first. They stay root-taking until the
-  signature removal lands.
+  raw-`Path` signature removal lands.
+- **`init --agent claude|codex` backup** (gap, 4d) — the direct per-agent installers
+  reach `backups.backup_files(root, …)` (writing `<root>/backups/…`) without first
+  opening a handle, so an unsupported-schema store is not refused on this path (the
+  *guided* `init` flow does open a WRITE handle first). A mutate-before-guard of the G1
+  class, narrower than the original but not yet closed.
+- **`uninstall --purge-store`** (gap, 4d) — deletes `<root>` via a direct `rmtree`
+  without opening the `PURGE` handle D25 specifies, and may `backup_files` into the
+  store before deleting it.
 
 ### Project registry
 `<root>/registry.toml`:

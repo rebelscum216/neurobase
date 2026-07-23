@@ -4,9 +4,12 @@
 The ``StoreHandle`` chokepoint (ADR-0015) only closes G1 if it is *unavoidable*:
 production code must reach the store through a validated handle, never by calling a
 raw-``root`` store/registry accessor or referencing the store-metadata filenames.
-Steps 3/4a/4b converted every production caller onto ``open_store(...)`` + handle
-methods; this check is what keeps them there — a new call site that reintroduces a
-raw-``root`` accessor fails CI instead of silently re-opening the hole.
+Steps 3/4a/4b converted every production caller of the store-tree/registry **accessors**
+onto ``open_store(...)`` + handle methods; this check is what keeps them there — a new
+call site that reintroduces a raw-``root`` accessor fails CI instead of silently
+re-opening the hole. (Two lifecycle paths — ``init --agent`` backup and
+``uninstall --purge-store`` — still touch the store off a bare root and are *not* covered
+by this accessor guard; they are tracked as known gaps for ADR-0015 step 4d, see §10.)
 
 **Scope (deliberately ``src/`` only).** The raw-``root`` functions still *exist* on
 ``core.store`` / ``core.projects`` — the ADR's "remove the signatures" step is

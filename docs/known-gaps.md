@@ -31,9 +31,13 @@ This file exists because nothing else in `docs/` was the right home for it:
 
 ### G1 — the D11 store-schema guard is enforced per-command by hand, not at the store boundary
 
-- **status:** fixed (ADR-0015 — the `StoreHandle` chokepoint; migration steps 1–5,
-  `docs/reviews/2026-07-2*-*handle*.md`). Kept fixed by the step-5 CI guard
-  `scripts/check_store_chokepoint.py` (see *Resolution* below).
+- **status:** mostly fixed (ADR-0015 — the `StoreHandle` chokepoint; migration steps
+  1–5, `docs/reviews/2026-07-2*-*handle*.md`). The store-tree/registry **accessor**
+  class is closed and CI-enforced by `scripts/check_store_chokepoint.py`; the guided
+  `init` flow guards before mutating. **Two lifecycle paths remain open** and are
+  tracked for **ADR-0015 step 4d** (see *Residual gaps* below): `init --agent`'s backup
+  write and `uninstall --purge-store`'s direct delete both touch the store without the
+  guard. G1 flips to `fixed` when 4d lands.
 - **severity:** major — spec §10 says *"refuse to **operate** on a schema newer
   than the binary."* No read-only exemption exists in the contract. At least one
   path **mutates** a newer-schema store before the guard runs, which is the exact
@@ -133,10 +137,11 @@ validated `StoreHandle` every path must obtain via `open_store(root, mode)`, whi
 the one place the D11 comparison lives. Landed as five reviewed migration PRs — (1)
 `store_handle.py` + `open_store`; (2) handle methods; (3) every production module
 converted onto the handle; (4a/4b) the deferred `search`/`linkify` and
-`distill`/`locks` edges; (5) this CI guard. All three constraints above are honored:
-MCP surfaces a **structured tool error** (D24), `uninstall --purge-store` opens a
-`PURGE` handle (D25, written into spec §10), and `doctor` opens a read-only `DOCTOR`
-handle instead of re-implementing the comparison (D26). The pre-guard registry-read
+`distill`/`locks` edges; (5) this CI guard. Two of the three constraints above are
+honored: MCP surfaces a **structured tool error** (D24), and `doctor` opens a read-only
+`DOCTOR` handle instead of re-implementing the comparison (D26). The third — D25's
+`uninstall --purge-store` → `PURGE` handle — is **specified but not yet wired** (the CLI
+still deletes directly); see *Residual gaps* below. The pre-guard registry-read
 pattern can no longer compile — `resolve_project`/`load_registry` production callers
 go through the handle. The step-5 guard forbids the raw-`root` store/registry
 **accessors** and the `store.toml`/`registry.toml` literals outside the three
@@ -150,3 +155,21 @@ their handle. The literal removal of the raw-`Path` `store.py`/`projects.py` sig
 (they remain the low-level implementation the handle methods delegate to, and the test
 suite's store-setup helpers) is deferred; the CI guard is what makes production
 accessor-level omission impossible in the meantime.
+
+**Residual gaps (tracked for ADR-0015 step 4d).** The step-5 review (Codex, round 2)
+found two lifecycle paths the accessor conversion never reached — the same
+mutate-before-guard *class* as the original G1, narrower in blast radius:
+
+1. **`init --agent claude|codex`** reaches `backups.backup_files(root, …)` (writing
+   `<root>/backups/…`) and the agent-config writes without opening a handle, so an
+   unsupported-schema store is not refused on this path. (The *guided* `init` flow
+   already guards via a WRITE handle before `register_project`.) 4d opens a handle in
+   the direct per-agent path before any write.
+2. **`uninstall --purge-store`** deletes `<root>` with a direct `shutil.rmtree` rather
+   than the `PURGE` handle D25 specifies, and can `backup_files` into the store *before*
+   deleting it (so deletion is not the only mutation of an unsupported store). 4d wires
+   the purge path onto a `PURGE` handle and resolves the pre-delete backup ordering.
+
+Both are covered by the guard only once 4d moves them behind a handle (or a specified
+exception); until then §10 and this entry name them explicitly rather than claiming the
+class is fully closed.

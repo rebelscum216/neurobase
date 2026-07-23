@@ -1097,8 +1097,11 @@ def ui(
     from neurobase.webui.app import serve as _serve
 
     resolved_root = store.resolve_root(root)
-    _check_store_schema(resolved_root)
-    _serve(resolved_root, port=port)
+    # READ guard: refuse a store whose schema is newer than we support before the
+    # server ever starts; the UI's own writes (accept/edit) delegate through the
+    # install service, the same delegate-writes pattern as `curate` (ADR-0015).
+    handle = _open_store_or_exit(resolved_root, StoreMode.READ)
+    _serve(handle.root, port=port)
 
 
 def _read_stdin_json() -> dict[str, object]:

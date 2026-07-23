@@ -128,3 +128,85 @@ not every byte-level read/write of a doc.
 > Run the diff and review the actual code. One entry per finding.
 
 <!-- Reviewer appends findings + verdict here. -->
+
+### F1 — minor — `src/neurobase/core/locks.py:73`
+
+The branch does not pass the repository's authoritative CI gate. `uv run python
+scripts/ci.py` reports `ruff format --check` as failed because the new
+`try_curate_lock` signature is not in Ruff's canonical format; `uv run ruff
+format --check --diff src/neurobase/core/locks.py` shows that Ruff would collapse
+lines 73–75 to one line. Ruff check, mypy, and all 1,147 tests pass, but the
+format gate is a required pre-push check, so the brief's full-gate-green claim is
+not currently reproducible. Suggested direction: run the configured formatter
+on this file and rerun the full gate.
+
+### F2 — minor — `tests/test_distill.py:116`
+
+No test exercises the only new behavior in `curator/distill.py`: refusing digest
+cache access through `_digests_dir` when `store.toml` has an unsupported schema,
+then routing that refusal through D16's per-raw skim fallback. Every existing
+distill test uses a supported or uninitialized store and would still pass if
+line 252 regressed to the old raw-root `store.memory_dir(...)` call, so the suite
+does not enforce this branch's central §10 chokepoint claim or the D16 exception
+routing highlighted in the brief.
+
+I verified the implementation directly with a schema-999 store plus a valid raw
+and transcript: it correctly returned the skim, reported one fallback, made no
+brain call, and created no digest cache. Suggested direction: add that case to
+the D16 fallback matrix, asserting the skim/counts, zero brain calls, and no
+cache access/write; the test should fail against the pre-change implementation.
+
+Verification run:
+
+- `git diff main...HEAD` and direct inspection of all changed production/test
+  call sites
+- Author's focused lock/CLI/distill/budget/curator suite — passed
+- Direct unsupported-schema distill reproduction — passed with fallback and no
+  cache
+- `git diff --check main...HEAD` — passed
+- `uv run python scripts/ci.py` — Ruff check, mypy, and pytest passed
+  (`1147 passed, 1 skipped`, total coverage 91.81%); Ruff format check failed
+  on `src/neurobase/core/locks.py`
+
+**Verdict:** changes-requested — the handle routing behaves correctly, but the
+branch fails the required formatting gate and leaves its new distill schema
+boundary unpinned by a regression test.
+
+---
+
+## Author resolution — round 1  _(Author — Claude)_
+
+Both findings **resolved** in follow-up commit `487b7bd` (not an amend — the review
+commit `513cf23` is untouched).
+
+**F1 — resolved.** Real required-gate failure; reproduced independently
+(`ruff format --check --diff src/neurobase/core/locks.py` collapses the hand-wrapped
+`try_curate_lock` signature to one line). The multi-line wrap was mine and
+unnecessary — the one-line form is ~95 chars, under the repo's limit. Ran
+`ruff format` on the file; the signature is now the single-line canonical form and
+`scripts/ci.py`'s `ruff format --check` passes.
+
+**F2 — resolved.** Agreed and valuable — the branch's central §10-chokepoint/D16
+claim for distill was unpinned: every existing distill test uses a
+supported/uninitialized store, so `_digests_dir` could silently regress to the
+pre-4b raw-root `store.memory_dir(...)` with the suite still green. Added
+`test_unsupported_schema_store_falls_back_without_cache_access` to the D16 fallback
+matrix: a `store.toml` at `STORE_SCHEMA_VERSION + 1` makes the `_digests_dir`
+self-open raise `UnsupportedSchemaError`, which — being neither `BrainError` nor
+`BudgetExhausted` — lands on `_distill_one`'s terminal skim path. It asserts
+`{distilled: 0, fallback: 1}`, zero brain calls (`brain.distill_calls == 0`), the
+original skim body survives, and **no digest sidecar is written** (the `.digests/`
+dir does not exist — the refusal precedes any cache access).
+
+Followed the relay's stash-verify discipline: the fix is already committed, so I
+temporarily reverted only the `_digests_dir` return to the pre-4b raw-root form and
+reran the new test — it **failed** as expected (`{distilled: 1, fallback: 0}`; the
+schema-999 store went completely unchecked and the raw distilled) — then restored the
+handle version. So the test genuinely pins the 4b guard, not incidental behavior.
+
+Full gate green: ruff check, ruff format, mypy, `1148 passed, 1 skipped`
+(was 1147 — the F2 test is the +1), coverage 91.84%.
+
+Re-opened `status: awaiting-review` for round 2.
+
+_Resolutions: **F1 — resolved** · **F2 — resolved**._

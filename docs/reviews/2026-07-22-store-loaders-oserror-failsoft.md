@@ -1,6 +1,6 @@
 ---
 slug: store-loaders-oserror-failsoft
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: store-loaders-oserror-failsoft
@@ -96,3 +96,26 @@ raw-`Path` sigs) still follow. Not changing `read_doc`'s own contract.
 > Run the diff and review the actual code. One entry per finding.
 
 <!-- Reviewer appends findings + verdict here. -->
+
+No findings. I verified every changed catch against its caller: list/status/
+recall/index/cache paths now skip only malformed or filesystem-unreadable
+documents, while direct mutation reads (`mark_consumed`, `upsert_curated`,
+`soft_delete_curated`) still propagate I/O failures. The remaining bare
+`except ValueError` sites are not OSError-blind `read_doc` skip paths.
+
+The §13 MCP path is covered end to end: `memory_list_projects` now returns the
+healthy project count when a sibling curated entry raises `IsADirectoryError`,
+and the other MCP document reads already handle `(ValueError, OSError)`. The
+recall and index regressions likewise prove that one unreadable node/fact does
+not discard healthy siblings or crash the operation.
+
+Verification run:
+
+- `git diff main...HEAD`
+- Focused store/MCP/recall suite — passed
+- Distill/seed/CLI suites for the other changed degradation sites — passed
+- `uv run python scripts/ci.py` — ruff, format check, mypy, and pytest passed;
+  `1147 passed, 1 skipped`, total coverage `91.81%`
+
+**Verdict:** approve — the change closes the reviewed fail-soft gaps without
+weakening direct-read or mutation error handling.

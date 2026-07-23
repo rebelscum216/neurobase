@@ -1,6 +1,6 @@
 ---
 slug: lifecycle-guards
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: adr-0015-lifecycle-guards
@@ -356,3 +356,37 @@ coverage 91.87%.
 Re-opened `status: awaiting-review` for round 3.
 
 _Resolutions: **F5 — resolved** · **F6 — resolved** · **F7 — resolved** · **F8 — resolved** · **F9 — resolved**._
+
+---
+
+## Reviewer findings — round 3  _(Reviewer — Codex)_
+
+No new findings.
+
+Round-2 F5 is resolved: ADR-0015 D25 now scopes deletion-only to unsupported
+schema-versioned content and records the same opaque config-backup/restore
+maintenance exception as spec §10. F6 is resolved: the PURGE spy records roots
+and ordering, and independently fails when the open is moved after `rmtree` or
+targets a different root. F7 is resolved: both command-level regressions operate
+on `schema = 999`, and each fails when a refusing `READ` guard is inserted on
+its non-purge uninstall/restore path. F8 is resolved: G1 and the chokepoint
+guard narrative consistently distinguish handle-guarded schema-versioned access
+from the handle-free backup/restore exception, including purge's backup skip.
+F9 is resolved: the durable count is `1170` after round 1 and `1172` after the
+two round-2 regressions, matching collection and the full gate.
+
+Verification:
+
+- `git diff main...HEAD` and `git diff --check main...HEAD`
+- `uv run pytest tests/test_cli_init.py tests/test_cli_uninstall.py -q` — 35 passed
+- `uv run python scripts/check_store_chokepoint.py` — passed
+- clean temporary HEAD archive with isolated source mutations:
+  - purge open moved after `rmtree` — ordering test failed
+  - purge open changed to a different root — same-root assertion failed
+  - `READ` guards added to non-purge uninstall and restore — both schema-999
+    regressions failed
+- `uv run python scripts/ci.py` — all checks passed; 1172 passed, 1 skipped;
+  total coverage 91.86%
+
+**Verdict:** approve — F5–F9 are resolved, the governing contract and ADR agree,
+and the tests now enforce the claimed lifecycle boundaries.

@@ -24,6 +24,7 @@ from neurobase.adapters.scribe_common import (
 )
 from neurobase.core import store
 from neurobase.core.config import load_config
+from neurobase.core.enable import resolve_or_auto_enable
 from neurobase.core.redact import redact, redact_command
 from neurobase.core.store_handle import StoreMode, open_store
 
@@ -284,17 +285,27 @@ def scribe(
 
     # cwd from the hook payload takes precedence over the transcript's.
     resolve_cwd = Path(cwd or parsed["cwd"] or ".").expanduser()
-    # D11: inspect through a READ handle first — it validates the schema (a
-    # newer-schema store raises → fail closed) without writing, so an untracked or
-    # opted-out capture never creates store.toml as a side effect. The WRITE handle
-    # (below) is opened only once we commit to writing.
+    config = load_config()
+    # Resolve the project — and, under folder-scoped auto-enable, register it +
+    # create its tree when this repo sits under a configured auto_enable_root
+    # (consent given once at the folder, not per repo). A too-new store fails
+    # closed *inside* this call (→ None), so an untracked/opted-out capture still
+    # never creates store.toml as a side effect (ADR-0015 D11).
+    project = resolve_or_auto_enable(
+        root,
+        resolve_cwd,
+        auto_enable_roots=config.enable.auto_enable_roots,
+        denylist=config.enable.denylist,
+    )
+    if project is None:
+        return None  # untracked directory (and not folder-scoped auto-enabled)
+    # D11: re-inspect through a READ handle before the opt-in check. After
+    # auto-enable the tree exists; a project registered but never given a tree
+    # still no-ops here.
     try:
         handle = open_store(root, StoreMode.READ)
     except store.UnsupportedSchemaError:
         return None  # fail closed — never operate on an incompatible store
-    project = handle.resolve_project(resolve_cwd)
-    if project is None:
-        return None  # untracked directory
     if not handle.memory_dir(project).exists():
         return None  # opt-in: no tree ⇒ write nothing
 
@@ -312,7 +323,7 @@ def scribe(
     ):
         return None  # empty capture ⇒ write nothing
 
-    extra_patterns = load_config().redact.extra_patterns
+    extra_patterns = config.redact.extra_patterns
     scrub: Redactor = lambda text: redact(text, extra_patterns)  # noqa: E731
     scrub_command: Redactor = lambda text: redact_command(text, extra_patterns)  # noqa: E731
     body = _assemble_body(parsed, reason, scrub, scrub_command)

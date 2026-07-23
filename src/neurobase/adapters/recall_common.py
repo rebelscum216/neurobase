@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from neurobase.core import store
+from neurobase.core import projects, store
 from neurobase.core.config import load_config
 from neurobase.core.enable import resolve_or_auto_enable
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
@@ -101,7 +101,12 @@ def build_context(root: Path, cwd: Path, *, auto_enable: bool = False) -> str | 
             denylist=config.enable.denylist,
         )
     else:
-        project = handle.resolve_project(cwd)  # read-only: never mutates the store
+        # Read-only path (the MCP recall prompt). Still honor the denylist so
+        # automatic injection is consistent with capture/session-start (review
+        # R2-2), but never mutate the store.
+        if projects.is_denylisted(cwd, config.enable.denylist):
+            return None
+        project = handle.resolve_project(cwd)
     if project is None:
         return None
     bodies = _node_bodies(handle, project)

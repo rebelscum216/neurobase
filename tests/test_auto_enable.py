@@ -343,6 +343,59 @@ def test_resolve_denylisted_registered_repo_stops(workspace: Path, tmp_path: Pat
     )
 
 
+def test_resolve_non_matching_denylist_leaves_registered_working(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """A denylist that covers a *different* subtree must not gate this repo — the
+    live gate must not over-match (review R2-6)."""
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    projects.register_project(root, repo, slug="app")
+    store.ensure_tree("app", root)
+    assert (
+        resolve_or_auto_enable(
+            root, repo, auto_enable_roots=[str(workspace)], denylist=[str(workspace / "other")]
+        )
+        == "app"
+    )
+
+
+def test_build_context_read_path_honors_denylist(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-2: the read-only path (MCP recall prompt) must also suppress injection
+    for a denylisted repo, so automatic injection is consistent with capture."""
+    from neurobase.adapters import recall_common
+
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    projects.register_project(root, repo, slug="app")
+    store.ensure_tree("app", root)
+    store.write_node(root, "app", "status", "# Status\n\nbody")
+    cfg = tmp_path / "config.toml"
+    _write_config(cfg, roots=[str(workspace)], denylist=[str(repo)])
+    monkeypatch.setattr(config_mod, "config_path", lambda: cfg)
+
+    # Denylisted → no inject even though a node exists.
+    assert recall_common.build_context(root, repo) is None
+    # Remove the denylist entry → injects normally.
+    _write_config(cfg, roots=[str(workspace)], denylist=[])
+    assert recall_common.build_context(root, repo) is not None
+
+
+def test_scalar_string_config_never_enables_everything() -> None:
+    """R2-1 (blocker): a forgotten-brackets `auto_enable_roots = "~/x"` must be
+    coerced to a one-element list, never iterated per character (which would add
+    "/" and match every repo on the machine)."""
+    ec = config_mod.EnableConfig(auto_enable_roots="~/Projects", denylist="~/secret")  # type: ignore[arg-type]
+    assert ec.auto_enable_roots == ["~/Projects"]
+    assert ec.denylist == ["~/secret"]
+    # And the resolver never yields filesystem root from a scalar.
+    assert Path("/") not in projects._resolved_config_dirs("~/Projects")  # type: ignore[arg-type]
+    # A garbage type degrades to "feature off", never a crash.
+    assert config_mod.EnableConfig(auto_enable_roots=42).auto_enable_roots == []  # type: ignore[arg-type]
+
+
 def test_scribe_denylisting_an_enabled_repo_stops_capture(
     workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -400,6 +453,14 @@ def test_resolve_tree_failure_leaves_no_registration(
         resolve_or_auto_enable(root, repo, auto_enable_roots=[str(workspace)], denylist=[]) is None
     )
     assert "app" not in projects.load_registry(root)  # not registered → retryable
+
+    # And prove it's genuinely retryable: once the FS recovers, the next call
+    # registers + creates the tree (no permanent poisoning).
+    monkeypatch.undo()
+    assert (
+        resolve_or_auto_enable(root, repo, auto_enable_roots=[str(workspace)], denylist=[]) == "app"
+    )
+    assert store.memory_dir("app", root).exists()
 
 
 def test_resolve_unsluggable_repo_writes_nothing(tmp_path: Path) -> None:

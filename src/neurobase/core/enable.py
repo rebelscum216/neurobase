@@ -17,6 +17,7 @@ ordinary opt-in path takes over.
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 from neurobase.core import projects, store
@@ -52,7 +53,11 @@ def resolve_or_auto_enable(
     if projects.is_denylisted(cwd, denylist):
         return None
 
-    existing = handle.resolve_project(cwd)
+    # A corrupt registry.toml must fail closed, never raise into a hook (R2-A3).
+    try:
+        existing = handle.resolve_project(cwd)
+    except tomllib.TOMLDecodeError:
+        return None
     if existing is not None:
         return existing
 
@@ -60,22 +65,22 @@ def resolve_or_auto_enable(
     if repo_root is None:
         return None
 
-    # Qualifies. Create the tree *before* committing the registry entry, all inside
-    # one guarded block, so no partial state survives a failure (review F2):
-    #   - an un-sluggable name, a slug collision, a too-new store, or any OSError
-    #     → return None, leaving the store as we found it;
-    #   - writing the registry entry only *after* the tree exists means a tree
-    #     failure can never leave a registered-but-treeless project — which would
-    #     otherwise match resolve_project forever and never be retried, silently
-    #     killing capture for that repo.
+    # Qualifies. Everything below is one guarded block, so no partial state survives
+    # a failure (review F2/R2-A2). Ordering matters:
+    #   1. derive + validate the slug (pure) BEFORE opening the WRITE handle, so an
+    #      un-sluggable name skips out without even creating store.toml;
+    #   2. detect a slug↔root collision via the already-open READ handle, BEFORE the
+    #      WRITE handle, so a collision skip *also* leaves a pristine store untouched;
+    #   3. create the TREE before writing the REGISTRY entry, so a tree failure can
+    #      never leave a registered-but-treeless project (which would match
+    #      resolve_project forever and never be retried, silently killing capture).
     # This is the only place a hook mutates the registry — reached once per repo,
-    # on the first session under an auto_enable_root, through a WRITE handle so the
-    # D11 guard runs before the mutation (ADR-0015).
+    # through a WRITE handle so the D11 guard runs before the mutation (ADR-0015).
     try:
-        # Derive (and validate) the slug BEFORE opening the WRITE handle, so an
-        # un-sluggable repo name skips out without even creating store.toml (a
-        # pristine store stays pristine on a skipped enable — review B3).
         slug = projects.derive_slug(repo_root)
+        registry = handle.load_registry()
+        if slug in registry and str(repo_root) not in registry[slug]:
+            return None  # collides with a different registered root — don't guess
         writer = open_store(root, StoreMode.WRITE)
         writer.ensure_tree(slug)
         writer.register_project(repo_root)
@@ -83,6 +88,7 @@ def resolve_or_auto_enable(
         store.UnsupportedSchemaError,
         projects.ProjectSlugCollisionError,
         store.InvalidSlugError,
+        tomllib.TOMLDecodeError,
         OSError,
     ):
         return None

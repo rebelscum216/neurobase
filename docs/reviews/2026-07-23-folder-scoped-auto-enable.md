@@ -150,3 +150,23 @@ All findings addressed; full CI gate green (ruff + format + mypy + **1175 passed
 | F8 | **resolved** | (a) redundant `path == ancestor` dropped; (b) double `git rev-parse` acknowledged in ADR (deferred as negligible); (c) stale "READ never writes" comment fixed. |
 
 **Independent review still owed:** Codex was out of credits at review time. This round is the author's own resolution of an author-run self-review — the independent Codex pass has **not** happened and should run before merge. Re-relay prompt re-emitted to the Router (below).
+
+---
+
+## Round 3 — second self-review pass + resolution
+
+A second fresh-eyes review (two subagents) ran against the *resolved* code — the point being that the round-2 fixes were themselves unreviewed. It found a **blocker** and showed the round-1 F4 fix was over-claimed. All addressed; full CI gate green; test count 27 → **32**.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| R2-1 | **blocker** | A scalar-string `auto_enable_roots = "~/x"` (forgotten brackets) is iterated per character; `"/"` resolves to root → **every repo on the machine** auto-enables. Confirmed empirically. | **resolved** — `EnableConfig` coerces a scalar to a one-element list and drops garbage (`_as_str_list`); `_resolved_config_dirs` also guards. Test: `test_scalar_string_config_never_enables_everything`. |
+| R2-2 | major | The F4 "live gate" only covered scribe capture + session-start inject; the MCP recall/search/read/remember + curate/status/seed all bypassed it, and the docstring/ADR overclaimed "always wins / revokes capture." | **resolved (scoped)** — gate now also covers the MCP recall *prompt* inject; docstring + ADR + config comment rewritten to the honest scope: **automatic capture + automatic injection only**, prospective, no purge, explicit tools/CLI not gated. Test: `test_build_context_read_path_honors_denylist`. |
+| R2-3 | major | Denylisting an *explicitly* `enable`d repo → silently dead project; no surface warned. | **resolved** — `neurobase enable` warns when its target is denylisted. |
+| R2-A2 | minor | `store.toml` still created on a *collision* skip (WRITE opened before collision detected). | **resolved** — collision pre-checked via the READ handle before the WRITE handle opens. |
+| R2-A3 / R2-5 | minor | Corrupt `registry.toml` → `TOMLDecodeError` out of the seam; unwrapped MCP `recall` handler → §13 raise. | **resolved** — `tomllib.TOMLDecodeError` caught in the seam; the `recall()` handler wrapped (fail-soft). |
+| R2-A4 | nit | `_resolved_config_dirs` `.resolve()` outside the try. | **resolved** — moved inside; `OSError` caught. |
+| R2-4 | minor | Tree-failure test didn't prove retry re-enables. | **resolved** — test now un-patches and asserts the retry registers + trees. |
+| R2-6 | minor | No non-matching-denylist / read-path denylist tests. | **resolved** — both added. |
+| R2-7 | nit | `git rev-parse` runs up to 3–4× on the qualifying path. | **deferred** — negligible; noted in ADR latency bullet. |
+
+**Still owed:** the genuine independent Codex pass. Two author-run self-review rounds are not a substitute — they share the author's blind spots. Prompt re-emitted to the Router.

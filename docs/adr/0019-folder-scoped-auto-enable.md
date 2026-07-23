@@ -70,14 +70,27 @@ denylist = ["~/Projects/client-work"]     # subtrees carved back out (wins over 
 
 Both are hand-edited lists of **absolute or `~`-prefixed** paths (a relative entry
 would resolve against the hook's launch cwd — non-deterministic scope — so it is
-skipped; review F5); Neurobase never writes them (invariant preserved). **Naming a
-directory in `auto_enable_roots` *is* the consent act** — deliberate and explicit.
-`denylist` is a **live gate** (review F4): it wins over `auto_enable_roots` *and*
-revokes an already-enabled repo — adding a repo to `denylist` stops its capture on
-the next hook even though it is still in the registry. So consent is genuinely
-revocable by editing one line, in both directions. An empty (or absent)
-`auto_enable_roots` is the default and means *"per-repo `enable` only"* —
-byte-for-byte today's behavior.
+skipped; review F5); Neurobase never writes them (invariant preserved). Values are
+**coerced at load** — a scalar string is wrapped to a one-element list and garbage
+degrades to empty (review R2-1): the alternative (iterating a forgotten-brackets
+`auto_enable_roots = "~/x"` per character) resolves the `"/"` char to filesystem
+root and would silently enable capture on *every* repo — the exact "capture
+everywhere" outcome this ADR exists to prevent. **Naming a directory in
+`auto_enable_roots` *is* the consent act.**
+
+`denylist` wins over `auto_enable_roots` and is a **live gate over Neurobase's
+automatic actions** — new capture (both scribes) and automatic injection
+(session-start recall *and* the MCP recall prompt) — even for an already-registered
+repo, so it wins over an explicit `neurobase enable`. It is deliberately
+**prospective and narrow** (review R2-2): it does *not* gate explicit MCP tools
+(`memory_search`/`read`/`remember`) or CLI commands (`status`/`curate`/`seed`), and
+it does *not* purge already-captured raws, curated facts, or nodes — fully removing
+a repo's memory means deregistering it and deleting its tree. Because denylist also
+suppresses an *explicitly* enabled repo, `neurobase enable` **warns** when its
+target is denylisted (review R2-3), so a registered-but-silent project can't hide.
+
+An empty (or absent) `auto_enable_roots` is the default and means *"per-repo
+`enable` only"* — byte-for-byte today's behavior.
 
 **D40 — Auto-enable is git-repo-scoped: one project per repo, denylist wins.** The
 policy is a pure function,
@@ -187,13 +200,16 @@ the store or raises a registry/FS error out of that fail-soft surface (spec §13
   rule; §4/§5's opt-in line becomes *"write only if the resolved project's tree
   exists **or the repo qualifies for folder-scoped auto-enable (§10), which creates
   the tree**"*; §3/§7's consent narrative gains the folder-consent model.
-- **Implemented + self-reviewed.** On `feat/folder-scoped-auto-enable` (full CI gate
-  green; 27 tests in
-  [`tests/test_auto_enable.py`](../../tests/test_auto_enable.py)). A self-review
-  (Codex was unavailable) surfaced F1–F8, recorded in
+- **Implemented + two self-review rounds.** On `feat/folder-scoped-auto-enable`
+  (full CI gate green; 32 tests in
+  [`tests/test_auto_enable.py`](../../tests/test_auto_enable.py)). Two rounds of
+  fresh-eyes self-review (Codex was unavailable) surfaced F1–F8 then R2-1…R2-7,
+  recorded in
   [`docs/reviews/2026-07-23-folder-scoped-auto-enable.md`](../reviews/2026-07-23-folder-scoped-auto-enable.md);
-  F1/F2/F4/F5/F7/F8 are resolved here, F6 documented above. **An independent Codex
-  review is still owed** before merge — the self-review is weaker by construction.
+  round 2 caught a **blocker** (scalar-config → whole-filesystem capture, now
+  coerced) and that the denylist gate was over-claimed (now honestly scoped +
+  MCP-recall inject gated + `enable` warns). **An independent Codex review is still
+  owed** before merge — self-review is weaker by construction.
 
 ## Alternatives considered
 

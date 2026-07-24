@@ -15,8 +15,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from neurobase.core import store
+from neurobase.core import projects, store
 from neurobase.core.config import load_config
+from neurobase.core.enable import resolve_or_auto_enable
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
 # Fallback cap when config can't be read; the real cap is [inject].max_chars
@@ -71,26 +72,47 @@ def _assemble(header: str, bodies: list[str], cap: int = MAX_CONTEXT_CHARS) -> s
     return content
 
 
-def build_context(root: Path, cwd: Path) -> str | None:
+def build_context(root: Path, cwd: Path, *, auto_enable: bool = False) -> str | None:
     """The ``additionalContext`` string for this cwd, or ``None`` (⇒ emit
     nothing) on no-project / no-nodes / incompatible store. Callers treat any
-    exception as ``None``."""
-    # D11 (spec §10): obtain a READ handle up front — the schema guard runs once
-    # here, at the store boundary. A store newer than we support raises, so the
-    # hook fails closed (injects nothing) and never reads an incompatible store.
-    # An uninitialized store opens as empty and simply yields no nodes. READ never
-    # writes, so recall no longer creates store.toml as a side effect (ADR-0015).
+    exception as ``None``.
+
+    ``auto_enable`` is opt-in **per call site** (review F1). The SessionStart hook
+    path (:func:`emit`) passes ``True`` so the first session in a qualifying repo
+    registers it + creates its tree (folder-scoped auto-enable, ADR-0019). Every
+    read-only caller — notably the MCP ``recall`` prompt — leaves it ``False`` so a
+    *read* never mutates the store or raises a registry/filesystem error out of a
+    fail-soft surface (spec §13)."""
+    config = load_config()
+    # D11 (spec §10): one READ handle at the store boundary — the schema guard runs
+    # here; an uninitialized store opens as empty and simply yields no nodes.
     try:
         handle = open_store(root, StoreMode.READ)
     except store.UnsupportedSchemaError:
         return None
-    project = handle.resolve_project(cwd)
+    if auto_enable:
+        # Registers + creates the tree on the first session in a qualifying repo
+        # (fails closed → None inside the call). No nodes yet on that first run, so
+        # inject stays empty below; by the next session curate has produced nodes.
+        project = resolve_or_auto_enable(
+            root,
+            cwd,
+            auto_enable_roots=config.enable.auto_enable_roots,
+            denylist=config.enable.denylist,
+        )
+    else:
+        # Read-only path (the MCP recall prompt). Still honor the denylist so
+        # automatic injection is consistent with capture/session-start (review
+        # R2-2), but never mutate the store.
+        if projects.is_denylisted(cwd, config.enable.denylist):
+            return None
+        project = handle.resolve_project(cwd)
     if project is None:
         return None
     bodies = _node_bodies(handle, project)
     if not bodies:
         return None
-    cap = load_config().inject.max_chars  # spec §10: config-overridable
+    cap = config.inject.max_chars  # spec §10: config-overridable
     header = HEADER.format(memory_dir=handle.memory_dir(project))
     return _assemble(header, bodies, cap)
 
@@ -100,7 +122,7 @@ def emit(root: Path, cwd: Path) -> str | None:
     should be injected (fail-safe: any error ⇒ ``None``). Same envelope for both
     Claude and Codex (ADR-0005)."""
     try:
-        content = build_context(root, cwd)
+        content = build_context(root, cwd, auto_enable=True)
     except Exception:  # noqa: BLE001 - fail-safe: never wedge session start
         return None
     if not content:

@@ -94,6 +94,15 @@ def enable(
         raise typer.Exit(code=1) from exc
     mem = handle.ensure_tree(project_slug)
     typer.echo(f"Enabled project '{project_slug}' at {mem}")
+    # R2-3: the denylist gates automatic capture/injection even for an explicitly
+    # enabled repo, so warn now rather than let it look enabled but stay silent.
+    if projects.is_denylisted(resolved_cwd, load_config().enable.denylist):
+        typer.secho(
+            f"Warning: {resolved_cwd} is under an [enable] denylist entry — Neurobase "
+            "will suppress automatic capture and injection for it despite this "
+            "registration. Remove it from denylist to capture.",
+            fg=typer.colors.YELLOW,
+        )
 
 
 @app.command()

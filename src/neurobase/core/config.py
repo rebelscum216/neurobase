@@ -108,6 +108,46 @@ class RecommendConfig:
     survival_window_days: int = 30  # accepted-artifact survival window (§12.9)
 
 
+def _as_str_list(value: Any) -> list[str]:
+    """Coerce a config value into a clean ``list[str]`` (review R2-1).
+
+    A bare string is wrapped into a one-element list — the alternative (iterating a
+    forgotten-brackets ``auto_enable_roots = "~/x"`` per character) is catastrophic:
+    the ``"/"`` character resolves to filesystem root and would auto-enable *every*
+    repo on the machine. Non-string elements are dropped; any other type becomes an
+    empty list. Never raises — a malformed value degrades to "feature off"."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [v for v in value if isinstance(v, str)]
+    return []
+
+
+@dataclass
+class EnableConfig:
+    # Folder-scoped auto-enable (ADR-0019). `neurobase enable` is per-repo and
+    # opt-in by design (a hook captures only when the resolved project's memory
+    # tree exists). This relocates that consent from per-repo to per-folder: name
+    # an `auto_enable_roots` directory once, and any git repo beneath it is
+    # registered as its own project — and given its memory tree — the first time a
+    # hook fires there. Empty roots = today's behavior (per-repo opt-in only).
+    # `denylist` wins over roots and gates Neurobase's *automatic* actions — new
+    # capture (both scribes) and automatic injection (session-start + the MCP
+    # recall prompt) — even for an already-enabled repo. It is prospective and does
+    # NOT gate explicit MCP tools / CLI commands, nor purge already-captured memory
+    # (ADR-0019 F4 / R2-2). Entries must be absolute or `~`-prefixed — a relative
+    # path would resolve against the hook's launch cwd and is skipped. Both lists
+    # are hand-edited; Neurobase never writes this file.
+    auto_enable_roots: list[str] = field(default_factory=list)
+    denylist: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # A scalar string, or a non-list/non-str-element value, must never mis-scope
+        # a hook — coerce before anything downstream iterates these (review R2-1).
+        self.auto_enable_roots = _as_str_list(self.auto_enable_roots)
+        self.denylist = _as_str_list(self.denylist)
+
+
 @dataclass
 class Config:
     store: StoreConfig = field(default_factory=StoreConfig)
@@ -117,6 +157,7 @@ class Config:
     redact: RedactConfig = field(default_factory=RedactConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
     recommend: RecommendConfig = field(default_factory=RecommendConfig)
+    enable: EnableConfig = field(default_factory=EnableConfig)
 
 
 def config_path() -> Path:
@@ -142,4 +183,5 @@ def load_config(path: Path | None = None) -> Config:
         redact=RedactConfig(**data.get("redact", {})),
         mcp=McpConfig(**data.get("mcp", {})),
         recommend=RecommendConfig(**data.get("recommend", {})),
+        enable=EnableConfig(**data.get("enable", {})),
     )

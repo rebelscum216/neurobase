@@ -436,6 +436,56 @@ def test_accept_post_when_already_up_to_date_is_a_no_op(
     assert accepted_after == accepted_before
 
 
+def test_accept_post_records_acceptance_when_installed_but_unrecorded(
+    client: TestClient, app: Starlette, seed: Seed
+) -> None:
+    """ADR-0020 D40, the web UI's half of review F2: after a drift-repair
+    `revert` the artifact can be back to exactly the rendered bytes, and the
+    POST must then record acceptance rather than short-circuit on "already up
+    to date" — which is what stranded the proposal as `proposed` with a live
+    artifact before."""
+    from neurobase.webui import routes as webui_routes
+
+    doc = proposals.load_proposal(seed.root, seed.accepted_slug)
+    assert doc is not None
+    installed = Path(str(doc.get("installed_path")))
+    rendered = installed.read_bytes()
+
+    # Drift, repair the record, then restore the bytes: installed-but-unrecorded.
+    installed.write_text("hand-edited", encoding="utf-8")
+    proposals.revert_proposal(seed.root, seed.accepted_slug)
+    installed.write_bytes(rendered)
+    assert proposals.load_proposal(seed.root, seed.accepted_slug).get("status") == "proposed"  # type: ignore[union-attr]
+
+    backups_dir = seed.root / "backups"
+    backups_before = sorted(backups_dir.iterdir()) if backups_dir.exists() else []
+    preview = install.prepare_install(seed.root, seed.accepted_slug, target="project")
+    assert preview.already_up_to_date and preview.records_acceptance
+
+    response = client.post(
+        f"/suggestions/{seed.accepted_slug}/accept",
+        data={
+            "csrf_token": app.state.csrf_token,
+            "target": "project",
+            "fingerprint": webui_routes._preview_fingerprint(preview),
+        },
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "recorded+the+acceptance" in response.headers["location"]
+    after = proposals.load_proposal(seed.root, seed.accepted_slug)
+    assert after is not None and after.get("status") == "accepted"
+    assert after.get("installed_path") == str(installed)
+    # Recorded, never rewritten: identical bytes, no new backup.
+    assert installed.read_bytes() == rendered
+    assert (sorted(backups_dir.iterdir()) if backups_dir.exists() else []) == backups_before
+    assert proposals.artifact_state(seed.root, after, seed.accepted_slug) == (
+        proposals.ARTIFACT_HEALTHY
+    )
+
+
 # --- reject ---------------------------------------------------------------------
 
 

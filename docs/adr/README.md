@@ -50,6 +50,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0017](0017-egress-policy-gate.md) | Central egress policy — one `authorize_egress()` gate every brain call passes (D32–D35) | Accepted | Hardening §9 |
 | [0018](0018-hook-receipts-degraded-state.md) | Hook receipts and degraded-state reporting — make fail-soft visible (D36–D38) | Accepted | Hardening §10 |
 | [0019](0019-webui-surface.md) | Web UI — loopback server as a peer presentation layer (spec §14) | Accepted | Web UI Phase 1 |
+| [0020](0020-revert-drift-repair-only.md) | `recommend revert` is drift repair only, not an un-accept (D39–D40; revises ADR-0007 lifecycle) | Proposed | G2 / review F1–F4 |
 
 ADRs 0016–0018 are the three **Phase-0** decisions promoted from the
 [hardening plan](../notes/2026-07-21-hardening-plan-draft.md) (per the

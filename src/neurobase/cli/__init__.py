@@ -1023,12 +1023,15 @@ def recommend_revert(
     yes: bool = typer.Option(False, "--yes", "-y"),
     root: str | None = typer.Option(None, "--root"),
 ) -> None:
-    """Undo an acceptance: return an accepted proposal to the review queue (G2).
+    """Repair drift: return an accepted proposal whose artifact is gone or changed
+    to the review queue (G2, ADR-0020).
 
     Flips `status: accepted` → `proposed` and clears the recorded `installed_path`,
-    so a proposal whose artifact you removed or replaced by hand no longer reads
-    `accepted` out of sync with disk. The installed file itself is left untouched —
-    revert corrects the store's record, it does not uninstall.
+    so a proposal whose artifact you removed or edited by hand no longer reads
+    `accepted` out of sync with disk. Allowed *only* on that drift: an artifact
+    still installed and unchanged since acceptance is refused, because revert is
+    not an uninstall — it never deletes or rewrites the file. Remove the artifact
+    by hand first if that is what you meant.
     """
     resolved_root = store.resolve_root(root)
     handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
@@ -1045,13 +1048,33 @@ def recommend_revert(
             err=True,
         )
         raise typer.Exit(code=1)
+    # Refuse a non-drifted artifact before prompting, not after. This is the
+    # same verdict `revert_proposal` reaches on its own — it re-classifies at
+    # write time, so a healthy artifact cannot slip through even if it is
+    # restored between this check and the write (ADR-0020 D39).
+    state = proposals.artifact_state(handle.root, doc, slug)
+    refusal = proposals.revert_refusal(slug, doc, state)
+    if refusal is not None:
+        typer.secho(refusal, fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     installed = doc.get("installed_path")
-    if installed:
-        typer.echo(f"Recorded install: {installed}  (left on disk — revert does not delete it)")
+    if state == proposals.ARTIFACT_MISSING:
+        typer.echo(f"Recorded install {installed} is missing — the record is stale.")
+    elif state == proposals.ARTIFACT_MODIFIED:
+        typer.echo(
+            f"Recorded install {installed} has changed since it was accepted "
+            "(left on disk — revert does not delete it)."
+        )
+    elif state == proposals.ARTIFACT_UNRECORDED:
+        typer.echo("This proposal reads accepted with no recorded install path.")
     if not yes and not typer.confirm(f"Revert proposal {slug} to proposed?"):
         typer.echo("Aborted — no changes made.")
         return
-    proposals.revert_proposal(handle.root, slug)
+    try:
+        proposals.revert_proposal(handle.root, slug)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(f"Reverted proposal {slug} to proposed.")
 
 
@@ -1083,7 +1106,20 @@ def recommend_accept(
         raise typer.Exit(code=1) from exc
     artifact = preview.artifact
     if preview.already_up_to_date:
-        typer.echo("Already up to date.")
+        if not preview.records_acceptance:
+            typer.echo("Already up to date.")
+            return
+        # ADR-0020 D40: installed but unrecorded. Nothing to write or back up,
+        # but acceptance is still recordable — and without this the state a
+        # drift-repair `revert` leaves behind could never be re-accepted at all
+        # (review F2). Consent is still asked for: it changes the store's record
+        # of what is installed and sets the hash later drift is measured against.
+        typer.echo(f"{artifact.path} already matches the rendered artifact — nothing to write.")
+        if not yes and not typer.confirm(f"Record acceptance of proposal {slug}?"):
+            typer.echo("Aborted — no changes made.")
+            return
+        recorded = install.record_acceptance(handle.root, preview)
+        typer.echo(f"Accepted proposal {slug}: {recorded.path} (already installed; recorded only)")
         return
     if artifact.foreign:
         typer.secho("Warning: target is not Neurobase-owned and will be replaced.", fg="yellow")

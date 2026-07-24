@@ -140,9 +140,103 @@ def test_prepare_install_no_op_after_commit(tmp_path: Path) -> None:
     second = install.prepare_install(root, slug)
     assert second.already_up_to_date is True
     assert second.artifact.before == second.artifact.after
+    # ADR-0020 D40: already `accepted`, so this stays a plain no-op — there is
+    # nothing to write AND nothing to record.
+    assert second.records_acceptance is False
+
+
+# --- ADR-0020 D40: installed-but-unrecorded ------------------------------------
+
+
+def test_prepare_install_flags_a_matching_artifact_the_record_does_not_claim(
+    tmp_path: Path,
+) -> None:
+    """The state a drift-repair `revert` leaves behind: the artifact matches the
+    render byte-for-byte but the proposal reads `proposed`. That is recordable
+    without a write — the alternative (review F2) strands it forever."""
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    _register(root, repo)
+    slug = "prefer-uv-run"
+    proposals.write_ranked(root, [_rule_candidate(slug)])
+    installed = repo / "AGENTS.md"
+    install.commit_install(root, install.prepare_install(root, slug))
+    rendered = installed.read_bytes()
+    installed.write_text("hand-edited", encoding="utf-8")
+    proposals.revert_proposal(root, slug)
+    installed.write_bytes(rendered)
+
+    preview = install.prepare_install(root, slug)
+
+    assert preview.already_up_to_date is True
+    assert preview.records_acceptance is True
+
+    result = install.record_acceptance(root, preview)
+
+    assert result.backup_dir is None
+    assert installed.read_bytes() == rendered  # recorded, never rewritten
+    doc = proposals.load_proposal(root, slug)
+    assert doc is not None and doc.get("status") == "accepted"
+    assert proposals.artifact_state(root, doc, slug) == proposals.ARTIFACT_HEALTHY
+
+
+def test_record_acceptance_refuses_a_preview_that_is_not_recordable(
+    tmp_path: Path,
+) -> None:
+    """The two accept outcomes must never be confusable at a call site: a
+    preview with real bytes to write is a `commit_install`, not a record."""
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    _register(root, repo)
+    slug = "prefer-uv-run"
+    proposals.write_ranked(root, [_rule_candidate(slug)])
+
+    preview = install.prepare_install(root, slug)
+
+    assert preview.records_acceptance is False
+    with pytest.raises(ValueError, match="not in a recordable state"):
+        install.record_acceptance(root, preview)
+    assert not (repo / "AGENTS.md").exists()
+    assert proposals.ledger_history(root, slug)[-1]["event"] == "proposed"
 
 
 # --- foreign-target detection ---------------------------------------------------
+
+
+def test_a_matching_foreign_target_is_never_silently_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0020 D40's exclusion. A file Neurobase does not own must not become
+    an "acceptance" just because its bytes happen to match — recording it would
+    hand ownership (and a later overwrite-on-accept) to a file the user wrote.
+    The renderer is stubbed because a genuinely foreign file cannot normally
+    carry our ownership markers, which is what makes this defence-in-depth."""
+    from neurobase.recommender import emitters
+
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    _register(root, repo)
+    slug = "prefer-uv-run"
+    proposals.write_ranked(root, [_rule_candidate(slug)])
+    identical = "same bytes on both sides"
+    monkeypatch.setattr(
+        install.emitters,
+        "prepare",
+        lambda *a, **k: emitters.Artifact(
+            path=repo / "AGENTS.md",
+            before=identical,
+            after=identical,
+            target="AGENTS.md",
+            foreign=True,
+        ),
+    )
+
+    preview = install.prepare_install(root, slug)
+
+    assert preview.already_up_to_date is True
+    assert preview.records_acceptance is False
+    with pytest.raises(ValueError, match="not in a recordable state"):
+        install.record_acceptance(root, preview)
 
 
 def test_prepare_install_surfaces_foreign_target_without_writing(tmp_path: Path) -> None:

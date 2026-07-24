@@ -191,36 +191,35 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
 
 ### G2 — accepted-proposal state can drift from disk; there is no revert path
 
-- **status:** in progress (2026-07-23) — a first `recommend revert` landed
-  (`cb40448`) but Codex review (`docs/reviews/2026-07-23-g2-g3-recommender-fixes.md`)
-  found it reopens the very drift §12.7 forbids: on a **healthy** (present,
-  unmodified) artifact, `accept → revert → reject` orphans the installed file
-  (F1), and `accept → revert → accept` is a no-op that can't restore acceptance
-  (F2). Redesign underway: **revert becomes drift-repair-only** — allowed only when
-  the recorded artifact is missing or its content no longer matches the accept-time
-  `installed_hash`. That closes both (a healthy artifact is non-revertable; a
-  drifted one always re-writes on re-accept) and needs an ADR revising ADR-0007's
-  lifecycle (F4). The shipped `revert` command + `revert_proposal` + spec §12.7
-  edits + tests are on the branch but are being reworked, not final.
-- **severity:** minor — nothing corrupts, but the store's view of the present is
-  wrong: a proposal stays `accepted` with a dangling `installed_path` after its
-  artifact is removed by hand, and §12.7 makes reject-on-accepted a hard error,
-  so there is no sanctioned way back.
+- **status:** fixed (2026-07-24, ADR-0020) — `recommend revert` is now
+  **drift-repair-only**: allowed on an `accepted` proposal only when its artifact
+  is *missing*, *modified* (bytes ≠ accept-time `installed_hash`), or *unrecorded*,
+  and refused on a *healthy* or *unverifiable* one. That closes the round-1
+  findings in `docs/reviews/2026-07-23-g2-g3-recommender-fixes.md`: F1 (a healthy
+  artifact is non-revertable, so `accept → revert → reject` cannot start and can
+  never orphan a live file) and F2 (a matching-but-unrecorded artifact records
+  acceptance without a write, so re-accept after a revert is reachable — ADR-0020
+  D40). The drift predicate `proposals.artifact_state` is shared with §12.9's
+  survival check. Regressions drive the *real* install service through the CLI and
+  the web UI POST (the gap that let F1/F2 pass round 1). A real un-accept
+  (uninstall of a healthy artifact) remains deferred, exactly as ADR-0007 left it.
+- **severity:** minor — nothing corrupts, but the store's view of the present was
+  wrong: a proposal stayed `accepted` with a dangling `installed_path` after its
+  artifact was removed by hand, and §12.7 makes reject-on-accepted a hard error,
+  so there was no sanctioned way back.
 - **found:** 2026-07-16 by Andrew (live browser smoke of Web UI Phase 1 —
   accepted `surgical-git-staging`, then deleted the installed SKILL.md; the
   proposal still reads `accepted`).
 
 **Detail.** Accept records `status: accepted`, `installed_path`, and a ledger
 `accepted` event with `installed_hash` (ADR-0011). The survival metric already
-distinguishes missing/modified artifacts, but `recommend list`/`show` and the
-web UI render `accepted` with no drift signal, and no command un-accepts. The
-ledger is honest about history; the proposal frontmatter is wrong about now.
-
-**Direction.** Either a consent-gated `recommend revert <slug>` (flips status,
-appends a ledger event, never deletes the artifact itself) or drift annotation
-on every read surface (the app-shell plan's Phase S gallery renders
-`installed` / `missing on disk` / `modified` honestly — but rendering is not a
-fix). Needs a small §12 note either way.
+distinguished missing/modified artifacts; `revert` now reuses that same
+classification (`proposals.artifact_state`) so the record can be made honest —
+`proposed`, no `installed_path` — precisely when the artifact no longer matches
+what acceptance recorded. `recommend list`/`show` and the web UI rendering an
+explicit drift signal (the app-shell plan's Phase S gallery) is still worthwhile
+polish, but is no longer load-bearing: the store can now be corrected, not just
+annotated.
 
 ---
 

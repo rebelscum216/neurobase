@@ -43,7 +43,6 @@ precision:
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -149,17 +148,11 @@ def compute_metrics(
 
 
 def _latest_accepted_event(root: Path, slug: str) -> dict[str, Any] | None:
-    """The most recent ``accepted`` ledger event for ``slug`` — a proposal can
-    be re-accepted (accept is idempotent, §12.7), so there may be more than
-    one. ``None`` when there is no resolvable ``accepted`` event at all."""
-    candidates = [
-        (event, when)
-        for event in proposals.ledger_history(root, slug)
-        if event.get("event") == "accepted" and (when := _parse_iso(event.get("at"))) is not None
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda pair: pair[1])[0]
+    """The most recent ``accepted`` ledger event for ``slug``. Delegates to
+    ``proposals.latest_accepted_event``, which ``revert``'s drift guard also
+    uses (ADR-0020) — one definition of "the current acceptance", so survival
+    and revert can never disagree about which event they are checking."""
+    return proposals.latest_accepted_event(root, slug)
 
 
 def _survival_one(
@@ -176,7 +169,11 @@ def _survival_one(
     if the event recorded an ``installed_hash`` that no longer matches the
     file's current bytes; ``"survived"`` otherwise. A ledger event that
     predates the ``installed_hash`` feature (a legacy proposal, D2) falls back
-    to existence-only — it cannot detect modification, only presence."""
+    to existence-only — it cannot detect modification, only presence.
+
+    The disk comparison itself is ``proposals.artifact_state`` (ADR-0020), the
+    same classification ``revert``'s drift guard consults; this function only
+    adds §12.9's time window and the metric's own vocabulary on top."""
     event = _latest_accepted_event(root, slug)
     if event is None:
         return "insufficient_data"
@@ -187,21 +184,13 @@ def _survival_one(
     if elapsed_days < window_days:
         return "insufficient_data"
 
-    installed_path = doc.get("installed_path")
-    if not isinstance(installed_path, str) or not installed_path:
+    state = proposals.artifact_state(root, doc, slug)
+    if state == proposals.ARTIFACT_UNRECORDED:
         return "insufficient_data"
-    path = Path(installed_path)
-    if not path.exists():
+    if state in {proposals.ARTIFACT_MISSING, proposals.ARTIFACT_MODIFIED}:
         return "not_survived"
-
-    installed_hash = event.get("installed_hash")
-    if isinstance(installed_hash, str) and installed_hash:
-        try:
-            current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            return "not_survived"
-        return "survived" if current_hash == installed_hash else "not_survived"
-    # Legacy accepted event with no stored hash: existence-only fallback (D2).
+    # `healthy` (hash matches) and `unverifiable` (legacy event with no stored
+    # hash — existence-only fallback, D2) both count as survived.
     return "survived"
 
 

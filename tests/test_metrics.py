@@ -569,6 +569,9 @@ def test_reverted_proposal_drops_out_of_metrics(tmp_path: Path) -> None:
     before = metrics.compute_metrics(root, now=NOW)
     assert before.accepted == 1 and before.decided == 1
 
+    # Revert is drift repair only (ADR-0020) — the artifact has to have actually
+    # drifted for there to be anything to repair.
+    installed.unlink()
     proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
 
     after = metrics.compute_metrics(root, now=NOW + timedelta(minutes=2))

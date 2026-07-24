@@ -1546,7 +1546,7 @@ accumulates.
 | `recommend edit <slug>` | — | Opens `$EDITOR` (or, non-interactively, prints for redirection) on the proposal body/draft; on save, overwrites body/draft and appends an `edited` ledger event | Writes proposal file + ledger only; `status` unchanged |
 | `recommend accept <slug>` | `[--target user\|project]` `[--yes]` | Renders the artifact (§12.8), diffs against the current target, asks consent (`--yes` skips the prompt, never the diff), backs up touched files, writes, flips `status: accepted`, sets `installed_path` (and, for `type: skill`, resolves `target` to the scope actually used), appends `accepted` | Writes artifact(s) + proposal + ledger; backup first (workstream F: "accept requires consent unless `--yes`") |
 | `recommend reject <slug>` | `[--reason TEXT]` | Flips `status: rejected`, records `reason`, appends `rejected` | Writes proposal + ledger only (workstream F: "reject updates proposal + ledger") |
-| `recommend revert <slug>` | `[--yes]` | Only on an `accepted` proposal: flips `status: accepted` → `proposed`, clears `installed_path`, appends `reverted`. The installed artifact is **never deleted** — revert corrects the store record, it does not uninstall (G2) | Writes proposal + ledger only; consent-gated (`--yes` skips the prompt) |
+| `recommend revert <slug>` | `[--yes]` | **Drift repair only** (ADR-0020): on an `accepted` proposal whose artifact is *missing, modified, or unrecorded*, flips `status: accepted` → `proposed`, clears `installed_path`, appends `reverted` (carrying the drift `reason`). A healthy (present + unchanged) or unverifiable artifact is refused. The installed artifact is **never deleted** — revert corrects the store record, it does not uninstall (G2) | Writes proposal + ledger only; consent-gated (`--yes` skips the prompt) |
 | `status --recommender` | — | Prints precision, edited rate, survival, recurrence-reduction, or "insufficient data" per §12.9 | Read-only; may opportunistically refresh a survival check |
 
 `--target` is meaningful only for `type: skill` proposals (it selects
@@ -1570,18 +1570,31 @@ named-status CLI error" to workstream F's test list before this ships):**
   `reject` must not be usable as a backdoor that flips an accepted proposal's
   metadata to `rejected` while the real installed artifact sits untouched and
   now out of sync with its own proposal record.
-- `revert` is the sanctioned way back from `accepted` that the blocked `reject`
-  rule above leaves open (G2). It is allowed **only** on an `accepted` proposal
-  (any other status is a hard, named-status CLI error) and flips it back to
-  `proposed` — the review queue — while clearing `installed_path`. Crucially it
-  is *not* an uninstall: it never deletes or rewrites the artifact on disk, so it
-  is not the `reject`-backdoor the rule above forbids. It repairs the specific
-  drift where the store still reads `accepted` but the user has removed or
-  replaced the installed file by hand: the record becomes honest (`proposed`, no
-  `installed_path`), the ledger keeps the full proposed→accepted→reverted history,
-  and the survival/precision metrics — which key on current status, not the
-  ledger (§12.9) — drop it cleanly. A reverted proposal can be re-`accept`ed
-  (re-installs) or `reject`ed (retires) like any other `proposed` one.
+- `revert` is the sanctioned way back from `accepted` — but **drift repair
+  only, never an un-accept** (ADR-0020, G2). It is allowed on an `accepted`
+  proposal *only* when the recorded acceptance is demonstrably no longer true of
+  disk: the artifact is **missing** (recorded `installed_path` no longer reads),
+  **modified** (present but its bytes no longer match the latest `accepted`
+  event's `installed_hash`, ADR-0011), or **unrecorded** (`accepted` with no
+  `installed_path`). On any of those it flips back to `proposed` — the review
+  queue — clears `installed_path`, and appends a `reverted` event carrying the
+  drift `reason`. A **healthy** artifact (present and byte-identical to the
+  recorded hash) is a hard, named error, and so is an **unverifiable** one
+  (present but from a pre-`installed_hash` acceptance, where drift cannot be
+  proven — the same events §12.9 survival treats existence-only). Any non-
+  `accepted` status is a hard, named-status error as before. Crucially revert is
+  *not* an uninstall: it never deletes or rewrites the artifact on disk, so it is
+  not the `reject`-backdoor the rule above forbids — and because a healthy
+  artifact is non-revertable, the `accept → revert → reject` sequence that would
+  orphan a live managed file cannot even begin. To retire a *healthy* accepted
+  proposal, remove the artifact by hand first (it then reads `missing`), then
+  `revert` and `reject`. The ledger keeps the full proposed→accepted→reverted
+  history, and the survival/precision metrics — which key on current status, not
+  the ledger (§12.9) — drop a reverted proposal cleanly. A reverted proposal can
+  be re-`accept`ed (reinstalls) or `reject`ed (retires) like any other
+  `proposed` one. The drift classification is one predicate,
+  `proposals.artifact_state`, shared with §12.9's survival check so "drifted
+  enough to revert" and "not survived" can never diverge.
 - `accept` on an already-`accepted` proposal is the one case that stays
   allowed — re-running it re-renders the artifact and re-diffs against
   whatever is on disk now, which is what makes the no-op rule below possible
@@ -1592,8 +1605,17 @@ named-status CLI error" to workstream F's test list before this ships):**
   acceptance.
 
 If the rendered artifact is already byte-for-byte identical to what
-`accept` would write, `accept` is a no-op: it reports "already up to date"
-and performs no backup, no write, and no ledger event (`status` unchanged).
+`accept` would write, `accept`'s behavior depends on the proposal's own record
+(ADR-0020 D40): if it already reads `accepted`, this is the idempotent no-op —
+"already up to date", no backup, no write, no ledger event, `status` unchanged.
+If it does *not* (the installed-but-unrecorded state a drift-repair `revert`
+leaves behind once the user restores the bytes, and the target is
+Neurobase-owned), `accept` records the acceptance — stamping `status: accepted`,
+`installed_path`, and a fresh `installed_hash` — while still writing and backing
+up nothing. This is what makes re-acceptance reachable after a revert; without
+it a reverted proposal whose artifact was restored would be stranded `proposed`
+forever. A **foreign** target (a file Neurobase never owned) is excluded from
+this path — matching bytes never silently claim ownership of a user's own file.
 
 ### 12.8 Artifact emitters (`recommender/emit_skill.py`, `recommender/emit_rules.py`)
 
@@ -1782,8 +1804,10 @@ behavior" in one place without re-reading the whole section.
 | `accept`/`edit` on `rejected`/`superseded` | Hard CLI error naming the blocking status; never reopened | §12.7 |
 | `reject` on `accepted`/`rejected`/`superseded` | Hard CLI error naming the blocking status; no v1 uninstall-by-reject | §12.7 |
 | `revert` on any non-`accepted` status | Hard CLI error naming the blocking status; revert is defined only on `accepted` | §12.7 |
-| `revert` on an `accepted` proposal | Flips to `proposed`, clears `installed_path`, appends `reverted`; never deletes the artifact on disk | §12.7 (G2) |
-| `accept` with an unchanged diff | No-op, "already up to date," no write, no backup, no ledger event | §12.7 |
+| `revert` on an `accepted` proposal whose artifact is missing/modified/unrecorded | Flips to `proposed`, clears `installed_path`, appends `reverted` (with drift `reason`); never deletes the artifact on disk | §12.7, ADR-0020 (G2) |
+| `revert` on an `accepted` proposal whose artifact is healthy or unverifiable | Hard CLI error — revert is drift repair, not an uninstall; remove the artifact by hand first | §12.7, ADR-0020 |
+| `accept` with an unchanged diff, proposal already `accepted` | No-op, "already up to date," no write, no backup, no ledger event | §12.7 |
+| `accept` with an unchanged diff, proposal `proposed` + Neurobase-owned target | Records acceptance (status/`installed_path`/`installed_hash`), no write, no backup — the installed-but-unrecorded case | §12.7, ADR-0020 |
 | `accept --target project` with no `project` on the proposal | Hard CLI error; never guesses a project | §12.8 |
 | `accept` where `proposal.project` no longer exists in `registry.toml` | Hard CLI error naming the stale project; never a bare `KeyError` | §12.8 |
 | `accept` onto a foreign (non-Neurobase) SKILL.md, including one with unparseable frontmatter | Treated as "not owned"; written only through the single diff/consent/backup gate, diff view calls it out explicitly | §12.8 |

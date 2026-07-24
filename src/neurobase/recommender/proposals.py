@@ -34,6 +34,7 @@ Write behavior (§12.6), each a MUST unless flagged Advisory:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -432,13 +433,22 @@ def read_ledger(root: Path) -> list[dict[str, Any]]:
 
 
 def _append_ledger(
-    root: Path, slug: str, event: str, at_iso: str, candidate_type: str | None
+    root: Path,
+    slug: str,
+    event: str,
+    at_iso: str,
+    candidate_type: str | None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Append one ledger event line (§12.2). A ``proposed`` write records
-    ``candidate_type`` for the miner's later per-type reject summary (§12.5)."""
+    ``candidate_type`` for the miner's later per-type reject summary (§12.5);
+    ``extra`` carries event-specific keys (a ``reverted`` event's drift
+    ``reason``, ADR-0020) without every caller reimplementing the append."""
     record: dict[str, Any] = {"at": at_iso, "slug": slug, "event": event}
     if candidate_type is not None:
         record["candidate_type"] = candidate_type
+    if extra:
+        record.update(extra)
     path = ledger_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -556,22 +566,93 @@ def accept_proposal(
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def revert_proposal(root: Path, slug: str, *, now: datetime | None = None) -> str:
-    """Undo an acceptance (§12.7, G2): flip an ``accepted`` proposal back to
-    ``proposed`` and clear its now-dangling ``installed_path``, appending exactly
-    one ``reverted`` ledger event. Returns the prior status (always ``"accepted"``
-    on success).
+# --- artifact state: is an acceptance still true of disk? (ADR-0020) --------
 
-    The installed artifact on disk is **never touched** — revert is a store-state
-    correction, not an uninstall (v1 has no uninstall-by-command; ADR-0007). It
-    exists precisely for the drift the blocked ``reject``-on-``accepted`` rule
-    otherwise leaves unrepairable: a proposal reading ``accepted`` whose artifact
-    the user has removed or replaced by hand. Returning it to ``proposed`` puts it
-    back in the review queue (re-``accept`` re-installs, ``reject`` retires it) and,
-    because the survival/precision metrics key on current frontmatter status not
-    the ledger (§12.9), removes it from those metrics cleanly while the ledger keeps
-    the full proposed→accepted→reverted history. Only an ``accepted`` proposal can
-    be reverted."""
+#: The artifact states an accepted proposal's record can be in. ``unrecorded``
+#: means the proposal claims ``accepted`` with no ``installed_path`` at all;
+#: ``unverifiable`` means the file is present but its acceptance predates
+#: ``installed_hash`` (ADR-0011), so modification cannot be detected — only
+#: presence, exactly the fallback ``metrics._survival_one`` uses.
+ARTIFACT_UNRECORDED = "unrecorded"
+ARTIFACT_MISSING = "missing"
+ARTIFACT_MODIFIED = "modified"
+ARTIFACT_UNVERIFIABLE = "unverifiable"
+ARTIFACT_HEALTHY = "healthy"
+
+#: The states in which the recorded acceptance is demonstrably no longer true of
+#: disk, and only these — a ``revert`` in any other state would drop ownership
+#: metadata for an artifact that may still be live (ADR-0020 D39, review F1).
+REVERTABLE_ARTIFACT_STATES = frozenset({ARTIFACT_UNRECORDED, ARTIFACT_MISSING, ARTIFACT_MODIFIED})
+
+
+def latest_accepted_event(root: Path, slug: str) -> dict[str, Any] | None:
+    """The most recent ``accepted`` ledger event for ``slug`` — a proposal can
+    be re-accepted (accept is idempotent, §12.7), so there may be more than
+    one. ``None`` when there is no resolvable ``accepted`` event at all. Shared
+    by ``metrics``'s survival check and ``revert_proposal``'s drift guard so the
+    two can never disagree about which acceptance is the current one."""
+    candidates = [
+        (event, when)
+        for event in ledger_history(root, slug)
+        if event.get("event") == "accepted" and (when := _parse_iso(event.get("at"))) is not None
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda pair: pair[1])[0]
+
+
+def artifact_state(root: Path, doc: store.Document, slug: str) -> str:
+    """Classify an accepted proposal's artifact against the record its
+    acceptance left behind (ADR-0020 D39). Same comparison
+    ``metrics._survival_one`` makes — the recorded ``installed_path`` plus the
+    latest ``accepted`` event's ``installed_hash`` — reused rather than
+    reimplemented, so "drifted enough to revert" and "not survived" can never
+    mean different things."""
+    installed_path = doc.get("installed_path")
+    if not isinstance(installed_path, str) or not installed_path:
+        return ARTIFACT_UNRECORDED
+    try:
+        current = Path(installed_path).read_bytes()
+    except OSError:
+        # Absent, unreadable, or not a regular file — either way the bytes
+        # acceptance recorded are not there to be orphaned.
+        return ARTIFACT_MISSING
+    event = latest_accepted_event(root, slug)
+    installed_hash = event.get("installed_hash") if event is not None else None
+    if not isinstance(installed_hash, str) or not installed_hash:
+        return ARTIFACT_UNVERIFIABLE
+    if hashlib.sha256(current).hexdigest() == installed_hash:
+        return ARTIFACT_HEALTHY
+    return ARTIFACT_MODIFIED
+
+
+def revert_proposal(root: Path, slug: str, *, now: datetime | None = None) -> str:
+    """Repair the drift where the store still reads ``accepted`` but the
+    installed artifact is no longer what acceptance recorded (§12.7, G2,
+    ADR-0020): flip the proposal back to ``proposed``, clear its now-dangling
+    ``installed_path``, and append exactly one ``reverted`` ledger event
+    carrying the drift ``reason``. Returns the prior status (always
+    ``"accepted"`` on success).
+
+    **Drift repair only — never an un-accept.** ``revert`` is allowed only when
+    ``artifact_state`` is ``missing``, ``modified``, or ``unrecorded``. A
+    ``healthy`` artifact (present, byte-identical to the accept-time
+    ``installed_hash``) is refused, and so is an ``unverifiable`` one (present,
+    but from a pre-``installed_hash`` acceptance, so drift cannot be proven).
+    That boundary is load-bearing, not conservatism: with it removed,
+    ``accept → revert → reject`` would leave a live Neurobase-managed artifact
+    installed under a ``rejected`` proposal — precisely the orphaning that
+    §12.7's blocked ``reject``-on-``accepted`` rule exists to prevent (review
+    F1). It also keeps re-acceptance reachable, since every revertable state
+    means the render no longer matches disk (review F2).
+
+    The artifact itself is still **never touched** on any path — v1 has no
+    uninstall-by-command (ADR-0007, unchanged). To retire a healthy artifact,
+    remove it by hand first; the proposal then reads ``missing`` and reverts.
+    Because the survival/precision metrics key on current frontmatter status
+    rather than the ledger (§12.9), a reverted proposal drops out of them
+    cleanly while the ledger keeps the full proposed→accepted→reverted
+    history."""
     doc = load_proposal(root, slug)
     if doc is None:
         raise ValueError(f"proposal {slug!r} not found or malformed")
@@ -581,14 +662,45 @@ def revert_proposal(root: Path, slug: str, *, now: datetime | None = None) -> st
             f"cannot revert proposal {slug!r}: status is {status} "
             "(only an accepted proposal can be reverted)"
         )
+    state = artifact_state(root, doc, slug)
+    refusal = revert_refusal(slug, doc, state)
+    if refusal is not None:
+        raise ValueError(refusal)
     stamp = _iso(now if now is not None else datetime.now(UTC))
     frontmatter = dict(doc.frontmatter)
     frontmatter["status"] = "proposed"
     frontmatter["installed_path"] = None
     frontmatter["updated_at"] = stamp
     store.write_doc(doc.file_path, frontmatter, doc.body)
-    _append_ledger(root, slug, "reverted", stamp, None)
+    _append_ledger(root, slug, "reverted", stamp, None, {"reason": state})
     return status
+
+
+def revert_refusal(slug: str, doc: store.Document, state: str) -> str | None:
+    """The named-state error for a revert the drift guard refuses, or ``None``
+    when ``state`` is revertable. Both refusals say what to do next, since
+    "remove the artifact first" is the sanctioned route to the un-accept revert
+    deliberately is not.
+
+    Public so the CLI can refuse *before* prompting for consent rather than
+    after; ``revert_proposal`` remains the authority and re-checks at write
+    time, so a CLI that skipped this would still be safe."""
+    if state in REVERTABLE_ARTIFACT_STATES:
+        return None
+    where = doc.get("installed_path") or "its installed artifact"
+    if state == ARTIFACT_UNVERIFIABLE:
+        return (
+            f"cannot revert proposal {slug!r}: {where} is still installed and its "
+            "acceptance predates content hashing, so drift cannot be verified. "
+            "revert repairs drift — it is not an uninstall (ADR-0020). Remove the "
+            "artifact by hand first if you no longer want it."
+        )
+    return (
+        f"cannot revert proposal {slug!r}: {where} is still installed and unchanged "
+        "since it was accepted. revert repairs drift — it is not an uninstall "
+        "(ADR-0020). Remove or edit the artifact by hand first if you no longer "
+        "want it."
+    )
 
 
 # --- body rendering + redaction ---------------------------------------------

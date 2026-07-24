@@ -333,31 +333,176 @@ def test_status_recommender_on_populated_ledger_prints_real_numbers(tmp_path: Pa
     assert "prefer-uv-run: insufficient data" in result.output
 
 
-# --- G2: recommend revert ----------------------------------------------------
+# --- G2 / ADR-0020: recommend revert -----------------------------------------
+#
+# Every test below drives the REAL `recommend accept` — which renders through
+# `emitters.prepare`, writes the artifact, and records the hash later drift is
+# measured against. Review F2 got past the first round precisely because the
+# original tests called `accept_proposal` directly and so never met
+# `prepare_install`'s no-op path; calling the command is the point.
 
 
-def _accept_for_revert(root: Path) -> None:
-    proposals.accept_proposal(
-        root, "prefer-uv-run", target="AGENTS.md", installed_path=Path("/repo/AGENTS.md")
+def _accept_via_cli(tmp_path: Path, root: Path) -> Path:
+    """Register a project, propose, and really accept — returning the installed
+    artifact's path."""
+    from neurobase.core import projects
+
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    projects.register_project(root, repo, slug="neurobase")
+    proposals.write_ranked(root, [_ranked()])
+    result = runner.invoke(
+        app, ["recommend", "accept", "prefer-uv-run", "--root", str(root), "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    installed = repo / "AGENTS.md"
+    assert installed.exists()
+    return installed
+
+
+def _status(root: Path) -> str | None:
+    doc = proposals.load_proposal(root, "prefer-uv-run")
+    assert doc is not None
+    status = doc.get("status")
+    return str(status) if status is not None else None
+
+
+def _revert(root: Path, *, extra: list[str] | None = None, stdin: str | None = None):  # type: ignore[no-untyped-def]
+    return runner.invoke(
+        app,
+        ["recommend", "revert", "prefer-uv-run", "--root", str(root), *(extra or [])],
+        input=stdin,
     )
 
 
-def test_revert_returns_accepted_proposal_to_queue(tmp_path: Path) -> None:
-    """G2: `recommend revert --yes` flips accepted→proposed, clears installed_path,
-    and records a `reverted` ledger event."""
+def test_revert_refuses_while_the_artifact_is_healthy(tmp_path: Path) -> None:
+    """ADR-0020 D39 / review F1: `accept → revert` is refused outright while the
+    installed artifact is present and unchanged, so the `accept → revert →
+    reject` sequence that would orphan a live managed file cannot even start.
+    Reject stays blocked on `accepted`, which is what makes the pair airtight."""
     root = tmp_path / "store"
-    proposals.write_ranked(root, [_ranked()])
-    _accept_for_revert(root)
+    installed = _accept_via_cli(tmp_path, root)
+
+    reverted = _revert(root, extra=["--yes"])
+    rejected = runner.invoke(app, ["recommend", "reject", "prefer-uv-run", "--root", str(root)])
+
+    assert reverted.exit_code == 1
+    assert "not an uninstall" in reverted.output
+    assert rejected.exit_code == 1
+    assert "status is accepted" in rejected.output
+    # The only two things that could contradict each other still agree.
+    assert installed.exists()
+    assert _status(root) == "accepted"
+
+
+def test_revert_after_deleting_the_artifact_then_reject_leaves_nothing_installed(
+    tmp_path: Path,
+) -> None:
+    """ADR-0020 D39: the sanctioned route to retiring an accepted proposal —
+    remove the artifact, revert the now-false record, then reject. The end state
+    is `rejected` with nothing installed, never `rejected` with a live file."""
+    root = tmp_path / "store"
+    installed = _accept_via_cli(tmp_path, root)
+    installed.unlink()
+
+    reverted = _revert(root, extra=["--yes"])
+    rejected = runner.invoke(app, ["recommend", "reject", "prefer-uv-run", "--root", str(root)])
+
+    assert reverted.exit_code == 0, reverted.output
+    assert "is missing" in reverted.output
+    assert rejected.exit_code == 0, rejected.output
+    assert _status(root) == "rejected"
+    assert not installed.exists()
+
+
+def test_revert_then_reaccept_restores_acceptance_and_reinstalls_the_block(
+    tmp_path: Path,
+) -> None:
+    """Review F2 regression, through the real install service: after repairing a
+    modified artifact's record, `accept` must be able to restore acceptance —
+    the previous shape returned "Already up to date." and left it `proposed`."""
+    root = tmp_path / "store"
+    installed = _accept_via_cli(tmp_path, root)
+    installed.write_text("the user rewrote this by hand", encoding="utf-8")
+
+    reverted = _revert(root, extra=["--yes"])
+    assert reverted.exit_code == 0, reverted.output
+    assert _status(root) == "proposed"
+
+    reaccepted = runner.invoke(
+        app, ["recommend", "accept", "prefer-uv-run", "--root", str(root), "--yes"]
+    )
+
+    assert reaccepted.exit_code == 0, reaccepted.output
+    assert _status(root) == "accepted"
+    doc = proposals.load_proposal(root, "prefer-uv-run")
+    assert doc is not None and doc.get("installed_path") == str(installed)
+    text = installed.read_text(encoding="utf-8")
+    # The managed block is back, and §12's preserve-every-other-byte rule kept
+    # the user's own text around it.
+    assert "<!-- neurobase:rule:prefer-uv-run" in text
+    assert "Always use uv run." in text
+    assert "the user rewrote this by hand" in text
+    # The freshly recorded hash describes what is actually on disk now.
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_HEALTHY
+    accepted = [
+        event
+        for event in proposals.ledger_history(root, "prefer-uv-run")
+        if event["event"] == "accepted"
+    ]
+    assert len(accepted) == 2
+
+
+def test_reaccept_records_acceptance_when_the_artifact_already_matches(
+    tmp_path: Path,
+) -> None:
+    """ADR-0020 D40: installed-but-unrecorded. The artifact was restored to
+    exactly the rendered bytes after a revert, so there is nothing to write —
+    but acceptance must still be recordable, or this proposal is stranded
+    `proposed` forever with its artifact live on disk (review F2's residue)."""
+    root = tmp_path / "store"
+    installed = _accept_via_cli(tmp_path, root)
+    rendered = installed.read_text(encoding="utf-8")
+    installed.write_text("temporarily different", encoding="utf-8")
+    assert _revert(root, extra=["--yes"]).exit_code == 0
+    installed.write_text(rendered, encoding="utf-8")
 
     result = runner.invoke(
-        app, ["recommend", "revert", "prefer-uv-run", "--yes", "--root", str(root)]
+        app, ["recommend", "accept", "prefer-uv-run", "--root", str(root), "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "already matches" in result.output
+    assert "recorded only" in result.output
+    assert _status(root) == "accepted"
+    doc = proposals.load_proposal(root, "prefer-uv-run")
+    assert doc is not None and doc.get("installed_path") == str(installed)
+    # Recorded, not rewritten: the bytes are untouched and the hash matches them.
+    assert installed.read_text(encoding="utf-8") == rendered
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_HEALTHY
+
+
+def test_reaccept_of_an_already_accepted_proposal_stays_a_pure_no_op(
+    tmp_path: Path,
+) -> None:
+    """ADR-0020 D40 keeps §12.7's idempotent-accept contract intact: when the
+    proposal already reads `accepted`, a matching render still writes nothing
+    and records nothing."""
+    root = tmp_path / "store"
+    _accept_via_cli(tmp_path, root)
+
+    result = runner.invoke(
+        app, ["recommend", "accept", "prefer-uv-run", "--root", str(root), "--yes"]
     )
 
     assert result.exit_code == 0
-    doc = proposals.load_proposal(root, "prefer-uv-run")
-    assert doc is not None and doc.get("status") == "proposed"
-    assert doc.get("installed_path") is None
-    assert proposals.ledger_history(root, "prefer-uv-run")[-1]["event"] == "reverted"
+    assert "Already up to date." in result.output
+    accepted = [
+        event
+        for event in proposals.ledger_history(root, "prefer-uv-run")
+        if event["event"] == "accepted"
+    ]
+    assert len(accepted) == 1
 
 
 def test_revert_non_accepted_is_hard_error(tmp_path: Path) -> None:
@@ -365,9 +510,7 @@ def test_revert_non_accepted_is_hard_error(tmp_path: Path) -> None:
     root = tmp_path / "store"
     proposals.write_ranked(root, [_ranked()])
 
-    result = runner.invoke(
-        app, ["recommend", "revert", "prefer-uv-run", "--yes", "--root", str(root)]
-    )
+    result = _revert(root, extra=["--yes"])
 
     assert result.exit_code == 1
     assert "status is proposed" in result.output
@@ -377,14 +520,12 @@ def test_revert_prompt_abort_makes_no_change(tmp_path: Path) -> None:
     """G2: without `--yes`, declining the consent prompt leaves the proposal
     accepted and writes nothing."""
     root = tmp_path / "store"
-    proposals.write_ranked(root, [_ranked()])
-    _accept_for_revert(root)
+    installed = _accept_via_cli(tmp_path, root)
+    installed.unlink()
 
-    result = runner.invoke(
-        app, ["recommend", "revert", "prefer-uv-run", "--root", str(root)], input="n\n"
-    )
+    result = _revert(root, stdin="n\n")
 
     assert result.exit_code == 0
     assert "Aborted" in result.output
-    doc = proposals.load_proposal(root, "prefer-uv-run")
-    assert doc is not None and doc.get("status") == "accepted"
+    assert _status(root) == "accepted"
+    assert proposals.ledger_history(root, "prefer-uv-run")[-1]["event"] == "accepted"

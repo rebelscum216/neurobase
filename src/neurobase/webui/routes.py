@@ -339,9 +339,18 @@ async def _accept_view(request: Request) -> Response:
         )
 
     if preview.already_up_to_date:
-        # Mirrors `recommend accept`'s own early return: nothing to install,
-        # so nothing is written and the proposal's decision is left as-is.
-        return _redirect_with_flash(slug, "Already up to date — nothing to install.")
+        if not preview.records_acceptance:
+            # Mirrors `recommend accept`'s own early return: the proposal is
+            # already accepted, so nothing is written and its decision stands.
+            return _redirect_with_flash(slug, "Already up to date — nothing to install.")
+        # ADR-0020 D40: the artifact is installed but the proposal doesn't say
+        # so (the state a drift-repair `revert` leaves behind). Nothing to
+        # write; record the acceptance. This POST — CSRF-checked and bound to
+        # the previewed fingerprint above — is the consent.
+        recorded = install.record_acceptance(root, preview)
+        return _redirect_with_flash(
+            slug, f"Already installed at {recorded.path} — recorded the acceptance."
+        )
 
     result = install.commit_install(root, preview)
     message = f"Accepted: installed to {result.path}."

@@ -1,11 +1,12 @@
 ---
 slug: g2-g3-recommender-fixes
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/webui-phase1-suggestions
 diff: git diff 30696a8..HEAD
 created: 2026-07-23
+round: 2
 ---
 
 # Review: G2 + G3 — recommender revert path and skill-emitter frontmatter fix
@@ -121,12 +122,20 @@ ledger-summary, and web-accept call paths. There were no prior findings.
   cannot orphan installed behavior. Add a CLI integration regression for
   `accept → revert → reject` that proves the final proposal and disk state cannot
   contradict one another.
-- **resolution:** deferred — accepted as real. Paused per Andrew (2026-07-23) to
-  redesign G2's revert as **drift-repair-only**: `revert` will be allowed only when
-  the recorded artifact is actually missing or its content no longer matches the
-  accept-time `installed_hash`. That closes this backdoor (a healthy artifact
-  becomes non-revertable) and F2 (a missing/modified artifact means re-accept
-  always re-writes). Not yet coded — see the round-2 plan.
+- **resolution:** resolved (round 2, ADR-0020 D39). `revert_proposal` now
+  classifies the artifact via the new `proposals.artifact_state` and refuses any
+  state that is not `missing`/`modified`/`unrecorded`. A **healthy** artifact
+  (present, bytes == latest `accepted` event's `installed_hash`) raises a
+  named-status `ValueError`; the CLI refuses before prompting and re-checks at the
+  write path, so a restore between check and write cannot slip through. Because
+  revert cannot start on a healthy artifact, `accept → revert → reject` cannot
+  orphan a live file — pinned by `test_revert_refuses_while_the_artifact_is_healthy`
+  (CLI: revert exits 1 "not an uninstall", reject exits 1 "status is accepted",
+  file still present, status still `accepted`) and `test_revert_refuses_a_healthy_artifact`
+  (unit). `test_artifact_state_uses_the_latest_acceptance` guards the re-accept
+  case (compare against the newest hash, not the first). Mutation-verified:
+  removing the guard, widening the revertable set, and using the oldest acceptance
+  each fail these tests.
 
 ### F2 — Re-accepting an unchanged reverted artifact cannot restore acceptance
 
@@ -151,10 +160,29 @@ ledger-summary, and web-accept call paths. There were no prior findings.
   impossible. Pin the decision with a service/CLI test that performs the real
   accept, revert, and re-accept flow and asserts final `accepted` status,
   `installed_path`, and ledger behavior.
-- **resolution:** deferred — accepted as real (my proposals/metrics tests bypassed
-  `prepare_install`'s no-op path, so they never exercised this). Resolved together
-  with F1 by the drift-repair-only redesign; round-2 tests will drive the real
-  `accept → revert → accept` flow through the install service + `webui/routes.py`.
+- **resolution:** resolved (round 2, ADR-0020 D40). Two halves. (a) After a
+  drift-repair revert of a *modified* artifact, re-`accept` re-renders and the
+  bytes differ, so it writes and flips to `accepted` normally —
+  `test_revert_then_reaccept_restores_acceptance_and_reinstalls_the_block` drives
+  the real CLI accept → revert → accept and asserts final `accepted`, restored
+  managed block, preserved surrounding user bytes (§12), and two `accepted`
+  ledger events. (b) The residual case — the artifact is byte-identical to the
+  render but the proposal reads `proposed` (installed-but-unrecorded) — no longer
+  short-circuits: `install.prepare_install` sets `records_acceptance`, and both
+  the CLI (`recommend_accept`) and `webui/routes.py:_accept_view` call the new
+  `install.record_acceptance`, which stamps status/`installed_path`/`installed_hash`
+  with no write and no backup. Pinned by
+  `test_reaccept_records_acceptance_when_the_artifact_already_matches` (CLI),
+  `test_accept_post_records_acceptance_when_installed_but_unrecorded` (web UI),
+  and `test_prepare_install_flags_a_matching_artifact_the_record_does_not_claim`
+  (service). The idempotent-accept no-op (already `accepted`) is preserved and
+  guarded by `test_reaccept_of_an_already_accepted_proposal_stays_a_pure_no_op`;
+  a foreign matching target is excluded and guarded by
+  `test_a_matching_foreign_target_is_never_silently_claimed`. Every accept test
+  now drives the real install service, not `accept_proposal` directly — the round-1
+  gap. Mutation-verified: disabling `records_acceptance`, dropping the
+  `status != "accepted"` clause, and dropping the `not artifact.foreign` clause
+  each fail these tests.
 
 ### F3 — The frontmatter splitter can still double blocks or discard draft content
 
@@ -200,20 +228,83 @@ ledger-summary, and web-accept call paths. There were no prior findings.
   ADR that explicitly revises/supersedes the affected ADR-0007 lifecycle and
   consent clauses, and update the ADR index/status according to repository
   policy.
-- **resolution:** deferred — will land with the G2 redesign (F1/F2): a new ADR
-  revising ADR-0007's lifecycle/consent clauses is part of the round-2 work, once
-  the drift-repair-only semantics are settled. Writing it now would just be rewritten.
+- **resolution:** resolved (round 2). `docs/adr/0020-revert-drift-repair-only.md`
+  (Status: Proposed) records the decision as **D39** (drift-repair-only revert) and
+  **D40** (installed-but-unrecorded acceptance), explicitly revising ADR-0007's
+  D14/D15 lifecycle clause to a carve-out (transition permitted *only* once the
+  artifact is demonstrably no longer in place unchanged) rather than reversing it;
+  v1 still has no uninstall-by-command. Indexed in `docs/adr/README.md` (row 0020).
+  Spec §12.7 (command table, blocked-status rules, edge-case table) and
+  `docs/known-gaps.md` G2 updated to match; G2 flipped to **fixed**.
 
-Verification:
+---
+
+## Round 2 — author response  _(Author — Claude, 2026-07-24)_
+
+**Decision (Andrew, this session): drift-repair-only**, not a real un-accept. The
+smoke that found G2 was a hand-*deletion*, i.e. the `missing` case; a full
+uninstall-by-command stays deferred exactly as ADR-0007 left it.
+
+**Revision tip:** the four round-1 commits (`488167e`, `cb40448`, `6984ef0`,
+`a219301`) plus this round-2 work on `feat/webui-phase1-suggestions`. Diff base
+unchanged (`30696a8`).
+
+**What changed since `a219301`:**
+- `recommender/proposals.py` — `revert_proposal` now guards on `artifact_state`
+  (new; `missing`/`modified`/`unrecorded`/`healthy`/`unverifiable`), only the
+  first three revertable; `revert_refusal` gives the named-status errors;
+  `latest_accepted_event` moved here (was `metrics._latest_accepted_event`) so
+  revert and survival share one "current acceptance"; `_append_ledger` carries the
+  drift `reason`.
+- `recommender/metrics.py` — `_survival_one` now delegates the disk comparison to
+  `proposals.artifact_state`; `_latest_accepted_event` is a thin re-export. No
+  behavior change (guarded by the existing survival suite), just one classifier.
+- `recommender/install.py` — `InstallPreview.records_acceptance` + new
+  `record_acceptance` (no-write, no-backup acceptance for the installed-but-
+  unrecorded case; refuses any other preview).
+- `cli/__init__.py` — `recommend revert` refuses non-drift before prompting and
+  reports the drift kind; `recommend accept`'s no-op branch splits into
+  pure-no-op vs record-acceptance.
+- `webui/routes.py` — `_accept_view` mirrors the same split (the CSRF+fingerprint
+  POST is the consent).
+- Docs: ADR-0020, ADR index, spec §12.7, known-gaps G2.
+- Tests: `test_proposals.py`, `test_metrics.py`, `test_cli_recommend.py`
+  (rewritten to drive the real install service), `test_recommender_install.py`,
+  `test_webui_suggestions.py`. Net +15 tests → **1271 passed, 1 skipped**.
+
+**Focus for round 2:**
+1. Is `artifact_state`'s boundary correct — in particular, is `unverifiable`
+   (present, no recorded hash) rightly *non*-revertable, or should a legacy
+   acceptance be revertable on existence alone? I chose fail-closed to match the
+   survival check and never drop ownership of a possibly-live file.
+2. `record_acceptance` computes `installed_hash` over `artifact.after` (the
+   render), which equals disk only because `already_up_to_date` gate holds. Is
+   there any path to `record_acceptance` where render ≠ disk? (I believe not: it
+   raises unless `records_acceptance`, which requires `already_up_to_date`.)
+3. Any remaining accept/revert sequence where proposal status and disk can
+   contradict each other.
+
+**Note:** `docs/how-it-works.md`'s `recommend_accept` code-map entry is stale
+*independent of this change* — it still describes the pre-install-service inline
+validation and a direct `emitters.prepare` call, from before the D-1 refactor. Left
+as-is rather than partially patched; flagging it as pre-existing drift, not
+introduced here.
+
+Verification (round 1, retained):
 
 - `git diff 30696a8..HEAD` and `git diff --check 30696a8..HEAD`
-- Focused affected suites:
-  `tests/test_emitters.py tests/test_proposals.py tests/test_metrics.py
-  tests/test_cli_recommend.py tests/test_recommender_install.py` — passed
-- Direct CLI reproductions for `accept → revert → accept` and
-  `accept → revert → reject` — reproduced F1/F2 as described
 - Direct `_split_leading_frontmatter` malformed/non-mapping probes — reproduced
   F3 as described
+
+Verification (round 2):
+
+- `uv run ruff check` + `ruff format --check` + `mypy src/` — clean
+- `uv run pytest tests/` — **1271 passed, 1 skipped**
+- Mutation-verified the new guards (each reverted after): drift guard removed
+  (both the write-path and CLI copies), revertable-set widened to all states,
+  `latest_accepted_event` → oldest, `records_acceptance` disabled, its
+  `status != "accepted"` and `not foreign` clauses each dropped — every mutation
+  fails at least one new test.
 - `make ci` with a sandbox-local uv cache — all checks passed:
   `1252 passed, 1 skipped`, total coverage `91.88%`
 

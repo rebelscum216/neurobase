@@ -44,6 +44,12 @@ class InstallPreview:
     doc: store.Document
     artifact: emitters.Artifact
     already_up_to_date: bool
+    #: ADR-0020 D40. True when the render already matches disk *and* the
+    #: proposal does not yet say so — the artifact is installed but unrecorded,
+    #: so acceptance is recordable with no write. False when the proposal is
+    #: already ``accepted`` (a plain idempotent no-op, §12.7) or when the target
+    #: is foreign (never silently claim a file Neurobase does not own).
+    records_acceptance: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,7 +79,21 @@ def prepare_install(root: Path, slug: str, *, target: str | None = None) -> Inst
         raise ProposalDecidedError(slug, status)
     artifact = emitters.prepare(root, doc, skill_scope=target)
     already_up_to_date = artifact.before == artifact.after
-    return InstallPreview(doc=doc, artifact=artifact, already_up_to_date=already_up_to_date)
+    # ADR-0020 D40: "the render already matches disk" means two different things
+    # depending on the record. If the proposal is already `accepted`, it is
+    # §12.7's idempotent no-op — nothing to write, nothing to record. If it is
+    # not, the artifact is installed while the store says it isn't: the state a
+    # drift-repair `revert` leaves behind, and the one an accept could never
+    # escape while every no-op returned early (review F2). That case is
+    # recordable without a write. A foreign target is excluded — matching bytes
+    # in a file Neurobase does not own must not be claimed silently.
+    records_acceptance = already_up_to_date and status != "accepted" and not artifact.foreign
+    return InstallPreview(
+        doc=doc,
+        artifact=artifact,
+        already_up_to_date=already_up_to_date,
+        records_acceptance=records_acceptance,
+    )
 
 
 def commit_install(root: Path, preview: InstallPreview) -> InstallResult:
@@ -99,3 +119,32 @@ def commit_install(root: Path, preview: InstallPreview) -> InstallResult:
         installed_hash=installed_hash,
     )
     return InstallResult(path=artifact.path, backup_dir=backup_dir, installed_hash=installed_hash)
+
+
+def record_acceptance(root: Path, preview: InstallPreview) -> InstallResult:
+    """Record acceptance of an artifact that is already installed byte-for-byte
+    (``preview.records_acceptance``), without writing or backing anything up —
+    there is nothing to write, and a backup of bytes identical to the render
+    would preserve nothing (ADR-0020 D40).
+
+    Callers must still have obtained consent: this changes the store's own
+    record of what is installed, and the recorded ``installed_hash`` becomes the
+    baseline a later survival check and a later ``revert`` both compare against.
+    Raises ``ValueError`` if the preview is not in the recordable state, so the
+    no-op and record paths can never be confused at a call site."""
+    if not preview.records_acceptance:
+        raise ValueError("preview is not in a recordable state; use commit_install")
+    artifact = preview.artifact
+    # The same hash commit_install records, over the same bytes — the artifact
+    # on disk already equals `artifact.after`, which is what makes this path
+    # legitimate in the first place.
+    installed_hash = hashlib.sha256(artifact.after.encode("utf-8")).hexdigest()
+    slug = str(preview.doc.get("name") or "")
+    proposals.accept_proposal(
+        root,
+        slug,
+        target=artifact.target,
+        installed_path=artifact.path,
+        installed_hash=installed_hash,
+    )
+    return InstallResult(path=artifact.path, backup_dir=None, installed_hash=installed_hash)

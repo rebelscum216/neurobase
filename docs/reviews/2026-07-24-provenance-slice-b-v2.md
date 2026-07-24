@@ -1,12 +1,12 @@
 ---
 slug: provenance-slice-b-v2
-status: changes-requested
+status: approved
 author: claude
 reviewer: codex
 branch: feat/provenance-slice-b-v2
 diff: git diff main...feat/provenance-slice-b-v2
 created: 2026-07-24
-round: 2
+round: 3
 ---
 
 # Review: provenance Slice B (v2) — `from_raw` validation + curator fold journal
@@ -279,3 +279,49 @@ Verified by re-running the repo-wide sweep: the only surviving matches are the
 ADR sentence that *denies* the equivalence and this baton quoting the finding.
 `git diff -- src/` contains no non-comment line. `make ci` green: **1352 passed,
 1 skipped, 91.95% cov**, all 5 stages.
+
+
+---
+
+## Round 3 — 2026-07-24 (tip `735a651`) — ✅ APPROVED
+
+**Verdict: APPROVED**, 0 open findings. All four IDs closed. Codex ran its own
+repository-wide search (not just the diff) and found no surviving assertion that
+the fold gate and the steps 7–8 gate are equivalent; it confirmed the corrected
+spec/engine prose matches the executable flow, that the `src/` diff changes
+comments only, and that the budget-stop regression still pins both halves.
+`make ci` re-run independently: **1352 passed, 1 skipped, 91.95% cov**, 5/5
+stages. Worktree clean before and after.
+
+## Outcome
+
+Three rounds. The B1/B2 decision transferred intact from the retired v1 branch;
+**every finding raised in this relay was against the re-derivation, not the
+decision** — which is exactly what the re-derive call (option (b)) predicted, and
+a reasonable argument that re-deriving beat porting the 132-line divergence.
+
+Findings by round: R1 four (3× P2, 1× P3) → R2 three fixed + one partially →
+R3 approved.
+
+**Two durable lessons from this relay:**
+
+1. **A re-raised finding ID means the fix hit the reviewer's reproduction, not
+   the rule.** `P2-DOCS-PLAN-ACCURACY-001` cost an extra round because round 1
+   corrected the three *instances* of a false claim that were in front of it
+   instead of eliminating the *claim*. The two that survived were the two that
+   mattered most: the normative spec, and the comment nearest the executable
+   gate. The fix that worked was a repo-wide search for the assertion, with a
+   re-run of that search as the verification step. (This lesson was already on
+   record from the store-lock relay and was re-learned anyway — the tell is the
+   ID coming back, and it should trigger a search, not another edit.)
+2. **Assume a test is vacuous until a mutation proves otherwise — including the
+   test you just wrote to close a finding.** Codex found two vacuous inherited
+   tests (`P2-TEST-GAP-001`, `-002`). The implementer then wrote a *third* while
+   fixing `P2-DOCS-PLAN-ACCURACY-001`: `assert "pruned_tombstones" in record`
+   passes whether or not prune runs, because that test had no tombstone to
+   prune. Caught pre-commit only by asking "what mutation would kill this?" —
+   which is the habit, not the checklist. Fix: seed an expired tombstone and set
+   `tombstone_grace_days=0` so prune becomes observable.
+
+**Ready to merge** at `735a651`, subject to Andrew's call on ADR-0022's status
+(deliberately left `Proposed` — accepted ADRs are immutable in this repo).

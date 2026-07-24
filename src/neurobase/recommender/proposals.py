@@ -528,6 +528,12 @@ def reject_proposal(
     return status
 
 
+class ProposalChangedError(ValueError):
+    """Raised when ``accept_proposal``'s ``expect`` guard finds the proposal on
+    disk is no longer the document the caller validated (ADR-0020 D40, review
+    P1-DATA-INTEGRITY-004)."""
+
+
 def accept_proposal(
     root: Path,
     slug: str,
@@ -535,6 +541,7 @@ def accept_proposal(
     target: str,
     installed_path: Path,
     installed_hash: str | None = None,
+    expect: store.Document | None = None,
     now: datetime | None = None,
 ) -> None:
     """Record a successful artifact installation after the write completes.
@@ -543,10 +550,23 @@ def accept_proposal(
     tell "modified since acceptance" apart from "never touched" without
     diffing against anything else on disk. ``None`` for callers that don't
     compute one — the survival check falls back to existence-only for those
-    (legacy) events."""
+    (legacy) events.
+
+    ``expect`` (ADR-0020 D40) binds this write to a document the caller already
+    validated: if the proposal reloaded here differs from it, raise
+    ``ProposalChangedError`` and write nothing. Without it a caller that checks
+    the proposal and *then* calls this function has a window in between — this
+    function does its own independent reload — so the version it validated need
+    not be the version that becomes ``accepted`` (review P1-DATA-INTEGRITY-004).
+    A defensive equality guard, not a lock: it closes the reachable
+    check-then-write gap, and cannot serialize two concurrent writers."""
     doc = load_proposal(root, slug)
     if doc is None:
         raise ValueError(f"proposal {slug!r} not found or malformed")
+    if expect is not None and (doc.frontmatter != expect.frontmatter or doc.body != expect.body):
+        raise ProposalChangedError(
+            f"proposal {slug!r} changed between validation and this write — nothing recorded"
+        )
     status = str(doc.get("status") or "proposed")
     if status in {"rejected", "superseded"}:
         raise ValueError(f"cannot accept proposal {slug!r}: status is {status}")
@@ -636,15 +656,19 @@ def artifact_state(root: Path, doc: store.Document, slug: str) -> str:
     for path in candidates:
         try:
             text = emitters.read_target_text(path)
-        except OSError:
-            # A directory, or a file we cannot read, where the artifact might be:
-            # absence is unproven, so this must not read as "gone".
+        except (OSError, UnicodeError):
+            # ANY failure to read a candidate — a directory, a permissions error
+            # (OSError), or bytes that aren't valid UTF-8 (UnicodeDecodeError, a
+            # UnicodeError) — leaves absence unproven, so it must not read as
+            # "gone". Catching one specific exception type is what let round 4's
+            # invalid-UTF-8 target escape (review P2-CORRECTNESS-005); the rule is
+            # "could not read it", not "raised OSError".
             indeterminate = True
             continue
         if not path.exists():
             continue
         present = True
-        if emitters.text_holds_managed_artifact(text, doc):
+        if emitters.candidate_is_live(text, doc):
             return ARTIFACT_LIVE
     if indeterminate:
         return ARTIFACT_UNRESOLVABLE

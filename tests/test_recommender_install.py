@@ -381,3 +381,50 @@ def test_commit_install_no_backup_when_target_did_not_exist(tmp_path: Path) -> N
 
     assert result.backup_dir is None
     assert result.path.exists()
+
+
+def test_record_acceptance_binds_the_checked_document_to_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review P1-DATA-INTEGRITY-004 (round 4): `record_acceptance` validates one
+    document, then `accept_proposal` reloads independently — so without binding,
+    the version that becomes `accepted` need not be the version checked. Mutate
+    deterministically inside that window (after the render comparison, before the
+    write) and the acceptance must be refused, not silently applied to the new
+    version."""
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    _register(root, repo)
+    slug = "prefer-uv-run"
+    proposals.write_ranked(root, [_rule_candidate(slug)])
+    installed = repo / "AGENTS.md"
+    install.commit_install(root, install.prepare_install(root, slug))
+    rendered = installed.read_bytes()
+    installed.write_text("hand-edited", encoding="utf-8")
+    proposals.revert_proposal(root, slug)
+    installed.write_bytes(rendered)
+
+    preview = install.prepare_install(root, slug)
+    assert preview.records_acceptance is True
+    ledger_before = proposals.ledger_history(root, slug)
+
+    real_prepare = install.emitters.prepare
+
+    def _prepare_then_mutate(*args: object, **kwargs: object) -> object:
+        artifact = real_prepare(*args, **kwargs)  # type: ignore[arg-type]
+        # The guard has now loaded + rendered `current`; change the proposal
+        # before `accept_proposal` does its own reload.
+        doc = proposals.load_proposal(root, slug)
+        assert doc is not None
+        frontmatter = dict(doc.frontmatter)
+        frontmatter["candidate_type"] = "repeated-correction"
+        store.write_doc(doc.file_path, frontmatter, doc.body)
+        return artifact
+
+    monkeypatch.setattr(install.emitters, "prepare", _prepare_then_mutate)
+
+    with pytest.raises(install.StaleProposalError):
+        install.record_acceptance(root, preview)
+
+    assert proposals.load_proposal(root, slug).get("status") == "proposed"  # type: ignore[union-attr]
+    assert proposals.ledger_history(root, slug) == ledger_before

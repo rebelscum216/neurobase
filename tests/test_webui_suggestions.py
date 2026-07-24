@@ -452,7 +452,10 @@ def test_accept_post_records_acceptance_when_installed_but_unrecorded(
     rendered = installed.read_bytes()
 
     # Drift, repair the record, then restore the bytes: installed-but-unrecorded.
-    installed.write_text("hand-edited", encoding="utf-8")
+    # A skill is live while its file EXISTS (ADR-0020 D39 — liveness is not a
+    # frontmatter-parsing question), so reaching the record-only state means
+    # deleting it, reverting the now-true drift, then restoring the same bytes.
+    installed.unlink()
     proposals.revert_proposal(seed.root, seed.accepted_slug)
     installed.write_bytes(rendered)
     assert proposals.load_proposal(seed.root, seed.accepted_slug).get("status") == "proposed"  # type: ignore[union-attr]
@@ -499,7 +502,10 @@ def test_accept_post_returns_409_when_the_record_only_write_goes_stale(
     assert doc is not None
     installed = Path(str(doc.get("installed_path")))
     rendered = installed.read_bytes()
-    installed.write_text("hand-edited", encoding="utf-8")
+    # A skill is live while its file EXISTS (ADR-0020 D39 — liveness is not a
+    # frontmatter-parsing question), so reaching the record-only state means
+    # deleting it, reverting the now-true drift, then restoring the same bytes.
+    installed.unlink()
     proposals.revert_proposal(seed.root, seed.accepted_slug)
     installed.write_bytes(rendered)  # installed-but-unrecorded
 

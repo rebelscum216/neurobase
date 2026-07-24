@@ -209,22 +209,30 @@ def candidate_target_paths(root: Path, doc: store.Document) -> list[Path]:
     return unique
 
 
-def text_holds_managed_artifact(text: str, doc: store.Document) -> bool:
-    """Does ``text`` (one candidate target's current contents) still hold this
-    proposal's *managed artifact* (ADR-0020 D39)?
+def candidate_is_live(text: str, doc: store.Document) -> bool:
+    """Does this **existing** candidate target hold the proposal's managed
+    artifact (ADR-0020 D39)? Callers only ask about candidates that exist.
 
+    - **skill:** existence *is* liveness — a file at the canonical
+      `<...>/skills/<slug>/SKILL.md` counts as live, full stop. We deliberately
+      do **not** parse its frontmatter here. Ownership parsing is a text-format
+      question, and every round of review found another representation
+      (CRLF, CR-only, BOM, fence whitespace) that preserved the ownership values
+      while defeating the parser — each one making a live skill look gone and
+      orphanable. Existence has no such surface. The cost is that a skill the
+      user *replaced* with their own content is non-revertable until they delete
+      the file, which is the same "remove it by hand first" rule revert already
+      documents, and errs toward never orphaning.
     - **rule:** the slug's `neurobase:rule:<slug>` marker is present, no matter
-      what foreign bytes surround it. An edit *outside* the block leaves it live;
-      deleting the block (or the file) makes it gone.
-    - **skill:** the text still carries our ownership frontmatter
-      (`_owned_skill`), which is newline-agnostic — a genuinely owned SKILL.md
-      converted to CRLF keeps both ownership keys and must still read as live
-      (review F1, round 3).
+      what foreign bytes surround it — a plain substring search, immune to
+      newline form and encoding markers. An edit *outside* the block leaves it
+      live; deleting the block makes it gone (the file may well remain, holding
+      the user's own content).
     """
     kind = str(doc.get("type") or "")
     slug = str(doc.get("name") or "")
     if kind == "skill":
-        return _owned_skill(text, slug)
+        return True
     if kind == "rule":
         return _rule_start_marker(slug) in text
     return False
@@ -261,24 +269,36 @@ def _owned_skill(text: str, slug: str) -> bool:
     """Is ``text`` a SKILL.md Neurobase owns for ``slug`` — i.e. does its leading
     frontmatter carry both ownership keys (§12.8)?
 
-    Newline-agnostic on purpose (review F1, round 3): ownership is a property of
-    the *frontmatter values*, not the file's line endings. Matching `---\\n`
-    literally made a genuinely owned SKILL.md converted to CRLF read as foreign,
-    which let `revert` treat a live installed skill as gone and orphan it. CRLF
-    is normalized for parsing only — nothing is rewritten on disk."""
-    normalized = text.replace("\r\n", "\n")
-    try:
-        if not normalized.startswith("---\n") or "\n---\n" not in normalized[4:]:
-            return False
-        frontmatter, _body = normalized[4:].split("\n---\n", 1)
-        fm = yaml.safe_load(frontmatter)
-        return (
-            isinstance(fm, dict)
-            and fm.get("neurobase_managed") is True
-            and fm.get("neurobase_slug") == slug
-        )
-    except (ValueError, yaml.YAMLError):
+    Parsed by **logical lines**, not by exact byte shapes. Ownership is a property
+    of the frontmatter *values*; a value-preserving change to how the text is
+    represented must not flip it. So a leading UTF-8 BOM is skipped, every
+    standard newline form is accepted (``splitlines`` handles LF, CRLF and
+    CR-only), and the ``---`` delimiter lines may carry surrounding whitespace.
+    Matching `---\\n`/`\\r\\n` literally is exactly the mistake reviews F1 round 3
+    (CRLF) and round 4 (CR-only, BOM, fence whitespace) each caught one instance
+    of. Nothing is rewritten on disk — this normalizes for parsing only.
+
+    NOTE this is no longer load-bearing for the revert/orphan invariant: skill
+    liveness is decided by *existence* at the canonical path (``candidate_is_live``,
+    ADR-0020 D39), precisely so no frontmatter-format edge case can make a live
+    skill look gone. It still drives the accept flow's `foreign` warning and D40's
+    never-claim-a-foreign-file exclusion, where a false negative is merely
+    conservative."""
+    lines = text.lstrip("﻿").splitlines()
+    if not lines or lines[0].strip() != "---":
         return False
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            try:
+                fm = yaml.safe_load("\n".join(lines[1:index]))
+            except yaml.YAMLError:
+                return False
+            return (
+                isinstance(fm, dict)
+                and fm.get("neurobase_managed") is True
+                and fm.get("neurobase_slug") == slug
+            )
+    return False  # no closing fence — not frontmatter
 
 
 def _rule(root: Path, doc: store.Document, slug: str, draft: str) -> Artifact:

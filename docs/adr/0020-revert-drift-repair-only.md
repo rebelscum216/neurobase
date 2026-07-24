@@ -55,8 +55,7 @@ drift without becoming the un-accept ADR-0007 deferred?
   **only** on `missing` or `orphaned`; `live` and `unresolvable` are refused
   (the first would orphan a live artifact, the second cannot *prove* one is gone).
 
-  Liveness detection **fails closed in three specific ways**, each closing a real
-  reproduction from review round 3:
+  Liveness detection is built to **fail closed**, in three ways:
   1. **Every plausible location is checked**, not just the one a fresh render
      would target: `emitters.candidate_target_paths` returns the recorded
      `installed_path` (never ignored when non-null) *plus* the re-derived target
@@ -64,13 +63,28 @@ drift without becoming the un-accept ADR-0007 deferred?
      rendering, but a repo moved and re-registered under the same slug leaves
      `[old, new]` — concluding "gone" from the stale first root would orphan the
      live artifact at the new one.
-  2. **Ownership detection is newline-agnostic.** `_owned_skill` normalizes CRLF
-     before parsing, because ownership is a property of the frontmatter *values*,
-     not the line endings: a genuinely owned SKILL.md converted to CRLF is still
-     installed and must not read as gone.
-  3. **Read failures are classified, not raised.** A directory (or unreadable
-     file) where the artifact should be yields `unresolvable`, never an escaping
-     `IsADirectoryError` and never a silent "missing".
+  2. **Skill liveness is existence, not frontmatter parsing.** A file at the
+     canonical `<...>/skills/<slug>/SKILL.md` counts as live; its contents are not
+     inspected. This is the round-4 correction, and it is deliberate: three
+     successive reviews each found a different *text representation* of a still
+     owned, still installed skill (CRLF, then CR-only, a UTF-8 BOM, whitespace
+     after the fence) that preserved the ownership values while defeating the
+     parser — every one of them making a live skill look gone and orphanable.
+     Parsing was the wrong question. Existence has no such surface. The cost is
+     that a skill the user *replaced* with their own content is non-revertable
+     until they delete the file — the same "remove it by hand first" rule revert
+     already documents. A **rule**'s liveness is a plain substring search for the
+     slug marker, which is likewise immune to newline form and encoding markers.
+  3. **Any read failure is classified, not raised.** A candidate that cannot be
+     read — a directory, a permissions error (`OSError`), or bytes that are not
+     valid UTF-8 (`UnicodeError`) — yields `unresolvable`. The rule is "could not
+     read it", not "raised a particular exception type".
+
+  `_owned_skill` survives for the accept flow's `foreign` warning and D40's
+  never-claim-a-foreign-file exclusion, where a false negative is merely
+  conservative rather than orphaning. It now parses by logical lines (BOM
+  skipped, all newline forms, whitespace-tolerant fences) so it is correct in its
+  own right — but nothing about the orphan invariant depends on it.
   The artifact on disk is still never touched on any path — to retire a live
   artifact the user removes the managed block/skill by hand first, which puts the
   proposal in the `orphaned`/`missing` state revert then repairs. This closes F1
@@ -95,14 +109,25 @@ drift without becoming the un-accept ADR-0007 deferred?
 
   Because this path writes no artifact, it can only be honest if **both sides of
   the preview still hold at the moment it records**, and both are re-verified at
-  that mutation boundary (`StalePreviewError`): the **target bytes** must still
-  equal the previewed render (else the recorded hash would disagree with disk —
-  review P1-DATA-INTEGRITY-001), and the **proposal** must still carry the same
-  managed draft and status (else a concurrent `recommend edit` during the confirm
-  prompt would leave the target untouched, pass the byte check, and mark the
-  *newly edited* draft accepted while the installed artifact came from the old one
-  — review P1-DATA-INTEGRITY-004). Either drift records nothing: CLI exits 1, the
-  web POST returns 409.
+  that mutation boundary (`StalePreviewError`):
+  - the **target bytes** must still equal the previewed render, else the recorded
+    hash would disagree with disk (review P1-DATA-INTEGRITY-001); and
+  - the **proposal must still render identically** — reloaded and re-rendered, its
+    path, target, `after` bytes and ownership outcome all compared. Deliberately a
+    re-render, not a field comparison: `emitters.prepare` consumes the draft,
+    `type`, `target`, `project`, `candidate_type` *and* the active redaction
+    config, so any chosen subset leaves a way to change the render while the
+    compared fields match — round 4 reproduced exactly that by changing only
+    `candidate_type` (which feeds the skill description fallback), a change a
+    concurrent `recommend run` refresh makes routinely.
+
+  The validated document is then **bound to the write** via
+  `accept_proposal(expect=…)`: that function does its own independent reload, so
+  without the binding the version that becomes `accepted` need not be the version
+  just checked. It is a defensive equality guard, not a lock — it closes the
+  reachable check-then-write gap but cannot serialize two concurrent writers;
+  full serialization awaits the per-project write lock (ADR-0017, separate
+  branch). Any drift records nothing: CLI exits 1, the web POST returns 409.
 
 - **F4 — the record.** This ADR is that required record: revert adds a public
   command, a `reverted` ledger event (now carrying the liveness `reason`), and an
@@ -115,15 +140,18 @@ drift without becoming the un-accept ADR-0007 deferred?
 
 ## Consequences
 
-- **The `accept → revert → reject` backdoor is closed structurally**, not by
-  convention: the sequence cannot begin, because revert refuses a *live* managed
-  artifact — including one whose surrounding file the user edited (round-2 F1),
-  one converted to CRLF, and one living at a second registered root (round-3 F1).
-  A proposal and its disk artifact can no longer contradict each other through
-  any supported command sequence — verified by real CLI regressions for an edit
-  outside the block, an edit inside a still-present block, an accepted/null-path
-  record with a live target, a CRLF-converted owned skill, a moved+re-registered
-  project, and a genuinely missing/orphaned artifact.
+- **The `accept → revert → reject` backdoor is closed at its root**: the sequence
+  cannot begin, because revert refuses a *live* managed artifact. The strength of
+  that claim rests on how liveness is detected, and this ADR took four review
+  rounds to get there — the honest summary is that liveness is now decided by
+  signals with no representation surface (a file existing; a marker substring)
+  rather than by parsing, and that every ambiguity resolves to refusal. Verified
+  by real CLI regressions for: an edit outside the block, an edit inside a
+  still-present block, an accepted/null-path record with a live target, an owned
+  skill under CRLF / CR-only / BOM / fence-whitespace, a moved+re-registered
+  project, an unreadable and a non-UTF-8 target, and genuinely missing/orphaned
+  artifacts. What is *not* claimed: proof of exhaustiveness over all inputs, or
+  safety under concurrent writers (see D40's note on the write lock).
 - **Liveness is deliberately conservative.** Every ambiguity resolves to "refuse":
   an unreadable candidate, an unresolvable project, an unknown proposal type. The
   cost is that a genuinely-gone artifact can occasionally need the user to fix the

@@ -198,8 +198,11 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
   or *orphaned* (file present but our block/skill removed), and refused when it is
   *live* or *unresolvable*. Liveness fails closed three ways: it checks **every**
   plausible location (recorded `installed_path` + the target under every
-  registered project root), skill ownership is **newline-agnostic** (CRLF), and an
-  unreadable candidate yields `unresolvable` rather than "gone". That closes the
+  registered project root); a **skill is live if its file exists** (liveness is
+  deliberately not a frontmatter-parsing question — CRLF, CR-only, a BOM and fence
+  whitespace each defeated a parser while the skill stayed installed, so the parse
+  is not asked); and any unreadable candidate (directory, permissions, invalid
+  UTF-8) yields `unresolvable` rather than "gone". That closes the
   findings in `docs/reviews/2026-07-23-g2-g3-recommender-fixes.md` across three
   rounds: round-1 F1/F2/F4; round-2 F1 (a whole-file-hash gate let an edit
   *outside* a rule block make it revertable while the block stayed live), F2 (a
@@ -210,7 +213,12 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
   skill + multi-root project both read as gone), P1-004 (a concurrent
   `recommend edit` during the confirm prompt could record a draft that was never
   installed — the proposal is now re-verified at the same boundary), P2-005
-  (`OSError` escaped the classifier) and P3-006 (stale `--help`). Regressions
+  (`OSError` escaped the classifier) and P3-006 (stale `--help`); and round-4 F1
+  (CR-only/BOM/fence-whitespace — fixed at the cause by dropping frontmatter
+  parsing from skill liveness entirely), P1-004 again (a *field subset* cannot
+  capture render-relevant state, e.g. `candidate_type`; the guard now compares the
+  re-render and binds the validated document to the write) and P2-005 again
+  (`UnicodeDecodeError` is a read failure too). Regressions
   drive the *real* install service through the CLI and the web UI POST. A real
   un-accept (uninstall of a live artifact) remains deferred, exactly as ADR-0007
   left it.

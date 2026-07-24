@@ -191,26 +191,59 @@ def record_acceptance(root: Path, preview: InstallPreview) -> InstallResult:
     if emitters.read_target_text(artifact.path) != artifact.after:
         raise StaleArtifactError(artifact.path)
     # (b) The proposal itself (P1-DATA-INTEGRITY-004). A concurrent
-    #     `recommend edit` changes the draft while leaving the target untouched,
-    #     so check (a) still passes against the stale render — and
-    #     `accept_proposal` below reloads from disk, which would mark the *newly
-    #     edited* draft accepted while the installed artifact came from the old
-    #     one. Compare the render-relevant state (the managed draft region) and
-    #     the status, and refuse if either moved.
+    #     `recommend edit` (or a `recommend run` refresh) can change the proposal
+    #     while leaving the target untouched, so check (a) still passes against
+    #     the stale render — and `accept_proposal` reloads from disk, which would
+    #     mark the *current* proposal accepted while the installed artifact came
+    #     from a different render.
+    #
+    #     Compare the RE-RENDER, not a subset of fields. A field list is the wrong
+    #     shape for this check: `emitters.prepare` consumes the draft, `type`,
+    #     `target`, `project`, `candidate_type` (it feeds the description
+    #     fallback) *and* the active redaction config, so any subset leaves a way
+    #     to change `artifact.after` while the compared fields still match — round
+    #     4 reproduced exactly that with `candidate_type`. Rendering the current
+    #     proposal and requiring an identical artifact identity asks the whole
+    #     question directly.
     current = proposals.load_proposal(root, slug)
     if current is None or str(current.get("status") or "") != str(preview.doc.get("status") or ""):
         raise StaleProposalError(slug)
-    if proposals.extract_draft(current.body) != proposals.extract_draft(preview.doc.body):
+    try:
+        fresh = emitters.prepare(root, current, skill_scope=_scope_of(artifact.target))
+    except ValueError as exc:  # e.g. an edit left the draft unrenderable
+        raise StaleProposalError(slug) from exc
+    if (
+        fresh.path != artifact.path
+        or fresh.target != artifact.target
+        or fresh.after != artifact.after
+        or fresh.foreign != artifact.foreign
+    ):
         raise StaleProposalError(slug)
     # The same hash commit_install records, over the same bytes — the artifact
     # on disk equals `artifact.after` (just re-verified), which is what makes this
     # path legitimate in the first place.
     installed_hash = hashlib.sha256(artifact.after.encode("utf-8")).hexdigest()
-    proposals.accept_proposal(
-        root,
-        slug,
-        target=artifact.target,
-        installed_path=artifact.path,
-        installed_hash=installed_hash,
-    )
+    try:
+        # `expect=current` binds the acceptance to the exact document just
+        # validated: `accept_proposal` reloads independently, so without this the
+        # version that becomes `accepted` need not be the version checked above.
+        proposals.accept_proposal(
+            root,
+            slug,
+            target=artifact.target,
+            installed_path=artifact.path,
+            installed_hash=installed_hash,
+            expect=current,
+        )
+    except proposals.ProposalChangedError as exc:
+        raise StaleProposalError(slug) from exc
     return InstallResult(path=artifact.path, backup_dir=None, installed_hash=installed_hash)
+
+
+def _scope_of(artifact_target: str) -> str | None:
+    """The ``skill_scope`` that produced ``artifact_target``, so a re-render
+    resolves the same path accept used. ``None`` for rule targets, which carry no
+    scope."""
+    if artifact_target.endswith("-skill"):
+        return artifact_target.rsplit("-", 1)[0]
+    return None

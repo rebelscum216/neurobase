@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 import neurobase.cli as cli_module
 from neurobase.brain.select import BrainResolution
 from neurobase.cli import app
+from neurobase.core import store
 from neurobase.recommender import proposals
 from neurobase.recommender.corpus import Corpus, EvidenceRef
 from neurobase.recommender.ranker import RankedCandidate, Scores
@@ -575,6 +576,40 @@ def test_revert_refuses_a_crlf_converted_owned_skill(tmp_path: Path) -> None:
     assert "neurobase_managed" in installed.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    ("label", "mangle"),
+    [
+        ("crlf", lambda t: t.replace("\n", "\r\n")),
+        ("cr-only", lambda t: t.replace("\n", "\r")),
+        ("utf8-bom", lambda t: "﻿" + t),
+        ("fence-whitespace", lambda t: t.replace("---", "---   ", 1)),
+    ],
+)
+def test_revert_refuses_a_live_skill_under_any_text_representation(
+    tmp_path: Path, label: str, mangle: object
+) -> None:
+    """Review F1 (round 4): every round found another *representation* of a still
+    installed, still owned SKILL.md that defeated the frontmatter parser and made
+    a live skill look gone. The cause-level fix is that skill liveness no longer
+    parses frontmatter at all — the file existing at the canonical path IS
+    liveness — so none of these can orphan it."""
+    root = tmp_path / "store"
+    installed = _accept_skill_via_cli(tmp_path, root)
+    original = installed.read_text(encoding="utf-8")
+    installed.write_bytes(mangle(original).encode("utf-8"))  # type: ignore[operator]
+
+    reverted = runner.invoke(
+        app, ["recommend", "revert", "commit-often", "--yes", "--root", str(root)]
+    )
+    rejected = runner.invoke(app, ["recommend", "reject", "commit-often", "--root", str(root)])
+
+    assert reverted.exit_code == 1, f"{label}: revert should refuse a live skill"
+    assert "still installed" in reverted.output
+    assert rejected.exit_code == 1  # reject stays blocked on `accepted`
+    assert _status(root, "commit-often") == "accepted"
+    assert installed.exists()
+
+
 def test_revert_refuses_when_a_live_artifact_sits_at_another_registered_root(
     tmp_path: Path,
 ) -> None:
@@ -633,6 +668,51 @@ def test_record_only_refuses_if_the_proposal_draft_changes_during_the_prompt(
     assert len(accepted) == 1  # only the original accept
     # The installed bytes still match the ORIGINAL draft, not the edited one.
     assert installed.read_text(encoding="utf-8") == rendered
+
+
+def test_record_only_refuses_if_only_candidate_type_changes_during_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review P1-DATA-INTEGRITY-004 (round 4): comparing a *subset* of proposal
+    fields is the wrong shape. `candidate_type` feeds the skill emitter's
+    description fallback, so changing it (valid→valid, exactly what a concurrent
+    `recommend run` refresh does) alters the render while draft/status/target are
+    untouched. The guard now compares the re-render, so this is refused."""
+    root = tmp_path / "store"
+    installed = _accept_skill_via_cli(tmp_path, root)
+    rendered = installed.read_text(encoding="utf-8")
+    installed.unlink()
+    assert (
+        runner.invoke(
+            app, ["recommend", "revert", "commit-often", "--yes", "--root", str(root)]
+        ).exit_code
+        == 0
+    )
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_text(rendered, encoding="utf-8")  # installed-but-unrecorded
+
+    def _confirm_but_change_candidate_type(*_a: object, **_k: object) -> bool:
+        doc = proposals.load_proposal(root, "commit-often")
+        assert doc is not None
+        frontmatter = dict(doc.frontmatter)
+        frontmatter["candidate_type"] = "repeated-instruction"  # valid -> valid
+        store.write_doc(doc.file_path, frontmatter, doc.body)
+        return True
+
+    monkeypatch.setattr(cli_module.typer, "confirm", _confirm_but_change_candidate_type)
+    result = runner.invoke(
+        app, ["recommend", "accept", "commit-often", "--target", "project", "--root", str(root)]
+    )
+
+    assert result.exit_code == 1
+    assert "changed after the acceptance was previewed" in result.output
+    assert _status(root, "commit-often") == "proposed"  # nothing recorded
+    accepted = [
+        event
+        for event in proposals.ledger_history(root, "commit-often")
+        if event["event"] == "accepted"
+    ]
+    assert len(accepted) == 1  # only the original accept
 
 
 def test_reaccept_of_an_already_accepted_proposal_stays_a_pure_no_op(

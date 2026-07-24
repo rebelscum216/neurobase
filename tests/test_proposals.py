@@ -688,6 +688,51 @@ def test_artifact_state_is_unresolvable_when_a_candidate_cannot_be_read(tmp_path
     assert _read(root, "prefer-uv-run").get("status") == "accepted"
 
 
+def test_artifact_state_is_unresolvable_when_a_candidate_is_not_valid_utf8(
+    tmp_path: Path,
+) -> None:
+    """Review P2-CORRECTNESS-005 (round 4): the rule is "could not read it", not
+    "raised OSError". `read_target_text` decodes UTF-8, so invalid bytes raise
+    `UnicodeDecodeError` — which must classify as `unresolvable`, not escape."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.write_bytes(b"\xff\xfe not valid utf-8 \xc3\x28")
+
+    doc = _read(root, "prefer-uv-run")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_UNRESOLVABLE
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
+    assert _read(root, "prefer-uv-run").get("status") == "accepted"
+
+
+def test_accept_proposal_expect_guard_refuses_a_changed_document(tmp_path: Path) -> None:
+    """Review P1-DATA-INTEGRITY-004 (round 4): `accept_proposal` reloads the
+    proposal itself, so a caller that validated one version had no way to bind
+    *that* version to the write. `expect=` closes it — mutate deterministically
+    between the caller's read and the write, and nothing is recorded."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    validated = _read(root, "prefer-uv-run")
+
+    # A concurrent writer changes the proposal after the caller validated it.
+    frontmatter = dict(validated.frontmatter)
+    frontmatter["candidate_type"] = "repeated-correction"
+    store.write_doc(validated.file_path, frontmatter, validated.body)
+
+    with pytest.raises(proposals.ProposalChangedError):
+        proposals.accept_proposal(
+            root,
+            "prefer-uv-run",
+            target="AGENTS.md",
+            installed_path=Path("/repo/AGENTS.md"),
+            expect=validated,
+            now=NOW,
+        )
+
+    assert _read(root, "prefer-uv-run").get("status") == "proposed"
+    assert [e["event"] for e in _ledger_events(root)] == ["proposed"]
+
+
 def test_artifact_state_finds_a_live_artifact_at_a_second_registered_root(
     tmp_path: Path,
 ) -> None:

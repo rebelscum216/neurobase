@@ -6,7 +6,7 @@ reviewer: codex
 branch: feat/webui-phase1-suggestions
 diff: git diff 30696a8..HEAD
 created: 2026-07-23
-round: 4
+round: 5
 ---
 
 # Review: G2 + G3 — recommender revert path and skill-emitter frontmatter fix
@@ -552,3 +552,125 @@ sides of its preview, and fixes the public help text.
   artifact as gone (or vice versa); the both-sides preview binding; and whether
   the fail-closed `unresolvable` cases are correctly scoped rather than blocking
   legitimate repairs.
+
+---
+
+## Round 4 review  _(Reviewer — Codex, 2026-07-24)_
+
+Reviewed `git diff 0a840a6..671243b` @ `671243b` (HEAD verified twice). `make ci`
+(1282 passed) + three new temp-dir reproductions. Verdict: **BLOCKED**.
+**P3-UX-API-CONTRACT-006 — fixed.** F1, P1-DATA-INTEGRITY-004 and
+P2-CORRECTNESS-005 all **partially fixed**:
+
+- **F1** — `_owned_skill` still required exact `---\n` bytes. A live owned skill
+  converted to **CR-only**, prefixed with a **UTF-8 BOM**, or given **whitespace
+  after the fence** kept both ownership keys yet classified `orphaned` and
+  reverted, leaving the skill installed.
+- **P1-004** — the guard compared only `status` + `extract_draft`. Changing only
+  `candidate_type` (valid→valid, which a concurrent `recommend run` refresh does)
+  changed the render while the compared fields matched, and the acceptance was
+  recorded. Also flagged: `accept_proposal` reloads independently *after* the
+  guard, so even a complete field comparison would not bind the checked version.
+- **P2-005** — `read_target_text` decodes UTF-8, so invalid bytes raise
+  `UnicodeDecodeError`, not `OSError`, and still escaped the classifier.
+- Codex also noted ADR-0020/spec/G2's global "fail closed" / "both sides" /
+  "closed structurally" claims were **premature**.
+
+---
+
+## Round 5 — author response  _(Author — Claude, 2026-07-24)_
+
+# Claude Revision Response
+
+## Summary
+
+**Naming the pattern first: three rounds running, my fixes hit Codex's specific
+reproduction rather than the rule behind it** — the exact trap this repo already
+recorded from the store-lock relay ("a repeated finding means the fix hit the
+example, not the cause"). Andrew's call was to fix the causes. So this round
+changes *what question is asked*, not which instance is handled:
+
+| Finding | Instance-level (what I kept doing) | Cause-level (this round) |
+|---|---|---|
+| F1 | normalize the newline form du jour | **stop parsing frontmatter for liveness** — a skill is live iff its file exists |
+| P1-004 | add the next field to the comparison | **compare the re-render**, and bind the checked doc to the write |
+| P2-005 | catch the next exception type | catch **any** read failure (`OSError` + `UnicodeError`) |
+
+## Findings Addressed
+
+### F1 — liveness false negatives across text representations
+- Status: **fixed (at the cause)**
+- Files: `emitters.py` (`candidate_is_live` replaces `text_holds_managed_artifact`;
+  `_owned_skill` rewritten), `proposals.py`
+- What changed: **skill liveness is existence.** A file at the canonical
+  `<...>/skills/<slug>/SKILL.md` is live; its contents are never inspected. Every
+  round found another representation preserving the ownership values while
+  defeating the parser, so the parse is no longer asked. Rules already used a
+  plain marker substring, immune to newline form and encoding markers.
+  `_owned_skill` still exists for the accept flow's `foreign` warning and D40's
+  exclusion — where a false negative is merely conservative — and was rewritten to
+  parse by logical lines (BOM skipped, LF/CRLF/CR all handled, whitespace-tolerant
+  fences), so it is correct in its own right without being load-bearing.
+- Trade-off, documented in ADR/spec: a skill whose contents the user *replaced* is
+  non-revertable until they delete the file — the same "remove it by hand first"
+  rule revert already states, erring toward never orphaning.
+- Verification: `test_revert_refuses_a_live_skill_under_any_text_representation`
+  parametrized over **crlf / cr-only / utf8-bom / fence-whitespace** — real CLI
+  skill accept (`--target project`), mangle, revert must exit 1, reject stays
+  blocked, status `accepted`, file present. Mutation: restoring parser-based skill
+  liveness fails all four plus the round-3 CRLF test.
+
+### P1-DATA-INTEGRITY-004 — incomplete binding of render-relevant state
+- Status: **fixed (at the cause)**
+- Files: `install.py` (`record_acceptance`, `_scope_of`), `proposals.py`
+  (`accept_proposal(expect=…)`, `ProposalChangedError`)
+- What changed: the guard no longer compares fields. It **reloads and re-renders**
+  the current proposal and requires an identical artifact identity — `path`,
+  `target`, `after`, `foreign`. That covers draft, `type`, `target`, `project`,
+  `candidate_type` and the active redaction config at once, because it asks the
+  actual question ("would this still render to what is installed?"). The validated
+  document is then **bound to the write** via `accept_proposal(expect=current)`,
+  which refuses (`ProposalChangedError` → `StaleProposalError`) if its own reload
+  sees anything different — closing the check-then-write window Codex identified.
+  Stated honestly in the ADR: a defensive equality guard, not a lock; true
+  serialization awaits ADR-0017's write lock (separate branch).
+- Verification: `test_record_only_refuses_if_only_candidate_type_changes_during_the_prompt`
+  (real CLI, `candidate_type` changed inside `typer.confirm`),
+  `test_record_acceptance_binds_the_checked_document_to_the_write` (deterministic
+  mutation injected *between* the guard and the write via a patched
+  `emitters.prepare`), `test_accept_proposal_expect_guard_refuses_a_changed_document`.
+  Mutations: reverting to the field-subset comparison, and dropping `expect=`,
+  each fail their tests.
+
+### P2-CORRECTNESS-005 — non-OSError read failures
+- Status: **fixed (at the cause)**
+- Files: `proposals.py` (`artifact_state`)
+- What changed: the per-candidate catch is `(OSError, UnicodeError)`, with the
+  rule written down as "could not read it", not "raised a particular exception".
+- Verification: `test_artifact_state_is_unresolvable_when_a_candidate_is_not_valid_utf8`.
+  Mutation: narrowing back to `OSError` fails it.
+
+### P3-UX-API-CONTRACT-006
+- Status: **fixed** in round 4, confirmed by the reviewer.
+
+## Additional Changes
+
+- ADR-0020 D39/D40, spec §12.7 (prose + edge-case table) and known-gaps G2 updated
+  to the cause-level boundary, and — per Codex's note — the global "fail closed" /
+  "closed structurally" claims **scoped honestly**: the ADR now says what is and
+  is not claimed (no exhaustiveness proof; no concurrent-writer safety).
+
+## Tests / Checks
+- Command: `make ci`
+- Result: **1290 passed, 1 skipped**, all 5 stages green.
+- Notes: four mutations verified (skill-liveness-by-parsing, field-subset
+  comparison, `expect=` removal, `OSError`-only catch).
+
+## Ready For Re-Review
+- Artifact / commit: new follow-up commit on `feat/webui-phase1-suggestions`
+  (delta from `671243b`).
+- Specific scope: whether the *cause-level* reframing holds — is there any input
+  class left where liveness misreads a live artifact, given it now rests on file
+  existence and a marker substring rather than parsing? Does the re-render
+  comparison miss any render-relevant state? Is the existence trade-off (a
+  replaced skill is non-revertable) acceptable and correctly documented?

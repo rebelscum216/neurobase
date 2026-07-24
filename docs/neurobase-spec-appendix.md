@@ -1576,14 +1576,18 @@ named-status CLI error" to workstream F's test list before this ships):**
   target file's bytes changed (that is survival's question, §12.9, and is
   deliberately different). Liveness is judged by the slug-scoped artifact
   re-derived from the proposal: a rule is live while its `neurobase:rule:<slug>`
-  marker is in the target, a skill while its owned `SKILL.md` is present —
+  marker is in the target, a skill while its `SKILL.md` **exists** —
   **whatever else the user changed around it**. The check fails closed in three
   ways: it looks at **every** plausible location (the recorded `installed_path`
   plus the re-derived target under every registered project root, so a moved and
-  re-registered repo can't read as gone), skill ownership is **newline-agnostic**
-  (a CRLF-converted owned SKILL.md is still owned), and a candidate that cannot be
-  read (a directory, a permissions failure) yields `unresolvable` rather than
-  "missing". Revert is allowed *only* when no live artifact remains: the target is
+  re-registered repo can't read as gone); a skill's liveness is **existence, not
+  frontmatter parsing** (deliberately — CRLF, CR-only, a UTF-8 BOM and fence
+  whitespace each defeated an ownership parser while the skill was still
+  installed, so the parse is not asked at all); and a candidate that cannot be
+  read — a directory, a permissions failure, or invalid UTF-8 — yields
+  `unresolvable` rather than "missing". One consequence of the existence rule: a
+  skill whose contents the user *replaced* stays non-revertable until the file is
+  deleted. Revert is allowed *only* when no live artifact remains: the target is
   **missing**, or **orphaned** (a file is present but our block/skill was removed
   from it). It then flips back to
   `proposed` — the review queue — clears `installed_path`, and appends a
@@ -1818,7 +1822,7 @@ behavior" in one place without re-reading the whole section.
 | `revert` on an `accepted` proposal whose managed artifact is still live (marker/skill present, even if the file was edited around it) | Hard CLI error — revert is drift repair, not an uninstall; remove the managed block/skill by hand first | §12.7, ADR-0020 (F1) |
 | `revert` on an `accepted` proposal whose target can't be resolved (project unregistered / malformed) | Hard CLI error — fail closed rather than risk orphaning a live artifact | §12.7, ADR-0020 |
 | `accept` with an unchanged diff, proposal already `accepted` | No-op, "already up to date," no write, no backup, no ledger event | §12.7 |
-| `accept` with an unchanged diff, proposal `proposed` + Neurobase-owned target | Records acceptance (status/`installed_path`/`installed_hash`), no write, no backup — the installed-but-unrecorded case. Both sides of the preview are re-verified at the write boundary: a hard error (CLI exit 1 / web 409) if the target bytes **or** the proposal's draft/status changed since the preview | §12.7, ADR-0020 |
+| `accept` with an unchanged diff, proposal `proposed` + Neurobase-owned target | Records acceptance (status/`installed_path`/`installed_hash`), no write, no backup — the installed-but-unrecorded case. Both sides of the preview are re-verified at the write boundary: a hard error (CLI exit 1 / web 409) if the target bytes changed, or if re-rendering the current proposal no longer produces an identical artifact (path/target/bytes/ownership). The validated document is bound to the write (`accept_proposal(expect=…)`) so the version checked is the version accepted | §12.7, ADR-0020 |
 | `accept --target project` with no `project` on the proposal | Hard CLI error; never guesses a project | §12.8 |
 | `accept` where `proposal.project` no longer exists in `registry.toml` | Hard CLI error naming the stale project; never a bare `KeyError` | §12.8 |
 | `accept` onto a foreign (non-Neurobase) SKILL.md, including one with unparseable frontmatter | Treated as "not owned"; written only through the single diff/consent/backup gate, diff view calls it out explicitly | §12.8 |

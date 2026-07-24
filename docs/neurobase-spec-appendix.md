@@ -1575,13 +1575,16 @@ named-status CLI error" to workstream F's test list before this ships):**
   proposal's **managed artifact is still live on disk** — *not* on whether the
   target file's bytes changed (that is survival's question, §12.9, and is
   deliberately different). Liveness is judged by the slug-scoped artifact
-  re-derived from the proposal: a rule is live while its `neurobase:rule:<slug>`
-  marker is in the target, a skill while its `SKILL.md` **exists** —
+  re-derived from the proposal: a rule is live while its opening **sentinel**
+  `<!-- neurobase:rule:<slug>` is in the target (the identity token — whitespace
+  after `<!--` and anything after the slug are ignored, a longer slug never
+  matches, and a lone *closing* marker is not liveness), a skill while its
+  `SKILL.md` **exists** —
   **whatever else the user changed around it**. The check fails closed in three
   ways: it looks at **every** plausible location (the recorded `installed_path`
   plus the re-derived target under every registered project root, so a moved and
-  re-registered repo can't read as gone); a skill's liveness is **existence, not
-  frontmatter parsing** (deliberately — CRLF, CR-only, a UTF-8 BOM and fence
+  re-registered repo can't read as gone); a skill's liveness is **existence; its frontmatter is never
+  parsed** (deliberately — CRLF, CR-only, a UTF-8 BOM and fence
   whitespace each defeated an ownership parser while the skill was still
   installed, so the parse is not asked at all); and a candidate that cannot be
   read — a directory, a permissions failure, or invalid UTF-8 — yields

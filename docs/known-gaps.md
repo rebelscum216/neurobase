@@ -198,7 +198,9 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
   or *orphaned* (file present but our block/skill removed), and refused when it is
   *live* or *unresolvable*. Liveness fails closed three ways: it checks **every**
   plausible location (recorded `installed_path` + the target under every
-  registered project root); a **skill is live if its file exists** (liveness is
+  registered project root); a rule is live while its opening sentinel
+  `<!-- neurobase:rule:<slug>` is present (one grammar, shared with the write so
+  they cannot disagree) and a **skill is live if its file exists** (liveness is
   deliberately not a frontmatter-parsing question — CRLF, CR-only, a BOM and fence
   whitespace each defeated a parser while the skill stayed installed, so the parse
   is not asked); and any unreadable candidate (directory, permissions, invalid

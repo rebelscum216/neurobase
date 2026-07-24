@@ -1028,15 +1028,16 @@ def recommend_revert(
 
     Flips `status: accepted` → `proposed` and clears the recorded `installed_path`
     so the store stops claiming an artifact that isn't there. Allowed *only* when
-    the managed artifact is genuinely gone — the target file is missing, or the
-    Neurobase-managed block / owned SKILL.md has been removed from it.
+    the managed artifact is genuinely gone: for a rule, its
+    `<!-- neurobase:rule:<slug>` block is no longer in the target file; for a
+    skill, no SKILL.md remains at the canonical skills path.
 
-    It is NOT an uninstall and never deletes or rewrites anything. While the
-    managed block or owned skill is still present it stays live, so revert is
-    refused — editing the file, inside the block or around it, does not make it
-    revertable. To retire a live artifact, delete the managed block (or the file)
-    by hand first, then revert. A target that cannot be resolved is also refused,
-    rather than assumed gone.
+    It is NOT an uninstall and never deletes or rewrites anything. A rule block
+    that is still present — however you reworded the comment around it — and any
+    SKILL.md still sitting at that path both count as live, so revert is refused:
+    editing the file does not make it revertable. To retire a live artifact,
+    delete the managed block (or the file) by hand first, then revert. A target
+    that cannot be resolved or read is also refused, rather than assumed gone.
     """
     resolved_root = store.resolve_root(root)
     handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)

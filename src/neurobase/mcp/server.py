@@ -311,7 +311,13 @@ def build_server(
             """Recalled project memory for the current directory (Claude sugar)."""
             if handle is None:
                 return "Project memory is unavailable because the store schema is unsupported."
-            context = recall_common.build_context(handle.root, cwd)
+            # §13: an MCP surface must never raise. build_context reads config +
+            # registry, either of which can be malformed — swallow to the empty
+            # fallback rather than error the prompt (review R2-5).
+            try:
+                context = recall_common.build_context(handle.root, cwd)
+            except Exception:  # noqa: BLE001 - fail-soft: MCP surfaces never raise
+                context = None
             return context or "No project memory found for the current directory."
 
     return server

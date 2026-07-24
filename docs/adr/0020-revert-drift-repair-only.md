@@ -38,7 +38,7 @@ drift without becoming the un-accept ADR-0007 deferred?
 
 ## Decision
 
-- **D39 — Revert is defined only when no live managed artifact remains.** The
+- **D43 — Revert is defined only when no live managed artifact remains.** The
   question `revert` asks is whether reverting would orphan a still-installed
   Neurobase artifact — *not* whether the target file's bytes survived verbatim.
   Those are different questions, and conflating them was the round-2 defect
@@ -89,7 +89,7 @@ drift without becoming the un-accept ADR-0007 deferred?
      valid UTF-8 (`UnicodeError`) — yields `unresolvable`. The rule is "could not
      read it", not "raised a particular exception type".
 
-  `_owned_skill` survives for the accept flow's `foreign` warning and D40's
+  `_owned_skill` survives for the accept flow's `foreign` warning and D44's
   never-claim-a-foreign-file exclusion, where a false negative is merely
   conservative rather than orphaning. It now parses by logical lines (BOM
   skipped, all newline forms, whitespace-tolerant fences) so it is correct in its
@@ -98,12 +98,12 @@ drift without becoming the un-accept ADR-0007 deferred?
   artifact the user removes the managed block/skill by hand first, which puts the
   proposal in the `orphaned`/`missing` state revert then repairs. This closes F1
   structurally (a live artifact is non-revertable, so `accept → revert → reject`
-  cannot start, *however* the surrounding file was edited) and, with D40, F2.
+  cannot start, *however* the surrounding file was edited) and, with D44, F2.
   Survival (§12.9) keeps its own separate whole-file-hash comparison — the two
   questions are answered by two functions, never one shared classifier (round-2
   review P2 was the regression from sharing them).
 
-- **D40 — A matching-but-unrecorded artifact is recordable without a write.**
+- **D44 — A matching-but-unrecorded artifact is recordable without a write.**
   "The render already equals disk" now means two different things. If the
   proposal already reads `accepted`, it is §12.7's idempotent no-op — nothing to
   write, nothing to record. If it does not (the state a drift-repair revert
@@ -142,7 +142,7 @@ drift without becoming the un-accept ADR-0007 deferred?
   command, a `reverted` ledger event (now carrying the liveness `reason`), and an
   `accepted → proposed` transition that ADR-0007 D14/D15 did not contemplate.
   Those decisions said an accepted proposal is never metadata-transitioned while
-  its artifact stays in place; that remains true — D39 permits the transition
+  its artifact stays in place; that remains true — D43 permits the transition
   **only** once no live managed artifact remains. This ADR revises that clause to
   the drift-repair carve-out rather than reversing it; ADR-0007 stays otherwise
   intact, and v1 still has no uninstall-by-command.
@@ -160,7 +160,7 @@ drift without becoming the un-accept ADR-0007 deferred?
   skill under CRLF / CR-only / BOM / fence-whitespace, a moved+re-registered
   project, an unreadable and a non-UTF-8 target, and genuinely missing/orphaned
   artifacts. What is *not* claimed: proof of exhaustiveness over all inputs, or
-  safety under concurrent writers (see D40's note on the write lock).
+  safety under concurrent writers (see D44's note on the write lock).
 - **Liveness is deliberately conservative.** Every ambiguity resolves to "refuse":
   an unreadable candidate, an unresolvable project, an unknown proposal type. The
   cost is that a genuinely-gone artifact can occasionally need the user to fix the
@@ -196,11 +196,11 @@ drift without becoming the un-accept ADR-0007 deferred?
   diff/consent/backup). Rejected for this ADR: it is a larger change that
   reverses ADR-0007's deliberate "no uninstall-by-command in v1" and was not what
   the reported drift needed — the user had *deleted* the file, i.e. the `missing`
-  case D39 already handles. Left as future work if demand appears; nothing here
+  case D43 already handles. Left as future work if demand appears; nothing here
   precludes it.
 - **Keep the unconditional revert but block `reject` after it.** Rejected: it
   spreads the invariant across two commands' state machines (revert would have to
-  mark the proposal so reject could refuse), where D39 keeps one honest predicate
+  mark the proposal so reject could refuse), where D43 keeps one honest predicate
   — "is a live managed artifact still on disk?" — enforced at the one write path.
 - **Gate revert on a whole-file hash (the round-2 attempt).** Rejected after
   review F1: a rule block is a fenced region inside a possibly-shared file, so

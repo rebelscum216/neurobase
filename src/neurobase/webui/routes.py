@@ -343,7 +343,7 @@ async def _accept_view(request: Request) -> Response:
             # Mirrors `recommend accept`'s own early return: the proposal is
             # already accepted, so nothing is written and its decision stands.
             return _redirect_with_flash(slug, "Already up to date — nothing to install.")
-        # ADR-0020 D40: the artifact is installed but the proposal doesn't say
+        # ADR-0020 D44: the artifact is installed but the proposal doesn't say
         # so (the state a drift-repair `revert` leaves behind). Nothing to
         # write; record the acceptance. This POST — CSRF-checked and bound to
         # the previewed fingerprint above — is the consent. The preview was

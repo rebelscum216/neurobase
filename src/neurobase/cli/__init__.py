@@ -93,6 +93,15 @@ def enable(
         raise typer.Exit(code=1) from exc
     mem = handle.ensure_tree(project_slug)
     typer.echo(f"Enabled project '{project_slug}' at {mem}")
+    # R2-3: the denylist gates automatic capture/injection even for an explicitly
+    # enabled repo, so warn now rather than let it look enabled but stay silent.
+    if projects.is_denylisted(resolved_cwd, load_config().enable.denylist):
+        typer.secho(
+            f"Warning: {resolved_cwd} is under an [enable] denylist entry — Neurobase "
+            "will suppress automatic capture and injection for it despite this "
+            "registration. Remove it from denylist to capture.",
+            fg=typer.colors.YELLOW,
+        )
 
 
 @app.command()
@@ -1057,7 +1066,7 @@ def recommend_revert(
     # Refuse before prompting when a live managed artifact remains — the same
     # verdict `revert_proposal` reaches on its own (it re-classifies at write
     # time, so a live artifact cannot slip through even if it is restored between
-    # this check and the write, ADR-0020 D39).
+    # this check and the write, ADR-0020 D43).
     state = proposals.artifact_state(handle.root, doc, slug)
     refusal = proposals.revert_refusal(slug, doc, state)
     if refusal is not None:
@@ -1114,7 +1123,7 @@ def recommend_accept(
         if not preview.records_acceptance:
             typer.echo("Already up to date.")
             return
-        # ADR-0020 D40: installed but unrecorded. Nothing to write or back up,
+        # ADR-0020 D44: installed but unrecorded. Nothing to write or back up,
         # but acceptance is still recordable — and without this the state a
         # drift-repair `revert` leaves behind could never be re-accepted at all
         # (review F2). Consent is still asked for: it changes the store's record

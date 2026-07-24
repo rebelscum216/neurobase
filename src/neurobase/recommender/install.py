@@ -38,7 +38,7 @@ class ProposalDecidedError(RuntimeError):
 
 
 class StalePreviewError(RuntimeError):
-    """Base for the record-only path's mutation-boundary refusals (ADR-0020 D40).
+    """Base for the record-only path's mutation-boundary refusals (ADR-0020 D44).
 
     A record-only acceptance writes no artifact, so it can only be honest if
     *both* sides of the preview still hold at the moment it records: the target
@@ -86,7 +86,7 @@ class InstallPreview:
     doc: store.Document
     artifact: emitters.Artifact
     already_up_to_date: bool
-    #: ADR-0020 D40. True when the render already matches disk *and* the
+    #: ADR-0020 D44. True when the render already matches disk *and* the
     #: proposal does not yet say so — the artifact is installed but unrecorded,
     #: so acceptance is recordable with no write. False when the proposal is
     #: already ``accepted`` (a plain idempotent no-op, §12.7) or when the target
@@ -121,7 +121,7 @@ def prepare_install(root: Path, slug: str, *, target: str | None = None) -> Inst
         raise ProposalDecidedError(slug, status)
     artifact = emitters.prepare(root, doc, skill_scope=target)
     already_up_to_date = artifact.before == artifact.after
-    # ADR-0020 D40: "the render already matches disk" means two different things
+    # ADR-0020 D44: "the render already matches disk" means two different things
     # depending on the record. If the proposal is already `accepted`, it is
     # §12.7's idempotent no-op — nothing to write, nothing to record. If it is
     # not, the artifact is installed while the store says it isn't: the state a
@@ -167,7 +167,7 @@ def record_acceptance(root: Path, preview: InstallPreview) -> InstallResult:
     """Record acceptance of an artifact that is already installed byte-for-byte
     (``preview.records_acceptance``), without writing or backing anything up —
     there is nothing to write, and a backup of bytes identical to the render
-    would preserve nothing (ADR-0020 D40).
+    would preserve nothing (ADR-0020 D44).
 
     Callers must still have obtained consent: this changes the store's own
     record of what is installed, and the recorded ``installed_hash`` becomes the

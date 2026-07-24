@@ -542,11 +542,11 @@ def test_reverted_proposal_can_be_reaccepted(tmp_path: Path) -> None:
     assert _marker() in installed.read_text(encoding="utf-8")
 
 
-# --- ADR-0020 D39: revertability is liveness, not whole-file identity --------
+# --- ADR-0020 D43: revertability is liveness, not whole-file identity --------
 
 
 def test_revert_refuses_a_live_managed_block(tmp_path: Path) -> None:
-    """ADR-0020 D39 / review F1: a rule whose managed block is still on disk is
+    """ADR-0020 D43 / review F1: a rule whose managed block is still on disk is
     NOT revertable — even after the user edited the file *around* the block. The
     round-2 hole was exactly this: an edit outside the block flipped the file
     hash to `modified` and let `accept → revert → reject` orphan the live rule."""
@@ -569,7 +569,7 @@ def test_revert_refuses_a_live_managed_block(tmp_path: Path) -> None:
 
 
 def test_revert_refuses_an_edit_inside_a_still_present_block(tmp_path: Path) -> None:
-    """ADR-0020 D39 (Codex verification case 2): a hand-tweak *inside* the block
+    """ADR-0020 D43 (Codex verification case 2): a hand-tweak *inside* the block
     leaves the marker present, so the managed artifact is still live and revert
     is refused — the rule is installed, just edited."""
     root = tmp_path / "store"
@@ -585,7 +585,7 @@ def test_revert_refuses_an_edit_inside_a_still_present_block(tmp_path: Path) -> 
 
 
 def test_revert_refuses_when_target_is_unresolvable(tmp_path: Path) -> None:
-    """ADR-0020 D39: if the target can't be re-derived (project unregistered), we
+    """ADR-0020 D43: if the target can't be re-derived (project unregistered), we
     cannot prove the artifact is gone, so revert fails closed rather than risk
     orphaning it."""
     root = tmp_path / "store"
@@ -601,7 +601,7 @@ def test_revert_refuses_when_target_is_unresolvable(tmp_path: Path) -> None:
 
 
 def test_revert_allows_a_missing_artifact(tmp_path: Path) -> None:
-    """ADR-0020 D39: the original G2 drift — the user deleted the installed file
+    """ADR-0020 D43: the original G2 drift — the user deleted the installed file
     by hand — is exactly what revert is for. Ledger reason = `missing`."""
     root = tmp_path / "store"
     installed = _accept_real(tmp_path, root)
@@ -614,7 +614,7 @@ def test_revert_allows_a_missing_artifact(tmp_path: Path) -> None:
 
 
 def test_revert_allows_an_orphaned_artifact(tmp_path: Path) -> None:
-    """ADR-0020 D39: the target file is still there but the user removed our
+    """ADR-0020 D43: the target file is still there but the user removed our
     managed block from it — the managed artifact is gone, so revert repairs the
     record. Ledger reason = `orphaned`."""
     root = tmp_path / "store"
@@ -631,7 +631,7 @@ def test_revert_allows_an_orphaned_artifact(tmp_path: Path) -> None:
 
 
 def test_revert_of_accepted_with_no_installed_path_reresolves_the_target(tmp_path: Path) -> None:
-    """ADR-0020 D39 (Codex case 3): `accepted` with `installed_path: null` does
+    """ADR-0020 D43 (Codex case 3): `accepted` with `installed_path: null` does
     NOT mean the artifact is gone — the target is re-derived from the proposal.
     If the managed block is still live there, revert is refused."""
     root = tmp_path / "store"

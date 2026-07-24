@@ -439,7 +439,7 @@ def test_accept_post_when_already_up_to_date_is_a_no_op(
 def test_accept_post_records_acceptance_when_installed_but_unrecorded(
     client: TestClient, app: Starlette, seed: Seed
 ) -> None:
-    """ADR-0020 D40, the web UI's half of review F2: after a drift-repair
+    """ADR-0020 D44, the web UI's half of review F2: after a drift-repair
     `revert` the artifact can be back to exactly the rendered bytes, and the
     POST must then record acceptance rather than short-circuit on "already up
     to date" — which is what stranded the proposal as `proposed` with a live
@@ -452,7 +452,7 @@ def test_accept_post_records_acceptance_when_installed_but_unrecorded(
     rendered = installed.read_bytes()
 
     # Drift, repair the record, then restore the bytes: installed-but-unrecorded.
-    # A skill is live while its file EXISTS (ADR-0020 D39 — liveness is not a
+    # A skill is live while its file EXISTS (ADR-0020 D43 — liveness is not a
     # frontmatter-parsing question), so reaching the record-only state means
     # deleting it, reverting the now-true drift, then restoring the same bytes.
     installed.unlink()
@@ -502,7 +502,7 @@ def test_accept_post_returns_409_when_the_record_only_write_goes_stale(
     assert doc is not None
     installed = Path(str(doc.get("installed_path")))
     rendered = installed.read_bytes()
-    # A skill is live while its file EXISTS (ADR-0020 D39 — liveness is not a
+    # A skill is live while its file EXISTS (ADR-0020 D43 — liveness is not a
     # frontmatter-parsing question), so reaching the record-only state means
     # deleting it, reverting the now-true drift, then restoring the same bytes.
     installed.unlink()

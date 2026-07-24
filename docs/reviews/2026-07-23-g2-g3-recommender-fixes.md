@@ -81,7 +81,7 @@ two commits: `488167e` G3, `cb40448` G2). Key files:
 - Both G3 tests and the G2 metrics test were mutation-verified to fail pre-fix
   (see commit messages).
 
-**Out of scope.** The rest of the branch (webui Phase 1, the ADR-0019 rebase, the
+**Out of scope.** The rest of the branch (webui Phase 1, the webui ADR renumber, the
 `ui` StoreHandle fix) — already reviewed/landed. No webui surface for `revert` yet
 (deliberately deferred to the app-shell phases). Origin's ADR-0015 StoreHandle work.
 
@@ -122,7 +122,7 @@ ledger-summary, and web-accept call paths. There were no prior findings.
   cannot orphan installed behavior. Add a CLI integration regression for
   `accept → revert → reject` that proves the final proposal and disk state cannot
   contradict one another.
-- **resolution:** resolved (round 2, ADR-0020 D39). `revert_proposal` now
+- **resolution:** resolved (round 2, ADR-0020 D43). `revert_proposal` now
   classifies the artifact via the new `proposals.artifact_state` and refuses any
   state that is not `missing`/`modified`/`unrecorded`. A **healthy** artifact
   (present, bytes == latest `accepted` event's `installed_hash`) raises a
@@ -160,7 +160,7 @@ ledger-summary, and web-accept call paths. There were no prior findings.
   impossible. Pin the decision with a service/CLI test that performs the real
   accept, revert, and re-accept flow and asserts final `accepted` status,
   `installed_path`, and ledger behavior.
-- **resolution:** resolved (round 2, ADR-0020 D40). Two halves. (a) After a
+- **resolution:** resolved (round 2, ADR-0020 D44). Two halves. (a) After a
   drift-repair revert of a *modified* artifact, re-`accept` re-renders and the
   bytes differ, so it writes and flips to `accepted` normally —
   `test_revert_then_reaccept_restores_acceptance_and_reinstalls_the_block` drives
@@ -229,8 +229,8 @@ ledger-summary, and web-accept call paths. There were no prior findings.
   consent clauses, and update the ADR index/status according to repository
   policy.
 - **resolution:** resolved (round 2). `docs/adr/0020-revert-drift-repair-only.md`
-  (Status: Proposed) records the decision as **D39** (drift-repair-only revert) and
-  **D40** (installed-but-unrecorded acceptance), explicitly revising ADR-0007's
+  (Status: Proposed) records the decision as **D43** (drift-repair-only revert) and
+  **D44** (installed-but-unrecorded acceptance), explicitly revising ADR-0007's
   D14/D15 lifecycle clause to a carve-out (transition permitted *only* once the
   artifact is demonstrably no longer in place unchanged) rather than reversing it;
   v1 still has no uninstall-by-command. Indexed in `docs/adr/README.md` (row 0020).
@@ -323,7 +323,7 @@ failures through the real CLI**. Verdict: **BLOCKED**.
 - **F2 — fixed.** The record-only path + modified-artifact re-accept both restore
   `accepted`.
 - **F3 — fixed** (no round-2 regression). **F4 — fixed** (ADR-0020 records
-  D39/D40 as an ADR-0007 carve-out).
+  D43/D44 as an ADR-0007 carve-out).
 - **F1 — still open (narrowed).** `healthy`/`unverifiable` are refused, but
   `modified` was defined as a whole-*file* hash mismatch. For a rule, the managed
   block is a fenced region inside AGENTS.md/CLAUDE.md, so an edit *outside* the
@@ -413,7 +413,7 @@ separate predicates. Revision tip: **new follow-up commit on
 - What changed: the Consequences no longer claim `docs/how-it-works.md` was
   updated; it names that entry as pre-existing stale drift from the D-1
   install-service refactor and tracks it as a separate follow-up. Spec §12.7 +
-  known-gaps G2 updated to the liveness boundary; D39 rewritten around liveness.
+  known-gaps G2 updated to the liveness boundary; D43 rewritten around liveness.
 
 ## Additional Changes
 
@@ -534,7 +534,7 @@ sides of its preview, and fixes the public help text.
 
 ## Additional Changes
 
-- ADR-0020 D39/D40, spec §12.7 (prose + edge-case table) and known-gaps G2 updated
+- ADR-0020 D43/D44, spec §12.7 (prose + edge-case table) and known-gaps G2 updated
   to the refined boundary (three fail-closed rules; both-sides preview binding).
 - `emitters.target_path` / `managed_artifact_live` were replaced by
   `candidate_target_paths` / `text_holds_managed_artifact` (multi-location).
@@ -607,7 +607,7 @@ changes *what question is asked*, not which instance is handled:
   round found another representation preserving the ownership values while
   defeating the parser, so the parse is no longer asked. Rules already used a
   plain marker substring, immune to newline form and encoding markers.
-  `_owned_skill` still exists for the accept flow's `foreign` warning and D40's
+  `_owned_skill` still exists for the accept flow's `foreign` warning and D44's
   exclusion — where a false negative is merely conservative — and was rewritten to
   parse by logical lines (BOM skipped, LF/CRLF/CR all handled, whitespace-tolerant
   fences), so it is correct in its own right without being load-bearing.
@@ -655,7 +655,7 @@ changes *what question is asked*, not which instance is handled:
 
 ## Additional Changes
 
-- ADR-0020 D39/D40, spec §12.7 (prose + edge-case table) and known-gaps G2 updated
+- ADR-0020 D43/D44, spec §12.7 (prose + edge-case table) and known-gaps G2 updated
   to the cause-level boundary, and — per Codex's note — the global "fail closed" /
   "closed structurally" claims **scoped honestly**: the ADR now says what is and
   is not claimed (no exhaustiveness proof; no concurrent-writer safety).
@@ -720,7 +720,7 @@ The gap was mine: the code did not do what its own docstring, ADR-0020 and spec
 ### F1 — rule liveness depended on the marker's explanatory prose
 - Status: **fixed**
 - Files: `emitters.py` (`rule_sentinel`, `_rule_start_marker`, `candidate_is_live`,
-  `_rule`), `cli/__init__.py` (help text), ADR-0020 D39, spec §12.7, known-gaps G2
+  `_rule`), `cli/__init__.py` (help text), ADR-0020 D43, spec §12.7, known-gaps G2
 - What changed: new `emitters.rule_sentinel(slug)` defines the identity token once
   — `<!--` + optional whitespace + `neurobase:rule:<slug>`, with a `(?![a-z0-9-])`
   boundary. It tolerates whitespace after `<!--` and **anything** after the slug
@@ -756,7 +756,7 @@ The gap was mine: the code did not do what its own docstring, ADR-0020 and spec
   open and decode candidates, since a read failure is itself a verdict), and
   `recommend revert --help` now says "no SKILL.md remains at the canonical skills
   path" rather than "owned SKILL.md", matching the existence predicate literally.
-- ADR-0020 D39's opening summary corrected to the sentinel/existence wording (it
+- ADR-0020 D43's opening summary corrected to the sentinel/existence wording (it
   still described the superseded frontmatter-ownership rule).
 
 ## Tests / Checks

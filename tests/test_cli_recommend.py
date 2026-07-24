@@ -414,7 +414,7 @@ def _revert(root: Path, *, extra: list[str] | None = None, stdin: str | None = N
 
 
 def test_revert_refuses_while_the_artifact_is_healthy(tmp_path: Path) -> None:
-    """ADR-0020 D39 / review F1: `accept → revert` is refused outright while the
+    """ADR-0020 D43 / review F1: `accept → revert` is refused outright while the
     installed artifact is present and unchanged, so the `accept → revert →
     reject` sequence that would orphan a live managed file cannot even start.
     Reject stays blocked on `accepted`, which is what makes the pair airtight."""
@@ -436,7 +436,7 @@ def test_revert_refuses_while_the_artifact_is_healthy(tmp_path: Path) -> None:
 def test_revert_after_deleting_the_artifact_then_reject_leaves_nothing_installed(
     tmp_path: Path,
 ) -> None:
-    """ADR-0020 D39: the sanctioned route to retiring an accepted proposal —
+    """ADR-0020 D43: the sanctioned route to retiring an accepted proposal —
     remove the artifact, revert the now-false record, then reject. The end state
     is `rejected` with nothing installed, never `rejected` with a live file."""
     root = tmp_path / "store"
@@ -494,7 +494,7 @@ def test_revert_then_reaccept_restores_acceptance_and_reinstalls_the_block(
 def test_reaccept_records_acceptance_when_the_artifact_already_matches(
     tmp_path: Path,
 ) -> None:
-    """ADR-0020 D40: installed-but-unrecorded. The artifact was restored to
+    """ADR-0020 D44: installed-but-unrecorded. The artifact was restored to
     exactly the rendered bytes after a revert, so there is nothing to write —
     but acceptance must still be recordable, or this proposal is stranded
     `proposed` forever with its artifact live on disk (review F2's residue)."""
@@ -767,7 +767,7 @@ def test_record_only_refuses_if_only_candidate_type_changes_during_the_prompt(
 def test_reaccept_of_an_already_accepted_proposal_stays_a_pure_no_op(
     tmp_path: Path,
 ) -> None:
-    """ADR-0020 D40 keeps §12.7's idempotent-accept contract intact: when the
+    """ADR-0020 D44 keeps §12.7's idempotent-accept contract intact: when the
     proposal already reads `accepted`, a matching render still writes nothing
     and records nothing."""
     root = tmp_path / "store"

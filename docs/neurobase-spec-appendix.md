@@ -1623,7 +1623,7 @@ named-status CLI error" to workstream F's test list before this ships):**
 
 If the rendered artifact is already byte-for-byte identical to what
 `accept` would write, `accept`'s behavior depends on the proposal's own record
-(ADR-0020 D40): if it already reads `accepted`, this is the idempotent no-op —
+(ADR-0020 D44): if it already reads `accepted`, this is the idempotent no-op —
 "already up to date", no backup, no write, no ledger event, `status` unchanged.
 If it does *not* (the installed-but-unrecorded state a drift-repair `revert`
 leaves behind once the user restores the bytes, and the target is

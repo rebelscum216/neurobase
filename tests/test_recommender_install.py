@@ -140,12 +140,12 @@ def test_prepare_install_no_op_after_commit(tmp_path: Path) -> None:
     second = install.prepare_install(root, slug)
     assert second.already_up_to_date is True
     assert second.artifact.before == second.artifact.after
-    # ADR-0020 D40: already `accepted`, so this stays a plain no-op — there is
+    # ADR-0020 D44: already `accepted`, so this stays a plain no-op — there is
     # nothing to write AND nothing to record.
     assert second.records_acceptance is False
 
 
-# --- ADR-0020 D40: installed-but-unrecorded ------------------------------------
+# --- ADR-0020 D44: installed-but-unrecorded ------------------------------------
 
 
 def test_prepare_install_flags_a_matching_artifact_the_record_does_not_claim(
@@ -276,7 +276,7 @@ def test_record_acceptance_refuses_a_stale_preview(tmp_path: Path) -> None:
 def test_a_matching_foreign_target_is_never_silently_claimed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0020 D40's exclusion. A file Neurobase does not own must not become
+    """ADR-0020 D44's exclusion. A file Neurobase does not own must not become
     an "acceptance" just because its bytes happen to match — recording it would
     hand ownership (and a later overwrite-on-accept) to a file the user wrote.
     The renderer is stubbed because a genuinely foreign file cannot normally

@@ -59,7 +59,7 @@ def rule_sentinel(slug: str) -> re.Pattern[str]:
     """The **identity token** for a slug's managed rule block: `<!--` followed by
     `neurobase:rule:<slug>`. One grammar, defined here once, used by both the
     liveness check and the block-splicing write so they can never disagree
-    (ADR-0020 D39; review F1 round 5).
+    (ADR-0020 D43; review F1 round 5).
 
     Deliberately narrow about what counts as identity and tolerant about
     everything else:
@@ -190,7 +190,7 @@ def _project_roots(root: Path, doc: store.Document) -> list[Path]:
 
 def candidate_target_paths(root: Path, doc: store.Document) -> list[Path]:
     """Every place this proposal's managed artifact could plausibly be installed,
-    most-authoritative first (ADR-0020 D39, review F1 round 3).
+    most-authoritative first (ADR-0020 D43, review F1 round 3).
 
     Liveness must **fail closed across locations**: it is not enough to check the
     one path a fresh render would target. So this returns the recorded
@@ -236,7 +236,7 @@ def candidate_target_paths(root: Path, doc: store.Document) -> list[Path]:
 
 def candidate_is_live(text: str, doc: store.Document) -> bool:
     """Does this **existing** candidate target hold the proposal's managed
-    artifact (ADR-0020 D39)? Callers only ask about candidates that exist.
+    artifact (ADR-0020 D43)? Callers only ask about candidates that exist.
 
     - **skill:** existence *is* liveness — a file at the canonical
       `<...>/skills/<slug>/SKILL.md` counts as live, full stop. We deliberately
@@ -306,8 +306,8 @@ def _owned_skill(text: str, slug: str) -> bool:
 
     NOTE this is no longer load-bearing for the revert/orphan invariant: skill
     liveness is decided by *existence* at the canonical path (``candidate_is_live``,
-    ADR-0020 D39), precisely so no frontmatter-format edge case can make a live
-    skill look gone. It still drives the accept flow's `foreign` warning and D40's
+    ADR-0020 D43), precisely so no frontmatter-format edge case can make a live
+    skill look gone. It still drives the accept flow's `foreign` warning and D44's
     never-claim-a-foreign-file exclusion, where a false negative is merely
     conservative."""
     lines = text.lstrip("﻿").splitlines()

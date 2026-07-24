@@ -319,7 +319,7 @@ def test_skill_strips_frontmatter_without_trailing_newline(
     assert not body.lstrip().startswith("---")
 
 
-# --- ADR-0020 D39: the rule sentinel grammar (review F1, round 5) -------------
+# --- ADR-0020 D43: the rule sentinel grammar (review F1, round 5) -------------
 
 
 def test_rule_sentinel_matches_regardless_of_the_explanatory_suffix() -> None:

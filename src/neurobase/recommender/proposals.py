@@ -530,7 +530,7 @@ def reject_proposal(
 
 class ProposalChangedError(ValueError):
     """Raised when ``accept_proposal``'s ``expect`` guard finds the proposal on
-    disk is no longer the document the caller validated (ADR-0020 D40, review
+    disk is no longer the document the caller validated (ADR-0020 D44, review
     P1-DATA-INTEGRITY-004)."""
 
 
@@ -552,7 +552,7 @@ def accept_proposal(
     compute one — the survival check falls back to existence-only for those
     (legacy) events.
 
-    ``expect`` (ADR-0020 D40) binds this write to a document the caller already
+    ``expect`` (ADR-0020 D44) binds this write to a document the caller already
     validated: if the proposal reloaded here differs from it, raise
     ``ProposalChangedError`` and write nothing. Without it a caller that checks
     the proposal and *then* calls this function has a window in between — this
@@ -600,7 +600,7 @@ ARTIFACT_ORPHANED = "orphaned"  #: target present but our block/skill is gone fr
 ARTIFACT_UNRESOLVABLE = "unresolvable"  #: target can't be resolved — NON-revertable (fail closed)
 
 #: The liveness states in which no live managed artifact remains to orphan, and
-#: only these (ADR-0020 D39, review F1). `live` and `unresolvable` are refused:
+#: only these (ADR-0020 D43, review F1). `live` and `unresolvable` are refused:
 #: the first would orphan a live artifact, the second cannot *prove* one is gone.
 REVERTABLE_ARTIFACT_STATES = frozenset({ARTIFACT_MISSING, ARTIFACT_ORPHANED})
 
@@ -622,7 +622,7 @@ def latest_accepted_event(root: Path, slug: str) -> dict[str, Any] | None:
 
 def artifact_state(root: Path, doc: store.Document, slug: str) -> str:
     """Classify an accepted proposal's *managed artifact* by liveness (ADR-0020
-    D39) — the question ``revert`` must answer. Returns ``live`` when the slug's
+    D43) — the question ``revert`` must answer. Returns ``live`` when the slug's
     opening sentinel (rule), or *any* SKILL.md at the canonical path (skill), is
     still on disk at **any**
     plausible install location, regardless of surrounding foreign bytes;

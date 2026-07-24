@@ -210,7 +210,7 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
   rounds: round-1 F1/F2/F4; round-2 F1 (a whole-file-hash gate let an edit
   *outside* a rule block make it revertable while the block stayed live), F2 (a
   matching-but-unrecorded artifact records acceptance without a write, so
-  re-accept after a revert is reachable — D40), P1 (the record path re-reads the
+  re-accept after a revert is reachable — D44), P1 (the record path re-reads the
   target at the write boundary) and P2 (survival keeps its own existence-first
   whole-file check, separate from revert's liveness); and round-3 F1 (CRLF-owned
   skill + multi-root project both read as gone), P1-004 (a concurrent

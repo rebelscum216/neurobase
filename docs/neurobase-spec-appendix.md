@@ -1546,7 +1546,7 @@ accumulates.
 | `recommend edit <slug>` | — | Opens `$EDITOR` (or, non-interactively, prints for redirection) on the proposal body/draft; on save, overwrites body/draft and appends an `edited` ledger event | Writes proposal file + ledger only; `status` unchanged |
 | `recommend accept <slug>` | `[--target user\|project]` `[--yes]` | Renders the artifact (§12.8), diffs against the current target, asks consent (`--yes` skips the prompt, never the diff), backs up touched files, writes, flips `status: accepted`, sets `installed_path` (and, for `type: skill`, resolves `target` to the scope actually used), appends `accepted` | Writes artifact(s) + proposal + ledger; backup first (workstream F: "accept requires consent unless `--yes`") |
 | `recommend reject <slug>` | `[--reason TEXT]` | Flips `status: rejected`, records `reason`, appends `rejected` | Writes proposal + ledger only (workstream F: "reject updates proposal + ledger") |
-| `recommend revert <slug>` | `[--yes]` | **Drift repair only** (ADR-0020): on an `accepted` proposal whose managed artifact is no longer live on disk (*missing* file, or *orphaned* — the block/skill removed from a file that remains), flips `status: accepted` → `proposed`, clears `installed_path`, appends `reverted` (carrying the liveness `reason`). A *live* managed artifact (the slug's rule marker / owned SKILL.md still present, whatever else changed around it) or an *unresolvable* target is refused. The installed artifact is **never deleted** — revert corrects the store record, it does not uninstall (G2) | Writes proposal + ledger only; consent-gated (`--yes` skips the prompt) |
+| `recommend revert <slug>` | `[--yes]` | **Drift repair only** (ADR-0020): on an `accepted` proposal whose managed artifact is no longer live on disk (*missing* file, or *orphaned* — the block/skill removed from a file that remains), flips `status: accepted` → `proposed`, clears `installed_path`, appends `reverted` (carrying the liveness `reason`). A *live* managed artifact (the slug's rule sentinel, or *any* SKILL.md at the canonical path — whatever else changed around it) or an *unresolvable* target is refused. The installed artifact is **never deleted** — revert corrects the store record, it does not uninstall (G2) | Writes proposal + ledger only; consent-gated (`--yes` skips the prompt) |
 | `status --recommender` | — | Prints precision, edited rate, survival, recurrence-reduction, or "insufficient data" per §12.9 | Read-only; may opportunistically refresh a survival check |
 
 `--target` is meaningful only for `type: skill` proposals (it selects
@@ -1610,7 +1610,7 @@ named-status CLI error" to workstream F's test list before this ships):**
   key on current status, not the ledger (§12.9) — drop a reverted proposal
   cleanly. A reverted proposal can be re-`accept`ed (reinstalls) or `reject`ed
   (retires) like any other `proposed` one. Liveness (`proposals.artifact_state`,
-  marker/ownership) and survival (`metrics`, whole-file hash) are separate
+  sentinel/existence) and survival (`metrics`, whole-file hash) are separate
   predicates by design — they answer different questions.
 - `accept` on an already-`accepted` proposal is the one case that stays
   allowed — re-running it re-renders the artifact and re-diffs against

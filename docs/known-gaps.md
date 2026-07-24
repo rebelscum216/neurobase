@@ -193,7 +193,8 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
 
 - **status:** fixed (2026-07-24, ADR-0020) — `recommend revert` is now
   **drift-repair-only**, gated on whether the proposal's **managed artifact is
-  still live on disk** (the slug's rule marker / owned SKILL.md), *not* on a
+  still live on disk** (the slug's rule sentinel, or *any* SKILL.md at the
+  canonical path), *not* on a
   whole-file hash: allowed only when the artifact is *missing* (target file gone)
   or *orphaned* (file present but our block/skill removed), and refused when it is
   *live* or *unresolvable*. Liveness fails closed three ways: it checks **every**
@@ -235,7 +236,7 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
 **Detail.** Accept records `status: accepted`, `installed_path`, and a ledger
 `accepted` event with `installed_hash` (ADR-0011). `revert` asks a distinct
 question from survival — "is the managed artifact still live to orphan?"
-(`proposals.artifact_state`, by marker/ownership) versus "did the accepted bytes
+(`proposals.artifact_state`, by sentinel/existence) versus "did the accepted bytes
 survive verbatim?" (`metrics._survival_one`, whole-file hash) — so the record can
 be made honest (`proposed`, no `installed_path`) precisely when no live artifact
 remains. `recommend list`/`show` and the web UI rendering an explicit drift

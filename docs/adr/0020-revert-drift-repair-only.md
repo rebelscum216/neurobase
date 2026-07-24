@@ -172,7 +172,8 @@ drift without becoming the un-accept ADR-0007 deferred?
   `reject`. Both refusal messages say so. This is the deliberate cost of not
   shipping an uninstall-by-command in v1.
 - **`revert` (liveness) and `metrics` survival (verbatim bytes) are separate by
-  design.** `proposals.artifact_state` classifies liveness by marker/ownership;
+  design.** `proposals.artifact_state` classifies liveness by the rule sentinel /
+  a skill file's existence;
   `metrics._survival_one` keeps its own existence-first whole-file-hash check.
   Round 2 tried to share one classifier and broke the legacy existence-only
   survival fallback (review P2-REGRESSION-002); they are two questions and stay
@@ -204,8 +205,8 @@ drift without becoming the un-accept ADR-0007 deferred?
 - **Gate revert on a whole-file hash (the round-2 attempt).** Rejected after
   review F1: a rule block is a fenced region inside a possibly-shared file, so
   "the file changed" is not "the managed artifact is gone." Liveness by
-  marker/ownership is the only signal that actually answers the orphaning
-  question.
+  the sentinel-or-existence signal is the only one that actually answers the
+  orphaning question.
 - **Delete/uninstall the artifact inside revert.** Rejected: revert is a
   store-record correction; making it mutate the user's files would be the
   destructive un-accept under a name that promises the opposite, and would

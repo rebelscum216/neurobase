@@ -594,7 +594,7 @@ def accept_proposal(
 #: the slug-scoped marker / skill ownership, re-derived from the proposal, never
 #: by a whole-file hash (round-2 review F1: an edit *outside* a rule block flips
 #: the file hash while the managed block stays live).
-ARTIFACT_LIVE = "live"  #: managed marker / owned skill still present — NON-revertable
+ARTIFACT_LIVE = "live"  #: rule sentinel present, or a SKILL.md exists — NON-revertable
 ARTIFACT_MISSING = "missing"  #: target file absent entirely
 ARTIFACT_ORPHANED = "orphaned"  #: target present but our block/skill is gone from it
 ARTIFACT_UNRESOLVABLE = "unresolvable"  #: target can't be resolved — NON-revertable (fail closed)
@@ -623,7 +623,8 @@ def latest_accepted_event(root: Path, slug: str) -> dict[str, Any] | None:
 def artifact_state(root: Path, doc: store.Document, slug: str) -> str:
     """Classify an accepted proposal's *managed artifact* by liveness (ADR-0020
     D39) — the question ``revert`` must answer. Returns ``live`` when the slug's
-    managed marker (rule) or owned SKILL.md (skill) is still on disk at **any**
+    opening sentinel (rule), or *any* SKILL.md at the canonical path (skill), is
+    still on disk at **any**
     plausible install location, regardless of surrounding foreign bytes;
     ``missing`` when no candidate target exists; ``orphaned`` when a candidate
     exists but no longer holds our block/skill; ``unresolvable`` when the target
@@ -686,7 +687,8 @@ def revert_proposal(root: Path, slug: str, *, now: datetime | None = None) -> st
     **Drift repair only — never an un-accept.** ``revert`` is allowed only when
     ``artifact_state`` is ``missing`` or ``orphaned`` — i.e. no live managed
     artifact remains to orphan. A ``live`` artifact (the slug's rule marker or
-    owned SKILL.md still on disk, *whatever* else changed around it) is refused,
+    any SKILL.md at the canonical path — *whatever* else changed around it) is
+    refused,
     and so is an ``unresolvable`` one (target can't be re-derived, so absence
     cannot be proven). That boundary is load-bearing: with it removed,
     ``accept → revert → reject`` would leave a live Neurobase-managed artifact
@@ -694,7 +696,7 @@ def revert_proposal(root: Path, slug: str, *, now: datetime | None = None) -> st
     blocked ``reject``-on-``accepted`` rule exists to prevent (review F1). Round
     2 got this wrong by keying on a whole-file hash, so a user edit *outside* a
     rule block made the file "modified" and revertable while the block stayed
-    live; liveness is judged by the marker/ownership instead.
+    live; liveness is judged by the sentinel / file existence instead.
 
     The artifact itself is still **never touched** on any path — v1 has no
     uninstall-by-command (ADR-0007, unchanged). To retire a live artifact, remove

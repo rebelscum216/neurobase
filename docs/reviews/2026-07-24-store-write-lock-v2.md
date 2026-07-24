@@ -1,6 +1,6 @@
 ---
 slug: store-write-lock-v2
-status: awaiting-review
+status: blocked
 author: claude
 reviewer: codex
 branch: feat/store-write-lock-v2
@@ -155,4 +155,92 @@ proves nothing.
 
 ## Reviewer findings  _(Reviewer — Codex)_
 
-> _Awaiting round 1._
+**Round 1 verdict: 🚫 BLOCKED** — 1× P1, 3× P2, 1× P3. Codex ran the full gate
+itself (1381 passed, 91.97%, 5/5), both new suites (29 passed), and the
+chokepoint guard (**passed, no new exemption**), then wrote its own deterministic
+interleaving probe.
+
+### P1-DATA-INTEGRITY-001 — contended fallback overwritten by the *lock holder*
+- **severity:** blocker (P1)
+- **location:** `src/neurobase/core/lock.py:129`, `src/neurobase/core/store.py:317`,
+  `src/neurobase/adapters/claude/scribe.py:347`
+- **issue:** the holder does the ordinary, non-exclusive session-keyed write while
+  the loser bypasses the held lock with `unique=True`. `unique` claims atomically
+  only against paths that *already exist*, so if the loser's restamped `now`
+  equals the holder's `captured_at` for the same agent/session key, the loser can
+  `O_EXCL`-claim the exact base path the holder is **about to write** — and the
+  holder's atomic replace then destroys the contending capture. Reachable for the
+  **Claude scribe**, whose ordinary key is also `datetime.now(UTC)`. Codex's probe
+  observed `raw_count=1`, holder body only.
+- **why my new test missed it:** `test_contended_capture_claims_a_fresh_name_on_a_same_instant_collision`
+  (`tests/test_raw_consume_cas.py:426`) races **two fallback writers** under an
+  unrelated outer lock. It proves unique-vs-unique and never races a unique
+  fallback against *the ordinary writer that owns the lock* — the interleaving
+  that actually loses data.
+- **suggested direction:** make the contended namespace disjoint from any ordinary
+  target a live holder might still create — e.g. a contended capture claims a
+  generation-suffixed name **even when the base path is absent**. Preserve
+  unchanged `captured_at`, non-blocking behaviour, the `O_EXCL` claim, and the
+  chokepoint handle. Regression must freeze the holder's input timestamp and the
+  fallback `now` to the same instant, pause the holder before its write, and prove
+  two distinct raws with both bodies surviving — plus the opposite ordering.
+- **resolution:** _(Author fills)_
+
+### P2-TEST-GAP-001 — port wiring not mutation-pinned at the production entry points
+- **severity:** major (P2)
+- **location:** both scribes' guarded calls, `recommender/seed.py:206`,
+  `mcp/server.py:273`, `cli/__init__.py:268`
+- **issue:** reverting either scribe to a direct `write_raw`, removing the
+  seed/MCP `with project_lock(...)`, or dropping the CLI's `blocking_lock=not
+  if_stale` would change nothing the current tests assert. The engine's
+  `skipped-locked` return (`engine.py:670`) is never executed under coverage.
+  These are exactly the never-reviewed port seams, and spec §1 makes them
+  contractual.
+- **suggested direction:** contention-aware integration tests through the real
+  `scribe` functions, seed import, MCP `memory_remember`, and the CLI/engine
+  `--if-stale` path; distinguish blocking from non-blocking and assert a WRITE
+  handle is passed. Each must fail when its guard is removed.
+- **resolution:** _(Author fills)_
+
+### P2-CORRECTNESS-001 — generation tiebreak breaks past 9,999
+- **severity:** major (P2)
+- **location:** `src/neurobase/core/store.py:263`, `:276`, `:366`
+- **issue:** `{generation:04d}` with filename-lexical tiebreak puts `__g10000.md`
+  before `__g9999.md`, contradicting the stated claim-order contract. Tests stop
+  at `__g0002`.
+- **suggested direction:** compare the generation numerically in the sort key, or
+  define a bounded representation whose lexical order cannot roll over. Keep
+  `captured_at` unchanged. Add a `__g9999`/`__g10000` boundary regression that
+  does not require ten thousand captures.
+- **resolution:** _(Author fills)_
+
+### P2-ROLLOUT-CONFIG-001 — declared `filelock` minimum lacks the documented fallback
+- **severity:** major (P2)
+- **location:** `pyproject.toml:24`, `docs/adr/0023-project-store-write-lock.md:128`,
+  `docs/known-gaps.md:296`
+- **issue:** `filelock>=3.13` is allowed, but the `flock(...)=ENOSYS` →
+  `SoftFileLock` downgrade that ADR-0023 and G4's `residual:` describe arrived in
+  **3.24.0**. The committed lockfile resolves 3.29.6 so this checkout behaves as
+  documented, but a valid downstream resolution to 3.13–3.23 propagates the OS
+  error instead — and on a hook path the outer fail-safe swallows it and captures
+  nothing.
+- **suggested direction:** raise the floor to ≥3.24.0 and regenerate the lock, or
+  revise the fallback contract so it is true across the declared range.
+- **resolution:** _(Author fills)_
+
+### P3-DOCS-PLAN-ACCURACY-001 — G4/ADR retain stale pre-fix claims
+- **severity:** nit (P3)
+- **location:** `docs/known-gaps.md:309`, `:349`,
+  `docs/adr/0023-project-store-write-lock.md:241`
+- **issue:** G4 still says in **present tense** that nothing serializes mutations
+  and that no-loss holds only within one process, after being marked fixed. ADR-0023's
+  verification section still records the **retired branch's** 848-test gate rather
+  than this branch's 1381, and its mutator/prune table has stale line refs. (I
+  ported the ADR wholesale on renumber and did not audit its verification claims.)
+- **suggested direction:** label the remainder of G4 explicitly as historical
+  pre-fix analysis, update the observed gate, refresh or drop brittle line numbers.
+- **resolution:** _(Author fills)_
+
+**Verdict:** blocked — the lock-holder/contended-scribe handoff has a reproducible
+same-instant data-loss interleaving; G4 cannot be called closed until
+P1-DATA-INTEGRITY-001 is fixed and regression-tested.

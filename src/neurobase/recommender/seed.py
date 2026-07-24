@@ -30,9 +30,9 @@ from pathlib import Path
 
 import yaml
 
-from neurobase.core import store
+from neurobase.core import lock, store
 from neurobase.core.redact import redact
-from neurobase.core.store_handle import StoreMode, open_store
+from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
 MAX_SOURCE_BYTES = 20 * 1024
 _MARKDOWN_SUFFIXES = (".md", ".markdown")
@@ -152,10 +152,18 @@ def _iter_source_files(top: Path) -> Iterable[Path]:
                 yield path
 
 
-def _existing_seed_state(root: Path, project: str, slug: str) -> tuple[str | None, str | None]:
+def _existing_seed_state(
+    handle: StoreHandle, project: str, slug: str
+) -> tuple[str | None, str | None]:
     """``(source_digest, agent_last)`` for ``slug``'s existing curated file,
-    or ``(None, None)`` if there is no such file or it fails to parse."""
-    path = open_store(root, StoreMode.READ).memory_dir(project) / "curated" / f"{slug}.md"
+    or ``(None, None)`` if there is no such file or it fails to parse.
+
+    Takes the caller's handle rather than a root: the import loop already holds
+    a validated WRITE handle, and re-opening a READ handle per source file both
+    re-ran the schema guard needlessly and was a second, unvalidated way to name
+    a store path.
+    """
+    path = handle.memory_dir(project) / "curated" / f"{slug}.md"
     if not path.exists():
         return None, None
     try:
@@ -178,9 +186,35 @@ def _import_tree(
     *,
     extra_patterns: Iterable[str],
 ) -> SeedResult:
+    """Import a tree of curated facts **under the project write lock** (G4
+    close-out, ADR-0023).
+
+    The importer is a mutating pass like the curator's: it reads the existing
+    curated fact for a slug to decide whether to skip, refuse, or overwrite, then
+    upserts. Without the lock a concurrent curate pass could tombstone or rewrite
+    that same slug between the read and the write, so the importer's decision
+    would be made against state that no longer exists. The lock is **blocking** —
+    an import is user intent and must not be silently skipped the way the
+    detached freshness pass is.
+
+    ``project_lock`` creates the memory dir if it does not exist yet, so a
+    first-ever import into a fresh project still locks correctly.
+    """
     # WRITE handle: seed imports curated facts, so the schema guard runs (and
     # store.toml is created on first use) before any upsert (ADR-0015).
     handle = open_store(root, StoreMode.WRITE)
+    with lock.project_lock(handle.memory_dir(project)):
+        return _import_tree_locked(handle, project, top, source_label, extra_patterns)
+
+
+def _import_tree_locked(
+    handle: StoreHandle,
+    project: str,
+    top: Path,
+    source_label: str,
+    extra_patterns: Iterable[str],
+) -> SeedResult:
+    """The import loop proper. Caller must hold the project write lock."""
     result = SeedResult()
     for path in _iter_source_files(top):
         rel = path.relative_to(top).as_posix()
@@ -221,7 +255,7 @@ def _import_tree(
         digest = hashlib.sha256(raw_bytes).hexdigest()
         provenance_entry = f"seed:{source_label}/{rel}"
 
-        existing_digest, existing_agent_last = _existing_seed_state(root, project, slug)
+        existing_digest, existing_agent_last = _existing_seed_state(handle, project, slug)
         if existing_digest is not None:
             if existing_digest == digest:
                 result.unchanged.append(slug)

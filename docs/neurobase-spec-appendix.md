@@ -49,8 +49,10 @@ Every file = YAML frontmatter + markdown body:
 
 ### raw/ — append-only captures
 
-Filename: `{ts}_{agent}_{sid8}.md` where `ts` = capture time as
-`%Y-%m-%dT%H-%M-%SZ` (UTC, filesystem-safe), `agent` ∈ {`claude`,`codex`,…},
+Filename: `{ts}_{agent}_{sid8}.md` — or, only on a same-instant same-key
+collision, `{ts}_{agent}_{sid8}__g{NNNN}.md` (a zero-padded generation token,
+ADR-0023) — where `ts` = capture time as `%Y-%m-%dT%H-%M-%S.%fZ` (UTC,
+**microsecond** precision, filesystem-safe), `agent` ∈ {`claude`,`codex`,…},
 `sid8` = first 8 chars of session id lowercased with non-alphanumerics stripped
 (fallback `nosid`).
 
@@ -76,10 +78,15 @@ Rules:
   so **no `STORE_SCHEMA_VERSION` bump** — old binaries ignore unknown keys. The
   path is stored absolute; §2's distill resolves it best-effort and a
   missing/unreadable/moved path is never an error (it degrades to the skim body).
-- `list_raw(project, unconsumed_only=True)` returns oldest-first; unparseable
-  files are skipped, never fatal. It globs `raw/*.md` **non-recursively**, so the
-  `raw/.digests/` distill cache (below, §2) is invisible to it and to the store
-  contract.
+- `list_raw(project, unconsumed_only=True)` returns **oldest-*capture*-first,
+  ordered by the authoritative `captured_at` frontmatter** (ADR-0023), with the
+  filename as a stable tiebreak. It does **not** sort by filename string — that
+  depended on `agent`/`sid8` bytes and inverted whenever one session's contended
+  captures overlapped a later capture under another key. A raw with a
+  missing/unparseable `captured_at` sorts first, deterministically by name.
+  Unparseable files are skipped, never fatal. It globs `raw/*.md`
+  **non-recursively**, so the `raw/.digests/` distill cache (below, §2) is
+  invisible to it and to the store contract.
 - **`raw/.digests/` — distill cache (derived state, ADR-0014).** Optional sidecar
   written by §2's distill step; safe to delete (a purge costs one re-distill).
   Entries are **content-addressed**: each carries a `source_fingerprint` over the
@@ -87,8 +94,15 @@ Rules:
   or content hash), so a rewritten raw body (the §5 Codex per-turn overwrite) or a
   grown/replaced transcript invalidates it. Not a raw-frontmatter edit, so the
   owning-scribe mutability rule stays clean. Dry-run never writes it.
-- An explicit `captured_at` drives the filename timestamp — this is load-bearing
-  for the Codex per-turn overwrite trick (§5).
+- An explicit `captured_at` drives the filename timestamp (to the microsecond) —
+  this is load-bearing for the Codex per-turn overwrite trick (§5): a stable
+  `captured_at` resolves to a stable filename, so the same session's turns
+  overwrite rather than accrete.
+- **The capture time is an event fact and MUST NOT be moved** to make a filename
+  unique (ADR-0023). Uniqueness on a same-instant same-key collision comes from
+  the `__gNNNN` generation suffix. The **timestamp/key portion** of a raw's
+  filename (generation stripped, `store.canonical_raw_name`) MUST round-trip from
+  that raw's own stored `captured_at`.
 - **Mutability rule (reconciles "append-only" with §5):** a raw file is
   rewritable by its *owning scribe* (same agent + session, via the session-keyed
   filename) **until** the curator flips `consumed: true`; from then on it is
@@ -96,6 +110,43 @@ Rules:
   already has `consumed: true` (curator ran mid-session), the scribe MUST NOT
   overwrite it — it writes a fresh capture with `captured_at = now` (new
   filename), so later turns fold in as a second pass. Tests enforce both halves.
+- **Contended-capture rule (ADR-0023).** A scribe takes the per-project write
+  lock **non-blocking** (hooks must exit 0 inside the ADR-0003 budget, so they
+  never block and never fail on it). If the lock is held, a curate pass may be
+  mid-consume on this session's raw, so the scribe MUST NOT overwrite it: it
+  writes a fresh capture with **`captured_at = now`** — the same rule as the
+  `consumed` case above — and claims the filename with `O_CREAT | O_EXCL`.
+  Two consequences are contract, not implementation detail:
+  - **The filename's timestamp/key portion MUST round-trip from the raw's own
+    `captured_at`.** `canonical_raw_name(filename)` — the name with any `__gNNNN`
+    generation suffix stripped — MUST equal `raw_filename(captured_at, agent,
+    session_id)`. That is: the timestamp in the filename is the timestamp in
+    frontmatter (the generation token carries no time). A contended capture is
+    stamped `now`, never the caller's (possibly hours-old) session-start key —
+    otherwise a new capture sorts in among stale raws and `list_raw`'s oldest-first
+    guarantee fails corpus-wide.
+  - **`captured_at` is never modified; uniqueness comes from a generation
+    suffix.** A same-instant, same-agent/session collision (near-impossible with a
+    truthful microsecond `now`) is disambiguated by appending a zero-padded
+    `__g0001`, `__g0002`, … to the **filename only** — the capture time is an
+    event fact and never moves. The suffix sorts after the base (`.md`'s `.` <
+    `_`) and in claim order, and it does not affect ordering anyway: `list_raw`
+    sorts by `captured_at`, identical across every generation of one instant.
+    **Advancing the timestamp for uniqueness is forbidden** in every form — a
+    whole second, or a microsecond (which still rolls past a second boundary at
+    `…59.999999` and inverts a genuinely-later capture) — as is a `-2` suffix
+    (sorts before the base).
+- **Project write lock (ADR-0023, resolves G4).** Every *mutating* pass over a
+  project's store — the curator, the seed importer, MCP `memory_remember` — MUST
+  hold the per-project advisory lock at `<memory_dir>/.lock` for the **whole
+  pass**, not per primitive. **Readers never take it.** User-intent passes acquire
+  **blocking**; the detached `curate --if-stale` freshness pass acquires
+  **non-blocking** and returns `status: skipped-locked` rather than queuing.
+  Ownership is bound to an open OS handle, so a killed holder is released by the
+  kernel and there is no stale-lock policy. `prune_tombstones` MUST only be called
+  from inside a locked pass. The lock is **advisory**: it excludes cooperating
+  writers, which is why `mark_consumed`'s `expect_digest` check is retained as
+  defense-in-depth rather than removed.
 
 ### curated/ — facts with provenance + supersession
 

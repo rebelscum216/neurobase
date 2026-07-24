@@ -22,7 +22,7 @@ from neurobase.adapters.scribe_common import (
     bullet,
     final_summary,
 )
-from neurobase.core import store
+from neurobase.core import lock, store
 from neurobase.core.config import load_config
 from neurobase.core.enable import resolve_or_auto_enable
 from neurobase.core.redact import redact, redact_command
@@ -337,7 +337,8 @@ def scribe(
     # Commit through a WRITE handle. The tree exists, so store.toml exists and this
     # only re-validates; a partial store (tree but no store.toml) is created here,
     # exactly as the old ensure_store_metadata guard did.
-    return open_store(root, StoreMode.WRITE).write_raw(
+    return lock.write_raw_guarded(
+        open_store(root, StoreMode.WRITE),
         project,
         agent="claude",
         session_id=sid,

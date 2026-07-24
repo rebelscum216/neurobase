@@ -9,6 +9,7 @@ is atomic (temp file + rename). Nodes and ``index.md`` are pure functions of
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import tomllib
@@ -50,11 +51,16 @@ class UnsupportedSchemaError(RuntimeError):
 
 @dataclass
 class Document:
-    """A parsed store document: frontmatter fields, ``body``, ``file_path``."""
+    """A parsed store document: frontmatter fields, ``body``, ``file_path``.
+
+    ``digest`` is the SHA-256 of the file's bytes **as read**. It exists so a
+    caller that reads a file, works for a while, and then writes it back can
+    prove the file did not change underneath it (see ``mark_consumed``)."""
 
     frontmatter: dict[str, Any]
     body: str
     file_path: Path
+    digest: str | None = None
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.frontmatter.get(key, default)
@@ -147,6 +153,12 @@ def write_doc(path: Path, frontmatter: dict[str, Any], body: str) -> Path:
     return path
 
 
+def content_digest(text: str) -> str:
+    """SHA-256 of a document's text — the change-detection token behind
+    ``Document.digest`` and ``mark_consumed``'s defensive guard."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def read_doc(path: Path) -> Document:
     text = path.read_text(encoding="utf-8")
     match = _DOC_RE.match(text)
@@ -163,7 +175,12 @@ def read_doc(path: Path) -> Document:
         raise ValueError(f"{path}: invalid YAML frontmatter: {exc}") from exc
     if not isinstance(frontmatter, dict):
         raise ValueError(f"{path}: frontmatter did not parse to a mapping")
-    return Document(frontmatter=frontmatter, body=match.group("body"), file_path=path)
+    return Document(
+        frontmatter=frontmatter,
+        body=match.group("body"),
+        file_path=path,
+        digest=content_digest(text),
+    )
 
 
 def _now_iso() -> str:
@@ -181,14 +198,85 @@ def _sid8(session_id: str | None) -> str:
 
 
 def raw_filename(captured_at: datetime, agent: str, session_id: str | None) -> str:
-    ts = captured_at.astimezone(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
+    # Microsecond precision (ADR-0023 / P1-CORRECTNESS-006): at second resolution
+    # two captures in the same second forced a fabricated timestamp to stay
+    # unique, which broke corpus-wide capture order. Microseconds make a truthful
+    # ``now`` effectively collision-free, so the filename never lies about when
+    # the capture happened. Fixed-width ``%f`` keeps the name lexicographically
+    # chronological, and it round-trips from the stored ``captured_at``. The
+    # session-keyed overwrite trick (spec §5) is unaffected: a scribe reusing a
+    # stable ``captured_at`` still resolves to the same filename.
+    ts = captured_at.astimezone(UTC).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
     return f"{ts}_{agent}_{_sid8(session_id)}.md"
+
+
+_GENERATION_RE = re.compile(r"__g\d{4,}(?=\.md$)")
+
+
+def canonical_raw_name(name: str) -> str:
+    """A raw filename with any ``__gNNNN`` generation suffix stripped — i.e. the
+    base ``{ts}_{agent}_{sid8}.md`` that ``raw_filename`` produces and that
+    round-trips from ``captured_at``. The generation token is a pure uniqueness
+    disambiguator for a same-instant collision; it carries no time and no other
+    meaning, so the *timestamp/key portion* — not the whole string — is what spec
+    §1 requires to round-trip (ADR-0023 / P1-CORRECTNESS-006)."""
+    return _GENERATION_RE.sub("", name)
+
+
+def parse_captured_at(value: Any) -> datetime | None:
+    """Parse a raw's ``captured_at`` frontmatter to an aware UTC datetime, or
+    ``None`` if absent/unparseable. The authoritative capture instant that
+    ``list_raw`` orders by — filenames are only a stable tiebreak."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def raw_path(
     root: Path, project: str, captured_at: datetime, agent: str, session_id: str | None
 ) -> Path:
     return memory_dir(project, root) / "raw" / raw_filename(captured_at, agent, session_id)
+
+
+def _claim_fresh_raw_path(
+    root: Path, project: str, agent: str, session_id: str | None, captured_at: datetime
+) -> Path:
+    """Atomically claim a raw filename no other capture holds, **without ever
+    modifying the capture time** (spec §1; ADR-0023 / P1-CORRECTNESS-006).
+
+    The base name is the canonical ``{ts}_{agent}_{sid8}.md``. On the (in
+    practice near-impossible) event that a same-agent/session capture already
+    holds that exact microsecond, uniqueness comes from a **generation suffix**
+    ``__g0001``, ``__g0002``, … — *not* from advancing ``captured_at``. Three
+    earlier revisions advanced the timestamp (by a second, then by a microsecond)
+    to force a unique name; every one of them fabricated a later event time, and a
+    microsecond bump at ``…59.999999`` still rolls into the next second and can
+    sort a capture past a genuinely-later one under another key. The capture time
+    is an event fact and must never move; only the filename disambiguates.
+
+    Ordering does not depend on this suffix: ``list_raw`` sorts by the authoritative
+    ``captured_at`` frontmatter (identical for every generation of one instant),
+    and the suffix is only the stable tiebreak within that instant — zero-padded
+    so it sorts in claim order, and placed after ``_sid8`` where ``.`` (the base
+    ``.md``) sorts before ``_`` so generation 0 leads. Each candidate is claimed
+    with ``O_CREAT | O_EXCL`` so two racing callers never settle on one name."""
+    base = raw_path(root, project, captured_at, agent, session_id)
+    base.parent.mkdir(parents=True, exist_ok=True)
+    candidate = base
+    generation = 0
+    while True:
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            generation += 1
+            candidate = base.with_name(f"{base.stem}__g{generation:04d}{base.suffix}")
+            continue
+        os.close(fd)
+        return candidate
 
 
 def write_raw(
@@ -202,6 +290,7 @@ def write_raw(
     captured_at: datetime,
     body: str,
     transcript_path: str | None = None,
+    unique: bool = False,
 ) -> Path:
     """Write (or session-keyed-overwrite) a raw capture (spec §1/§5).
 
@@ -214,10 +303,25 @@ def write_raw(
     written as ``capture_version: 2`` so the curator's distill step (spec
     §2.0) can resolve the transcript later. Omitted ⇒ a v1 raw; every reader
     must tolerate the absence of both keys.
+
+    ``unique=True`` claims a fresh filename instead of session-keyed
+    overwriting, so the write cannot touch *any* existing raw. This is the
+    contended scribe path (ADR-0023): when the curator holds the project lock
+    it may be mid-consume on this session's raw, and overwriting it would
+    destroy a capture the plan never saw. The claimed name is the canonical
+    ``{ts}_{agent}_{sid8}.md`` — or, only on a same-instant same-key collision,
+    ``…_sid8__gNNNN.md`` (a generation suffix; ``captured_at`` is never moved) —
+    so ``list_raw``'s oldest-first contract still holds (it orders by
+    ``captured_at``).
     """
-    path = raw_path(root, project, captured_at, agent, session_id)
-    if path.exists() and read_doc(path).get("consumed"):
-        raise RawConsumedError(f"{path} is already consumed; retry with captured_at=now")
+    if unique:
+        # captured_at is written to frontmatter UNCHANGED — the filename may carry
+        # a generation suffix for uniqueness, but the event time never moves.
+        path = _claim_fresh_raw_path(root, project, agent, session_id, captured_at)
+    else:
+        path = raw_path(root, project, captured_at, agent, session_id)
+        if path.exists() and read_doc(path).get("consumed"):
+            raise RawConsumedError(f"{path} is already consumed; retry with captured_at=now")
     frontmatter = {
         "agent": agent,
         "session_id": session_id,
@@ -233,14 +337,22 @@ def write_raw(
     return path
 
 
+_MIN_CAPTURED = datetime.min.replace(tzinfo=UTC)
+
+
 def list_raw(root: Path, project: str, unconsumed_only: bool = True) -> list[Document]:
-    """Oldest-first (filename timestamp prefix sorts chronologically).
-    Unparseable *or* unreadable files are skipped, never fatal."""
+    """Oldest-**capture**-first. Order is by the authoritative ``captured_at``
+    frontmatter (ADR-0023 / P1-CORRECTNESS-006), with the filename as a stable
+    tiebreak — *not* by filename string sort, which depended on ``agent``/``sid8``
+    bytes and inverted whenever one session's contended captures overlapped a
+    later capture under a different key. A raw missing/with an unparseable
+    ``captured_at`` sorts first (deterministically, by name). Unparseable *or*
+    unreadable files are skipped, never fatal."""
     raw_dir = memory_dir(project, root) / "raw"
     if not raw_dir.exists():
         return []
     docs = []
-    for path in sorted(raw_dir.glob("*.md")):
+    for path in raw_dir.glob("*.md"):
         try:
             doc = read_doc(path)
         except (ValueError, OSError):
@@ -251,13 +363,37 @@ def list_raw(root: Path, project: str, unconsumed_only: bool = True) -> list[Doc
         if unconsumed_only and doc.get("consumed"):
             continue
         docs.append(doc)
-    return docs
+    return sorted(
+        docs,
+        key=lambda d: (parse_captured_at(d.get("captured_at")) or _MIN_CAPTURED, d.file_path.name),
+    )
 
 
-def mark_consumed(path: Path) -> Path:
+def mark_consumed(path: Path, *, expect_digest: str | None = None) -> Path | None:
     """Flip ``consumed: true`` — the only permitted mutation of an existing
-    raw file; every other frontmatter field and the body are preserved."""
+    raw file; every other frontmatter field and the body are preserved.
+
+    **Safety here comes from the project write lock, not from this function.**
+    The caller must hold it (ADR-0023): the curator holds it for the whole pass,
+    and a scribe that cannot take it writes a *fresh* filename rather than
+    overwriting the raw being consumed (``write_raw(unique=True)`` via
+    ``core.lock.write_raw_guarded``). That is what makes the read-then-write
+    below safe — no concurrent writer can touch this path while the pass owns it.
+
+    ``expect_digest`` is a **defensive guard, not a compare-and-swap.** It
+    re-reads the file and refuses to mark it consumed (returning ``None``) if the
+    content changed since the caller read it. Because the check and the write are
+    two separate syscalls, it cannot *by itself* close the race — an earlier
+    revision of the ADR claimed it could, and Codex disproved that by injecting
+    a write between the two (the stale body was written back with ``consumed:
+    true`` and the newer capture was lost). It is kept as defense-in-depth
+    against a writer that bypasses the advisory lock, not as the mechanism.
+
+    Callers must treat ``None`` as "not consumed" and keep it out of any consumed
+    journal, so the raw stays retryable for the next pass."""
     doc = read_doc(path)
+    if expect_digest is not None and doc.digest != expect_digest:
+        return None
     frontmatter = dict(doc.frontmatter)
     frontmatter["consumed"] = True
     return write_doc(path, frontmatter, doc.body)

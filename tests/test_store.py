@@ -124,7 +124,11 @@ def test_write_raw_filename_shape(root: Path) -> None:
         captured_at=_captured_at(),
         body="hi",
     )
-    assert path.name == "2026-07-07T12-00-00Z_claude_abc123de.md"
+    # Microsecond precision (ADR-0023): the timestamp portion round-trips from
+    # the stored `captured_at`, so a filename can never imply a capture instant
+    # the frontmatter disagrees with.
+    assert path.name == "2026-07-07T12-00-00.000000Z_claude_abc123de.md"
+    assert store.raw_filename(_captured_at(), "claude", "AbC-123_def") == path.name
 
 
 def test_write_raw_sid8_fallback_nosid(root: Path) -> None:

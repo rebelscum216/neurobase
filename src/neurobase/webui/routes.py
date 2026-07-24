@@ -346,8 +346,14 @@ async def _accept_view(request: Request) -> Response:
         # ADR-0020 D40: the artifact is installed but the proposal doesn't say
         # so (the state a drift-repair `revert` leaves behind). Nothing to
         # write; record the acceptance. This POST — CSRF-checked and bound to
-        # the previewed fingerprint above — is the consent.
-        recorded = install.record_acceptance(root, preview)
+        # the previewed fingerprint above — is the consent. The preview was
+        # re-prepared fresh in this request, but `record_acceptance` re-reads the
+        # target at the write boundary anyway (P1-DATA-INTEGRITY-001); surface a
+        # 409 if it changed under us rather than record a stale hash.
+        try:
+            recorded = install.record_acceptance(root, preview)
+        except install.StaleArtifactError as exc:
+            return _error_response(request, 409, str(exc))
         return _redirect_with_flash(
             slug, f"Already installed at {recorded.path} — recorded the acceptance."
         )

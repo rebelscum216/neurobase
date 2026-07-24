@@ -192,17 +192,22 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
 ### G2 — accepted-proposal state can drift from disk; there is no revert path
 
 - **status:** fixed (2026-07-24, ADR-0020) — `recommend revert` is now
-  **drift-repair-only**: allowed on an `accepted` proposal only when its artifact
-  is *missing*, *modified* (bytes ≠ accept-time `installed_hash`), or *unrecorded*,
-  and refused on a *healthy* or *unverifiable* one. That closes the round-1
-  findings in `docs/reviews/2026-07-23-g2-g3-recommender-fixes.md`: F1 (a healthy
-  artifact is non-revertable, so `accept → revert → reject` cannot start and can
-  never orphan a live file) and F2 (a matching-but-unrecorded artifact records
-  acceptance without a write, so re-accept after a revert is reachable — ADR-0020
-  D40). The drift predicate `proposals.artifact_state` is shared with §12.9's
-  survival check. Regressions drive the *real* install service through the CLI and
-  the web UI POST (the gap that let F1/F2 pass round 1). A real un-accept
-  (uninstall of a healthy artifact) remains deferred, exactly as ADR-0007 left it.
+  **drift-repair-only**, gated on whether the proposal's **managed artifact is
+  still live on disk** (the slug's rule marker / owned SKILL.md), *not* on a
+  whole-file hash: allowed only when the artifact is *missing* (target file gone)
+  or *orphaned* (file present but our block/skill removed), and refused when it is
+  *live* or *unresolvable*. That closes the findings in
+  `docs/reviews/2026-07-23-g2-g3-recommender-fixes.md` across two rounds: round-1
+  F1/F2/F4 and round-2 F1 (a whole-file-hash gate let an edit *outside* a rule
+  block make it revertable while the block stayed live — so `accept → edit →
+  revert → reject` still orphaned it; liveness by marker closes this), F2 (a
+  matching-but-unrecorded artifact records acceptance without a write, so
+  re-accept after a revert is reachable — D40), plus round-2 P1 (the record path
+  re-reads the target at the write boundary so a stale preview can't stamp a wrong
+  hash) and P2 (survival keeps its own existence-first whole-file check, separate
+  from revert's liveness). Regressions drive the *real* install service through
+  the CLI and the web UI POST. A real un-accept (uninstall of a live artifact)
+  remains deferred, exactly as ADR-0007 left it.
 - **severity:** minor — nothing corrupts, but the store's view of the present was
   wrong: a proposal stayed `accepted` with a dangling `installed_path` after its
   artifact was removed by hand, and §12.7 makes reject-on-accepted a hard error,
@@ -212,13 +217,14 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
   proposal still reads `accepted`).
 
 **Detail.** Accept records `status: accepted`, `installed_path`, and a ledger
-`accepted` event with `installed_hash` (ADR-0011). The survival metric already
-distinguished missing/modified artifacts; `revert` now reuses that same
-classification (`proposals.artifact_state`) so the record can be made honest —
-`proposed`, no `installed_path` — precisely when the artifact no longer matches
-what acceptance recorded. `recommend list`/`show` and the web UI rendering an
-explicit drift signal (the app-shell plan's Phase S gallery) is still worthwhile
-polish, but is no longer load-bearing: the store can now be corrected, not just
+`accepted` event with `installed_hash` (ADR-0011). `revert` asks a distinct
+question from survival — "is the managed artifact still live to orphan?"
+(`proposals.artifact_state`, by marker/ownership) versus "did the accepted bytes
+survive verbatim?" (`metrics._survival_one`, whole-file hash) — so the record can
+be made honest (`proposed`, no `installed_path`) precisely when no live artifact
+remains. `recommend list`/`show` and the web UI rendering an explicit drift
+signal (the app-shell plan's Phase S gallery) is still worthwhile polish, but is
+no longer load-bearing: the store can now be corrected, not just
 annotated.
 
 ---

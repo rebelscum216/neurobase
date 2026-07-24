@@ -409,7 +409,7 @@ def test_revert_after_deleting_the_artifact_then_reject_leaves_nothing_installed
     rejected = runner.invoke(app, ["recommend", "reject", "prefer-uv-run", "--root", str(root)])
 
     assert reverted.exit_code == 0, reverted.output
-    assert "is missing" in reverted.output
+    assert "is gone" in reverted.output
     assert rejected.exit_code == 0, rejected.output
     assert _status(root) == "rejected"
     assert not installed.exists()
@@ -444,7 +444,7 @@ def test_revert_then_reaccept_restores_acceptance_and_reinstalls_the_block(
     assert "Always use uv run." in text
     assert "the user rewrote this by hand" in text
     # The freshly recorded hash describes what is actually on disk now.
-    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_HEALTHY
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_LIVE
     accepted = [
         event
         for event in proposals.ledger_history(root, "prefer-uv-run")
@@ -479,7 +479,39 @@ def test_reaccept_records_acceptance_when_the_artifact_already_matches(
     assert doc is not None and doc.get("installed_path") == str(installed)
     # Recorded, not rewritten: the bytes are untouched and the hash matches them.
     assert installed.read_text(encoding="utf-8") == rendered
-    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_HEALTHY
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_LIVE
+
+
+def test_reaccept_record_only_refuses_if_the_file_changes_during_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review P1-DATA-INTEGRITY-001, at the CLI surface: the record-only preview
+    is built before the confirm prompt. If the target changes while the prompt is
+    open, the command must record nothing rather than stamp the stale render's
+    hash. Simulated by a `typer.confirm` that mutates the file, then says yes."""
+    root = tmp_path / "store"
+    installed = _accept_via_cli(tmp_path, root)
+    rendered = installed.read_text(encoding="utf-8")
+    installed.write_text("temporarily different", encoding="utf-8")
+    assert _revert(root, extra=["--yes"]).exit_code == 0
+    installed.write_text(rendered, encoding="utf-8")  # installed-but-unrecorded
+
+    def _confirm_but_mutate(*_a: object, **_k: object) -> bool:
+        installed.write_text("changed while you were deciding", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(cli_module.typer, "confirm", _confirm_but_mutate)
+    result = runner.invoke(app, ["recommend", "accept", "prefer-uv-run", "--root", str(root)])
+
+    assert result.exit_code == 1
+    assert "changed after the acceptance was previewed" in result.output
+    assert _status(root) == "proposed"  # nothing recorded
+    accepted = [
+        event
+        for event in proposals.ledger_history(root, "prefer-uv-run")
+        if event["event"] == "accepted"
+    ]
+    assert len(accepted) == 1  # only the original accept, no stale record
 
 
 def test_reaccept_of_an_already_accepted_proposal_stays_a_pure_no_op(

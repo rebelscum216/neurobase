@@ -1048,10 +1048,10 @@ def recommend_revert(
             err=True,
         )
         raise typer.Exit(code=1)
-    # Refuse a non-drifted artifact before prompting, not after. This is the
-    # same verdict `revert_proposal` reaches on its own — it re-classifies at
-    # write time, so a healthy artifact cannot slip through even if it is
-    # restored between this check and the write (ADR-0020 D39).
+    # Refuse before prompting when a live managed artifact remains — the same
+    # verdict `revert_proposal` reaches on its own (it re-classifies at write
+    # time, so a live artifact cannot slip through even if it is restored between
+    # this check and the write, ADR-0020 D39).
     state = proposals.artifact_state(handle.root, doc, slug)
     refusal = proposals.revert_refusal(slug, doc, state)
     if refusal is not None:
@@ -1059,14 +1059,13 @@ def recommend_revert(
         raise typer.Exit(code=1)
     installed = doc.get("installed_path")
     if state == proposals.ARTIFACT_MISSING:
-        typer.echo(f"Recorded install {installed} is missing — the record is stale.")
-    elif state == proposals.ARTIFACT_MODIFIED:
+        where = installed or "expected target"
+        typer.echo(f"The managed artifact ({where}) is gone — repairing the stale record.")
+    elif state == proposals.ARTIFACT_ORPHANED:
         typer.echo(
-            f"Recorded install {installed} has changed since it was accepted "
-            "(left on disk — revert does not delete it)."
+            "The managed block/skill is no longer in the target on disk "
+            "(the rest of the file is left untouched — revert does not delete anything)."
         )
-    elif state == proposals.ARTIFACT_UNRECORDED:
-        typer.echo("This proposal reads accepted with no recorded install path.")
     if not yes and not typer.confirm(f"Revert proposal {slug} to proposed?"):
         typer.echo("Aborted — no changes made.")
         return
@@ -1118,7 +1117,14 @@ def recommend_accept(
         if not yes and not typer.confirm(f"Record acceptance of proposal {slug}?"):
             typer.echo("Aborted — no changes made.")
             return
-        recorded = install.record_acceptance(handle.root, preview)
+        try:
+            recorded = install.record_acceptance(handle.root, preview)
+        except install.StaleArtifactError as exc:
+            # P1-DATA-INTEGRITY-001: the target changed between the preview and now
+            # (e.g. during this confirm prompt) — record nothing rather than stamp
+            # a hash that disagrees with disk.
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
         typer.echo(f"Accepted proposal {slug}: {recorded.path} (already installed; recorded only)")
         return
     if artifact.foreign:

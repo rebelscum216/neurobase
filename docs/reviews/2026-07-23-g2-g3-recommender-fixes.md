@@ -6,7 +6,7 @@ reviewer: codex
 branch: feat/webui-phase1-suggestions
 diff: git diff 30696a8..HEAD
 created: 2026-07-23
-round: 2
+round: 3
 ---
 
 # Review: G2 + G3 — recommender revert path and skill-emitter frontmatter fix
@@ -311,3 +311,126 @@ Verification (round 2):
 **Verdict:** changes-requested — the green gate does not cover two broken G2
 lifecycle paths, G3's parser still has unsafe edge behavior, and the new
 contract lacks its required ADR.
+
+---
+
+## Round 2 review  _(Reviewer — Codex, 2026-07-24)_
+
+Reviewed `git diff a219301..1da5613` @ `1da5613` (HEAD confirmed, preflight +
+closeout). Ran the focused suites + `make ci` (1271 passed) and **reproduced two
+failures through the real CLI**. Verdict: **BLOCKED**.
+
+- **F2 — fixed.** The record-only path + modified-artifact re-accept both restore
+  `accepted`.
+- **F3 — fixed** (no round-2 regression). **F4 — fixed** (ADR-0020 records
+  D39/D40 as an ADR-0007 carve-out).
+- **F1 — still open (narrowed).** `healthy`/`unverifiable` are refused, but
+  `modified` was defined as a whole-*file* hash mismatch. For a rule, the managed
+  block is a fenced region inside AGENTS.md/CLAUDE.md, so an edit *outside* the
+  block makes the file `modified` while the block stays live — Codex reproduced
+  `accept → append outside block → revert --yes → reject` ending `rejected` with
+  the rule still installed. `unrecorded` had the same unsafe boundary.
+- **P1-DATA-INTEGRITY-001 (new).** `record_acceptance` trusted the cached
+  `already_up_to_date` and hashed `artifact.after` without re-reading the target;
+  changing the file during the interactive confirm prompt recorded `accepted`
+  with a hash that disagreed with disk.
+- **P2-REGRESSION-002 (new).** The shared `artifact_state` read bytes before
+  checking existence, flipping a hashless legacy acceptance whose path is a
+  directory from `survived` (a219301 existence-only) to `not_survived`.
+- **P3-DOCS-PLAN-ACCURACY-003 (nit).** ADR-0020 claimed `docs/how-it-works.md`
+  was updated; it was not.
+
+---
+
+## Round 3 — author response  _(Author — Claude, 2026-07-24)_
+
+# Claude Revision Response
+
+## Summary
+
+The central fix: **revert is gated on artifact _liveness_, not a whole-file
+hash.** Survival ("did the accepted bytes survive verbatim?") and revert safety
+("is a managed artifact still live to orphan?") are different questions; round 2
+wrongly answered the second with the first's classifier. They are now two
+separate predicates. Revision tip: **new follow-up commit on
+`feat/webui-phase1-suggestions`** (base for the delta: `1da5613`).
+
+## Findings Addressed
+
+### F1 — revert can orphan a live managed artifact
+- Status: **fixed**
+- Files: `src/neurobase/recommender/emitters.py`,
+  `src/neurobase/recommender/proposals.py`, `src/neurobase/cli/__init__.py`
+- What changed: new `emitters.managed_artifact_live` / `target_path` re-derive
+  the slug's artifact from the proposal and test **liveness by marker/ownership**
+  (`neurobase:rule:<slug>` marker for rules, `_owned_skill` for skills) —
+  independent of any foreign bytes around it. `proposals.artifact_state` now
+  returns `live` / `missing` / `orphaned` / `unresolvable`; `REVERTABLE_ARTIFACT_STATES
+  = {missing, orphaned}`. `live` (block/skill still present) and `unresolvable`
+  (target can't be re-derived → fail closed) are refused, at the CLI pre-prompt
+  *and* re-checked in `revert_proposal` at the write boundary.
+- Why it satisfies Codex: the exact reproduction — edit *outside* the block →
+  revert → reject — is now refused at `revert`, so the orphaning sequence can't
+  begin. `unrecorded` no longer exists as a blanket-revertable state: a null
+  `installed_path` re-derives the target and, if the block is still live, refuses.
+- Verification: `test_revert_refuses_a_live_managed_block` (edit outside),
+  `test_revert_refuses_an_edit_inside_a_still_present_block`,
+  `test_revert_of_accepted_with_no_installed_path_reresolves_the_target`,
+  `test_revert_allows_an_orphaned_artifact`, `test_revert_allows_a_missing_artifact`,
+  `test_revert_refuses_when_target_is_unresolvable`,
+  plus the CLI `test_revert_refuses_while_the_artifact_is_healthy` /
+  `test_revert_after_deleting_...`. Mutation: forcing rule liveness to `False`
+  fails 5 tests.
+
+### P1-DATA-INTEGRITY-001 — record-only trusts a stale preview
+- Status: **fixed**
+- Files: `src/neurobase/recommender/install.py`, `cli/__init__.py`,
+  `webui/routes.py`
+- What changed: `record_acceptance` re-reads the target
+  (`emitters.read_target_text`) at the write boundary and raises the new
+  `StaleArtifactError` if the bytes no longer equal `artifact.after` — no
+  proposal/ledger write, no backup. CLI catches it (exit 1); the web POST returns
+  409.
+- Verification: `test_record_acceptance_refuses_a_stale_preview` (unit) and
+  `test_reaccept_record_only_refuses_if_the_file_changes_during_the_prompt`
+  (CLI surface — a `typer.confirm` that mutates the file mid-prompt). Mutation:
+  disabling the re-read guard fails both.
+
+### P2-REGRESSION-002 — shared classifier broke legacy survival
+- Status: **fixed**
+- Files: `src/neurobase/recommender/metrics.py`
+- What changed: `_survival_one` no longer delegates to `artifact_state`; it keeps
+  its own **existence-first** ordering (a219301 semantics) — `path.exists()`
+  before any byte read, hashless legacy events fall back to existence-only.
+  Survival and revert are now separate predicates.
+- Verification: `test_legacy_hashless_survival_is_existence_only_even_for_a_directory_path`
+  (hashless + directory path → `survived`). Mutation: reading bytes before the
+  existence check fails it.
+
+### P3-DOCS-PLAN-ACCURACY-003 — ADR claimed a doc update that didn't happen
+- Status: **fixed**
+- Files: `docs/adr/0020-revert-drift-repair-only.md`
+- What changed: the Consequences no longer claim `docs/how-it-works.md` was
+  updated; it names that entry as pre-existing stale drift from the D-1
+  install-service refactor and tracks it as a separate follow-up. Spec §12.7 +
+  known-gaps G2 updated to the liveness boundary; D39 rewritten around liveness.
+
+## Additional Changes
+
+- `latest_accepted_event` stays in `proposals` (used by `metrics`); no longer
+  used by revert. `hashlib` dropped from `proposals`, restored in `metrics`.
+- Ledger `reverted` `reason` is now the liveness state (`missing`/`orphaned`).
+
+## Tests / Checks
+- Command: `make ci`
+- Result: **1275 passed, 1 skipped**, coverage 91.92%, all 5 stages green.
+- Notes: three new guards (rule liveness, stale-preview re-read, survival
+  existence-first) each mutation-verified to fail a dedicated test.
+
+## Ready For Re-Review
+- Artifact / commit: the new follow-up commit on `feat/webui-phase1-suggestions`
+  (delta from `1da5613`).
+- Specific scope: `artifact_state`/`managed_artifact_live` liveness semantics;
+  the `record_acceptance` re-read boundary; the survival/liveness separation; and
+  whether any accept/revert/reject sequence can still make status and disk
+  disagree.

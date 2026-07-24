@@ -38,23 +38,30 @@ drift without becoming the un-accept ADR-0007 deferred?
 
 ## Decision
 
-- **D39 — Revert is defined only on demonstrated drift.** `revert` is allowed on
-  an `accepted` proposal only when its artifact is in a state that proves the
-  recorded acceptance is no longer true of disk: **missing** (the recorded
-  `installed_path` does not resolve to readable bytes), **modified** (present but
-  its content no longer matches the latest `accepted` event's `installed_hash`),
-  or **unrecorded** (`accepted` with no `installed_path` to point at). A
-  **healthy** artifact (present, byte-identical to the recorded hash) is refused,
-  and so is an **unverifiable** one (present, but from a pre-`installed_hash`
-  acceptance, so drift cannot be *proven* — the same events `metrics` survival
-  treats existence-only). The classification is one function,
-  `proposals.artifact_state`, keyed on the same `installed_path` + latest-hash
-  comparison `metrics._survival_one` already makes, so "drifted enough to revert"
-  and "not survived" can never diverge. The artifact on disk is still never
-  touched on any path — to retire a healthy artifact the user removes it by hand
-  first, which puts the proposal in the `missing` state revert then repairs.
-  This closes F1 (a healthy artifact is non-revertable, so `accept → revert →
-  reject` cannot start) and, together with D40, F2.
+- **D39 — Revert is defined only when no live managed artifact remains.** The
+  question `revert` asks is whether reverting would orphan a still-installed
+  Neurobase artifact — *not* whether the target file's bytes survived verbatim.
+  Those are different questions, and conflating them was the round-2 defect
+  (review F1): a rule lives as a fenced block *inside* an AGENTS.md/CLAUDE.md, so
+  a user edit *outside* the block changes the whole-file hash while the managed
+  rule stays live. Keying revert on that hash let `accept → edit-outside →
+  revert → reject` orphan the live rule. So revert is gated on **liveness**,
+  judged by the slug-scoped artifact re-derived from the proposal:
+  `proposals.artifact_state` returns **live** (the `neurobase:rule:<slug>` marker
+  is present, or the owned `SKILL.md` still carries our frontmatter — whatever
+  else changed around it), **missing** (target file absent), **orphaned** (target
+  present but our block/skill removed from it), or **unresolvable** (target can't
+  be re-derived — unregistered project, malformed proposal). Revert is allowed
+  **only** on `missing` or `orphaned`; `live` and `unresolvable` are refused
+  (the first would orphan a live artifact, the second cannot *prove* one is gone).
+  The artifact on disk is still never touched on any path — to retire a live
+  artifact the user removes the managed block/skill by hand first, which puts the
+  proposal in the `orphaned`/`missing` state revert then repairs. This closes F1
+  structurally (a live artifact is non-revertable, so `accept → revert → reject`
+  cannot start, *however* the surrounding file was edited) and, with D40, F2.
+  Survival (§12.9) keeps its own separate whole-file-hash comparison — the two
+  questions are answered by two functions, never one shared classifier (round-2
+  review P2 was the regression from sharing them).
 
 - **D40 — A matching-but-unrecorded artifact is recordable without a write.**
   "The render already equals disk" now means two different things. If the
@@ -70,34 +77,42 @@ drift without becoming the un-accept ADR-0007 deferred?
   no-op contract.
 
 - **F4 — the record.** This ADR is that required record: revert adds a public
-  command, a `reverted` ledger event (now carrying the drift `reason`), and an
+  command, a `reverted` ledger event (now carrying the liveness `reason`), and an
   `accepted → proposed` transition that ADR-0007 D14/D15 did not contemplate.
   Those decisions said an accepted proposal is never metadata-transitioned while
   its artifact stays in place; that remains true — D39 permits the transition
-  **only** once the artifact is demonstrably no longer in place unchanged. This
-  ADR revises that clause to the drift-repair carve-out rather than reversing it;
-  ADR-0007 stays otherwise intact, and v1 still has no uninstall-by-command.
+  **only** once no live managed artifact remains. This ADR revises that clause to
+  the drift-repair carve-out rather than reversing it; ADR-0007 stays otherwise
+  intact, and v1 still has no uninstall-by-command.
 
 ## Consequences
 
 - **The `accept → revert → reject` backdoor is closed structurally**, not by
-  convention: the sequence cannot begin, because revert refuses a healthy
-  artifact. A proposal and its disk artifact can no longer contradict each other
-  through any supported command sequence — verified by a CLI regression.
-- **Retiring a healthy accepted proposal is a two-step, user-visible act:**
-  remove the artifact by hand, then `revert` (now `missing`) and `reject`. Both
-  refusal messages say so. This is the deliberate cost of not shipping an
-  uninstall-by-command in v1.
-- **`revert` and `metrics` survival now share one drift classifier**
-  (`proposals.artifact_state`), so a future change to how drift is detected
-  updates both at once. The `latest_accepted_event` helper moved to
-  `proposals` for the same reason (a re-accepted proposal has several `accepted`
-  events; both consumers must compare against the newest).
-- **Spec §12.7 and `docs/how-it-works.md` are updated** to the drift-repair
-  semantics and the installed-but-unrecorded accept path; **G2 flips to
-  `fixed`.** A real un-accept (uninstall through backup/consent) remains
-  deferred, exactly as ADR-0007 left it — this ADR does not add one.
-- **Round-2 tests drive the real install service**, not `accept_proposal`
+  convention: the sequence cannot begin, because revert refuses a *live* managed
+  artifact — including one whose surrounding file the user edited (round-2 F1).
+  A proposal and its disk artifact can no longer contradict each other through
+  any supported command sequence — verified by real CLI regressions for an edit
+  outside the block, an edit inside a still-present block, an accepted/null-path
+  record with a live target, and a genuinely missing/orphaned artifact.
+- **Retiring a live accepted proposal is a two-step, user-visible act:** remove
+  the managed block/skill by hand, then `revert` (now `orphaned`/`missing`) and
+  `reject`. Both refusal messages say so. This is the deliberate cost of not
+  shipping an uninstall-by-command in v1.
+- **`revert` (liveness) and `metrics` survival (verbatim bytes) are separate by
+  design.** `proposals.artifact_state` classifies liveness by marker/ownership;
+  `metrics._survival_one` keeps its own existence-first whole-file-hash check.
+  Round 2 tried to share one classifier and broke the legacy existence-only
+  survival fallback (review P2-REGRESSION-002); they are two questions and stay
+  two functions. `record_acceptance` re-reads its target at the write boundary so
+  a stale preview can't stamp a hash that disagrees with disk (P1-DATA-INTEGRITY-001).
+- **Spec §12.7 and `docs/known-gaps.md` (G2 → `fixed`) are updated** to the
+  liveness boundary and the installed-but-unrecorded accept path. A real
+  un-accept (uninstall through backup/consent) remains deferred, exactly as
+  ADR-0007 left it — this ADR does not add one. `docs/how-it-works.md`'s
+  `recommend_accept` code-map entry is **not** updated here: it was already stale
+  from the earlier install-service (D-1) refactor, and is tracked as a separate
+  follow-up rather than partially patched under this ADR.
+- **Round-3 tests drive the real install service**, not `accept_proposal`
   directly — the gap that let F1/F2 pass round 1. The `accept → revert →
   {reject, re-accept}` flows are pinned through the CLI and the web UI POST.
 
@@ -112,7 +127,12 @@ drift without becoming the un-accept ADR-0007 deferred?
 - **Keep the unconditional revert but block `reject` after it.** Rejected: it
   spreads the invariant across two commands' state machines (revert would have to
   mark the proposal so reject could refuse), where D39 keeps one honest predicate
-  — "is the artifact still what we recorded?" — enforced at the one write path.
+  — "is a live managed artifact still on disk?" — enforced at the one write path.
+- **Gate revert on a whole-file hash (the round-2 attempt).** Rejected after
+  review F1: a rule block is a fenced region inside a possibly-shared file, so
+  "the file changed" is not "the managed artifact is gone." Liveness by
+  marker/ownership is the only signal that actually answers the orphaning
+  question.
 - **Delete/uninstall the artifact inside revert.** Rejected: revert is a
   store-record correction; making it mutate the user's files would be the
   destructive un-accept under a name that promises the opposite, and would

@@ -17,7 +17,6 @@ re-check (§12.6) — added here for real coverage rather than left untested."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,8 +24,8 @@ from typing import Any
 
 import pytest
 
-from neurobase.core import store
-from neurobase.recommender import corpus, proposals
+from neurobase.core import projects, store
+from neurobase.recommender import corpus, emitters, install, proposals
 from neurobase.recommender.corpus import EvidenceRef, ledger_path, proposal_path
 from neurobase.recommender.ranker import RankedCandidate, Scores
 
@@ -450,57 +449,42 @@ def test_draft_markers_extract_verbatim_and_fail_closed_on_duplicates() -> None:
     assert proposals.replace_draft(body + proposals.DRAFT_END, "replacement") is None
 
 
-# --- G2: revert an acceptance back to the review queue -----------------------
+# --- G2 / ADR-0020: revert is drift repair, never an un-accept ---------------
+#
+# Revertability is judged by whether the slug's MANAGED ARTIFACT is still live
+# on disk (rule marker / owned SKILL.md), not by a whole-file hash — round-2
+# review F1 showed an edit *outside* a rule block flips the file hash while the
+# managed block stays live. So these tests install a real block via the install
+# service and then manipulate the target the way a user would.
 
 
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _register(root: Path, repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    projects.register_project(root, repo, slug="neurobase")
 
 
-def _accept(root: Path, slug: str = "prefer-uv-run", *, now: datetime = NOW) -> None:
-    """Accept against a path that does not exist — `artifact_state` reads
-    `missing`, the drift state revert exists to repair (ADR-0020)."""
-    proposals.accept_proposal(
-        root,
-        slug,
-        target="AGENTS.md",
-        installed_path=Path("/repo/AGENTS.md"),
-        installed_hash="deadbeef",
-        now=now,
-    )
+def _accept_real(tmp_path: Path, root: Path, *, slug: str = "prefer-uv-run") -> Path:
+    """Register a project and really accept `slug` through the install service, so
+    the target on disk carries the genuine managed rule block + marker. Returns
+    the installed AGENTS.md path."""
+    repo = tmp_path / "repo"
+    _register(root, repo)
+    proposals.write_ranked(root, [_ranked(slug=slug)], now=NOW)
+    install.commit_install(root, install.prepare_install(root, slug))
+    return repo / "AGENTS.md"
 
 
-def _accept_installed(
-    root: Path,
-    installed: Path,
-    *,
-    content: str = "managed rule block",
-    installed_hash: str | None = "",
-    slug: str = "prefer-uv-run",
-    now: datetime = NOW,
-) -> None:
-    """Accept against a real file on disk. ``installed_hash=""`` (the default)
-    means "hash of ``content``" — i.e. a healthy artifact; pass ``None`` to
-    simulate a pre-ADR-0011 acceptance that recorded no hash at all."""
-    installed.parent.mkdir(parents=True, exist_ok=True)
-    installed.write_text(content, encoding="utf-8")
-    proposals.accept_proposal(
-        root,
-        slug,
-        target="AGENTS.md",
-        installed_path=installed,
-        installed_hash=_sha256(content) if installed_hash == "" else installed_hash,
-        now=now,
-    )
+def _marker(slug: str = "prefer-uv-run") -> str:
+    return emitters._rule_start_marker(slug)
 
 
 def test_revert_flips_accepted_to_proposed_and_clears_install(tmp_path: Path) -> None:
-    """G2: revert returns an accepted proposal to `proposed`, clears the dangling
-    `installed_path`, and appends exactly one `reverted` event while keeping the
-    full proposed→accepted→reverted ledger history."""
+    """G2: on real drift (the managed block is gone), revert returns an accepted
+    proposal to `proposed`, clears the dangling `installed_path`, and appends
+    exactly one `reverted` event while keeping the full ledger history."""
     root = tmp_path / "store"
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    _accept(root, now=NOW)
+    installed = _accept_real(tmp_path, root)
+    installed.write_text("the user replaced the whole file", encoding="utf-8")  # marker gone
 
     prior = proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
 
@@ -508,33 +492,20 @@ def test_revert_flips_accepted_to_proposed_and_clears_install(tmp_path: Path) ->
     doc = _read(root, "prefer-uv-run")
     assert doc.get("status") == "proposed"
     assert doc.get("installed_path") is None
-    events = [e["event"] for e in _ledger_events(root)]
-    assert events == ["proposed", "accepted", "reverted"]
+    assert [e["event"] for e in _ledger_events(root)] == ["proposed", "accepted", "reverted"]
 
 
 def test_revert_never_deletes_the_artifact_on_disk(tmp_path: Path) -> None:
-    """G2: revert corrects the store record only — a modified installed file is
-    left exactly where it is, with the user's edit intact (revert is not an
-    uninstall, ADR-0020)."""
+    """G2: revert corrects the store record only — the target file (with whatever
+    the user left in it) is untouched (revert is not an uninstall, ADR-0020)."""
     root = tmp_path / "store"
-    installed = tmp_path / "repo" / "AGENTS.md"
-    installed.parent.mkdir(parents=True)
-    installed.write_text("managed rule block", encoding="utf-8")
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    proposals.accept_proposal(
-        root,
-        "prefer-uv-run",
-        target="AGENTS.md",
-        installed_path=installed,
-        installed_hash=_sha256("managed rule block"),
-        now=NOW,
-    )
-    installed.write_text("hand-edited by the user", encoding="utf-8")
+    installed = _accept_real(tmp_path, root)
+    installed.write_text("hand-edited by the user, no managed block", encoding="utf-8")
 
     proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
 
     assert installed.exists()
-    assert installed.read_text(encoding="utf-8") == "hand-edited by the user"
+    assert installed.read_text(encoding="utf-8") == "hand-edited by the user, no managed block"
 
 
 def test_revert_only_allowed_on_accepted(tmp_path: Path) -> None:
@@ -559,32 +530,36 @@ def test_revert_missing_proposal_raises(tmp_path: Path) -> None:
 
 def test_reverted_proposal_can_be_reaccepted(tmp_path: Path) -> None:
     """G2: a reverted proposal is a normal `proposed` one again — re-accepting it
-    reinstalls and flips it back to `accepted`."""
+    reinstalls the managed block and flips it back to `accepted`."""
     root = tmp_path / "store"
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    _accept(root, now=NOW)
+    installed = _accept_real(tmp_path, root)
+    installed.unlink()  # user deleted the file → the managed artifact is gone
     proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
 
-    _accept(root, now=NOW + timedelta(minutes=2))
+    install.commit_install(root, install.prepare_install(root, "prefer-uv-run"))
 
     assert _read(root, "prefer-uv-run").get("status") == "accepted"
+    assert _marker() in installed.read_text(encoding="utf-8")
 
 
-# --- ADR-0020 D39: revert is drift repair, never an un-accept ----------------
+# --- ADR-0020 D39: revertability is liveness, not whole-file identity --------
 
 
-def test_revert_refuses_a_healthy_artifact(tmp_path: Path) -> None:
-    """ADR-0020 D39 / review F1: an artifact still installed and byte-identical
-    to what acceptance recorded is NOT revertable. Allowing it would let
-    `accept → revert → reject` retire the proposal while leaving the managed
-    file live on disk — the exact orphaning §12.7's blocked reject-on-accepted
-    rule exists to prevent."""
+def test_revert_refuses_a_live_managed_block(tmp_path: Path) -> None:
+    """ADR-0020 D39 / review F1: a rule whose managed block is still on disk is
+    NOT revertable — even after the user edited the file *around* the block. The
+    round-2 hole was exactly this: an edit outside the block flipped the file
+    hash to `modified` and let `accept → revert → reject` orphan the live rule."""
     root = tmp_path / "store"
-    installed = tmp_path / "repo" / "AGENTS.md"
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    _accept_installed(root, installed, now=NOW)
+    installed = _accept_real(tmp_path, root)
+    # Edit OUTSIDE the managed block: the whole file changed, the block is intact.
+    installed.write_text(
+        installed.read_text(encoding="utf-8") + "\n\n## My own notes\nunrelated line\n",
+        encoding="utf-8",
+    )
+    assert _marker() in installed.read_text(encoding="utf-8")
 
-    with pytest.raises(ValueError, match="still installed and unchanged"):
+    with pytest.raises(ValueError, match="still installed"):
         proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
 
     doc = _read(root, "prefer-uv-run")
@@ -593,29 +568,43 @@ def test_revert_refuses_a_healthy_artifact(tmp_path: Path) -> None:
     assert [e["event"] for e in _ledger_events(root)] == ["proposed", "accepted"]
 
 
-def test_revert_refuses_an_unverifiable_legacy_acceptance(tmp_path: Path) -> None:
-    """ADR-0020 D39: a present artifact whose acceptance predates
-    `installed_hash` (ADR-0011) cannot be *proven* drifted, so revert fails
-    closed rather than dropping ownership of a possibly-live file. Mirrors
-    `metrics._survival_one`'s existence-only fallback for the same events."""
+def test_revert_refuses_an_edit_inside_a_still_present_block(tmp_path: Path) -> None:
+    """ADR-0020 D39 (Codex verification case 2): a hand-tweak *inside* the block
+    leaves the marker present, so the managed artifact is still live and revert
+    is refused — the rule is installed, just edited."""
     root = tmp_path / "store"
-    installed = tmp_path / "repo" / "AGENTS.md"
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    _accept_installed(root, installed, installed_hash=None, now=NOW)
+    installed = _accept_real(tmp_path, root)
+    text = installed.read_text(encoding="utf-8")
+    installed.write_text(text.replace("Always invoke Python", "ALWAYS invoke Python"), "utf-8")
+    assert _marker() in installed.read_text(encoding="utf-8")
 
-    with pytest.raises(ValueError, match="predates content hashing"):
+    with pytest.raises(ValueError, match="still installed"):
         proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    assert _read(root, "prefer-uv-run").get("status") == "accepted"
+
+
+def test_revert_refuses_when_target_is_unresolvable(tmp_path: Path) -> None:
+    """ADR-0020 D39: if the target can't be re-derived (project unregistered), we
+    cannot prove the artifact is gone, so revert fails closed rather than risk
+    orphaning it."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.unlink()  # even though the file is gone...
+    # ...drop the project registration so the target can't be re-derived.
+    (root / "registry.toml").unlink()
+
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
 
     assert _read(root, "prefer-uv-run").get("status") == "accepted"
 
 
 def test_revert_allows_a_missing_artifact(tmp_path: Path) -> None:
     """ADR-0020 D39: the original G2 drift — the user deleted the installed file
-    by hand — is exactly what revert is for."""
+    by hand — is exactly what revert is for. Ledger reason = `missing`."""
     root = tmp_path / "store"
-    installed = tmp_path / "repo" / "AGENTS.md"
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    _accept_installed(root, installed, now=NOW)
+    installed = _accept_real(tmp_path, root)
     installed.unlink()
 
     assert proposals.revert_proposal(root, "prefer-uv-run", now=NOW) == "accepted"
@@ -624,67 +613,71 @@ def test_revert_allows_a_missing_artifact(tmp_path: Path) -> None:
     assert _ledger_events(root)[-1]["reason"] == proposals.ARTIFACT_MISSING
 
 
-def test_revert_allows_a_modified_artifact(tmp_path: Path) -> None:
-    """ADR-0020 D39: a file the user rewrote no longer matches the accept-time
-    `installed_hash`, so the record is demonstrably false and repairable."""
+def test_revert_allows_an_orphaned_artifact(tmp_path: Path) -> None:
+    """ADR-0020 D39: the target file is still there but the user removed our
+    managed block from it — the managed artifact is gone, so revert repairs the
+    record. Ledger reason = `orphaned`."""
     root = tmp_path / "store"
-    installed = tmp_path / "repo" / "AGENTS.md"
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    _accept_installed(root, installed, now=NOW)
-    installed.write_text("the user rewrote this", encoding="utf-8")
+    installed = _accept_real(tmp_path, root)
+    installed.write_text("# My AGENTS.md\n\nI deleted the neurobase block.\n", encoding="utf-8")
+    assert _marker() not in installed.read_text(encoding="utf-8")
 
     proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
 
     assert _read(root, "prefer-uv-run").get("status") == "proposed"
-    assert _ledger_events(root)[-1]["reason"] == proposals.ARTIFACT_MODIFIED
+    assert _ledger_events(root)[-1]["reason"] == proposals.ARTIFACT_ORPHANED
+    # The rest of the file is left exactly as the user left it.
+    assert "I deleted the neurobase block." in installed.read_text(encoding="utf-8")
 
 
-def test_revert_allows_an_accepted_proposal_with_no_installed_path(tmp_path: Path) -> None:
-    """ADR-0020 D39: `accepted` with no `installed_path` names no artifact to
-    orphan, so the incoherent record is repairable rather than stuck."""
+def test_revert_of_accepted_with_no_installed_path_reresolves_the_target(tmp_path: Path) -> None:
+    """ADR-0020 D39 (Codex case 3): `accepted` with `installed_path: null` does
+    NOT mean the artifact is gone — the target is re-derived from the proposal.
+    If the managed block is still live there, revert is refused."""
     root = tmp_path / "store"
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    _accept(root, now=NOW)
+    installed = _accept_real(tmp_path, root)
+    assert _marker() in installed.read_text(encoding="utf-8")  # block is live
     doc = _read(root, "prefer-uv-run")
     frontmatter = dict(doc.frontmatter)
-    frontmatter["installed_path"] = None
+    frontmatter["installed_path"] = None  # incomplete bookkeeping, artifact still live
     store.write_doc(doc.file_path, frontmatter, doc.body)
 
-    proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
+    with pytest.raises(ValueError, match="still installed"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
 
+    # But once the live block is actually gone, the same null-path record reverts.
+    installed.unlink()
+    assert proposals.revert_proposal(root, "prefer-uv-run", now=NOW) == "accepted"
     assert _read(root, "prefer-uv-run").get("status") == "proposed"
-    assert _ledger_events(root)[-1]["reason"] == proposals.ARTIFACT_UNRECORDED
 
 
-def test_artifact_state_classifies_every_case(tmp_path: Path) -> None:
-    """The classification `revert` and `metrics` both key on (ADR-0020)."""
+def test_artifact_state_classifies_by_liveness(tmp_path: Path) -> None:
+    """The liveness classification `revert` keys on (ADR-0020): live while the
+    marker is present (even after surrounding edits), orphaned when the block is
+    removed but the file remains, missing when the file is gone."""
     root = tmp_path / "store"
-    installed = tmp_path / "repo" / "AGENTS.md"
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    _accept_installed(root, installed, now=NOW)
-
+    installed = _accept_real(tmp_path, root)
     doc = _read(root, "prefer-uv-run")
-    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_HEALTHY
 
-    installed.write_text("changed", encoding="utf-8")
-    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_MODIFIED
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_LIVE
+
+    installed.write_text(installed.read_text("utf-8") + "\nextra user line\n", "utf-8")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_LIVE
+
+    installed.write_text("no managed block here", encoding="utf-8")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_ORPHANED
 
     installed.unlink()
     assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_MISSING
 
 
-def test_artifact_state_uses_the_latest_acceptance(tmp_path: Path) -> None:
-    """A re-accepted proposal has more than one `accepted` event; the drift guard
-    must compare against the newest hash, not the first one. Otherwise a
-    re-accept that legitimately changed the artifact would read as `modified`
-    forever, making a healthy artifact revertable again (review F1)."""
+def test_revert_stays_refused_across_a_reaccept(tmp_path: Path) -> None:
+    """A re-accepted proposal (two `accepted` events) with a live block is still
+    refused — liveness is read from the marker on disk now, not from any event."""
     root = tmp_path / "store"
-    installed = tmp_path / "repo" / "AGENTS.md"
-    proposals.write_ranked(root, [_ranked()], now=NOW)
-    _accept_installed(root, installed, content="first render", now=NOW)
-    _accept_installed(root, installed, content="second render", now=NOW + timedelta(minutes=5))
+    installed = _accept_real(tmp_path, root)
+    install.commit_install(root, install.prepare_install(root, "prefer-uv-run"))  # re-accept
+    assert _marker() in installed.read_text(encoding="utf-8")
 
-    doc = _read(root, "prefer-uv-run")
-    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_HEALTHY
-    with pytest.raises(ValueError, match="still installed and unchanged"):
+    with pytest.raises(ValueError, match="still installed"):
         proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=6))

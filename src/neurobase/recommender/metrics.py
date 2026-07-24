@@ -43,6 +43,7 @@ precision:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -148,10 +149,10 @@ def compute_metrics(
 
 
 def _latest_accepted_event(root: Path, slug: str) -> dict[str, Any] | None:
-    """The most recent ``accepted`` ledger event for ``slug``. Delegates to
-    ``proposals.latest_accepted_event``, which ``revert``'s drift guard also
-    uses (ADR-0020) — one definition of "the current acceptance", so survival
-    and revert can never disagree about which event they are checking."""
+    """The most recent ``accepted`` ledger event for ``slug`` — a proposal can
+    be re-accepted (accept is idempotent, §12.7), so there may be more than one.
+    Delegates to ``proposals.latest_accepted_event`` (the one implementation),
+    ``None`` when there is no resolvable ``accepted`` event."""
     return proposals.latest_accepted_event(root, slug)
 
 
@@ -169,11 +170,15 @@ def _survival_one(
     if the event recorded an ``installed_hash`` that no longer matches the
     file's current bytes; ``"survived"`` otherwise. A ledger event that
     predates the ``installed_hash`` feature (a legacy proposal, D2) falls back
-    to existence-only — it cannot detect modification, only presence.
+    to **existence-only** — it cannot detect modification, only presence.
 
-    The disk comparison itself is ``proposals.artifact_state`` (ADR-0020), the
-    same classification ``revert``'s drift guard consults; this function only
-    adds §12.9's time window and the metric's own vocabulary on top."""
+    This is deliberately NOT ``proposals.artifact_state``: survival asks "did the
+    accepted *bytes* survive verbatim" (a whole-file hash question), whereas
+    revert asks "is the managed artifact still live" (a marker/ownership
+    question). Round 2 tried to share one classifier and broke the legacy
+    existence-only fallback for a hashless acceptance whose path is a directory
+    (review P2-REGRESSION-002); the two questions are answered separately, and
+    this function keeps its own proven existence-first ordering."""
     event = _latest_accepted_event(root, slug)
     if event is None:
         return "insufficient_data"
@@ -184,13 +189,21 @@ def _survival_one(
     if elapsed_days < window_days:
         return "insufficient_data"
 
-    state = proposals.artifact_state(root, doc, slug)
-    if state == proposals.ARTIFACT_UNRECORDED:
+    installed_path = doc.get("installed_path")
+    if not isinstance(installed_path, str) or not installed_path:
         return "insufficient_data"
-    if state in {proposals.ARTIFACT_MISSING, proposals.ARTIFACT_MODIFIED}:
+    path = Path(installed_path)
+    if not path.exists():
         return "not_survived"
-    # `healthy` (hash matches) and `unverifiable` (legacy event with no stored
-    # hash — existence-only fallback, D2) both count as survived.
+
+    installed_hash = event.get("installed_hash")
+    if isinstance(installed_hash, str) and installed_hash:
+        try:
+            current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return "not_survived"
+        return "survived" if current_hash == installed_hash else "not_survived"
+    # Legacy accepted event with no stored hash: existence-only fallback (D2).
     return "survived"
 
 

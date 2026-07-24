@@ -37,6 +37,21 @@ class ProposalDecidedError(RuntimeError):
         super().__init__(f"cannot accept proposal {slug!r}: status is {status}")
 
 
+class StaleArtifactError(RuntimeError):
+    """Raised by ``record_acceptance`` when the target's bytes no longer match
+    the previewed render at the moment of the write (ADR-0020 D40, review
+    P1-DATA-INTEGRITY-001). ``already_up_to_date`` held only when the preview was
+    prepared; the file can change during a long interactive confirm prompt, and a
+    no-write acceptance must never stamp a hash that disagrees with disk."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(
+            f"{path} changed after the acceptance was previewed — nothing was recorded. "
+            "Re-run accept to preview and confirm the current state."
+        )
+
+
 @dataclass(frozen=True)
 class InstallPreview:
     """The result of rendering (but not writing) one proposal's artifact."""
@@ -135,9 +150,17 @@ def record_acceptance(root: Path, preview: InstallPreview) -> InstallResult:
     if not preview.records_acceptance:
         raise ValueError("preview is not in a recordable state; use commit_install")
     artifact = preview.artifact
+    # P1-DATA-INTEGRITY-001: `records_acceptance` was decided when the preview was
+    # prepared; between preview and this write the target can change (e.g. during
+    # a long interactive confirm prompt). Re-read it HERE, at the mutation
+    # boundary, and refuse if it no longer equals the previewed render — otherwise
+    # a no-write acceptance would durably stamp a hash that disagrees with disk.
+    # Read the same newline-preserving way the render was diffed against.
+    if emitters.read_target_text(artifact.path) != artifact.after:
+        raise StaleArtifactError(artifact.path)
     # The same hash commit_install records, over the same bytes — the artifact
-    # on disk already equals `artifact.after`, which is what makes this path
-    # legitimate in the first place.
+    # on disk equals `artifact.after` (just re-verified), which is what makes this
+    # path legitimate in the first place.
     installed_hash = hashlib.sha256(artifact.after.encode("utf-8")).hexdigest()
     slug = str(preview.doc.get("name") or "")
     proposals.accept_proposal(

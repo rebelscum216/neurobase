@@ -482,7 +482,7 @@ def test_accept_post_records_acceptance_when_installed_but_unrecorded(
     assert installed.read_bytes() == rendered
     assert (sorted(backups_dir.iterdir()) if backups_dir.exists() else []) == backups_before
     assert proposals.artifact_state(seed.root, after, seed.accepted_slug) == (
-        proposals.ARTIFACT_HEALTHY
+        proposals.ARTIFACT_LIVE
     )
 
 

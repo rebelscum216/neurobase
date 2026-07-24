@@ -177,7 +177,7 @@ def test_prepare_install_flags_a_matching_artifact_the_record_does_not_claim(
     assert installed.read_bytes() == rendered  # recorded, never rewritten
     doc = proposals.load_proposal(root, slug)
     assert doc is not None and doc.get("status") == "accepted"
-    assert proposals.artifact_state(root, doc, slug) == proposals.ARTIFACT_HEALTHY
+    assert proposals.artifact_state(root, doc, slug) == proposals.ARTIFACT_LIVE
 
 
 def test_record_acceptance_refuses_a_preview_that_is_not_recordable(
@@ -198,6 +198,42 @@ def test_record_acceptance_refuses_a_preview_that_is_not_recordable(
         install.record_acceptance(root, preview)
     assert not (repo / "AGENTS.md").exists()
     assert proposals.ledger_history(root, slug)[-1]["event"] == "proposed"
+
+
+def test_record_acceptance_refuses_a_stale_preview(tmp_path: Path) -> None:
+    """Review P1-DATA-INTEGRITY-001: `records_acceptance` is decided at preview
+    time, but the target can change before the write (e.g. during a long confirm
+    prompt). `record_acceptance` re-reads at the mutation boundary and refuses if
+    the bytes no longer equal the previewed render — never stamping a hash that
+    disagrees with disk, and never mutating the proposal or ledger."""
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    _register(root, repo)
+    slug = "prefer-uv-run"
+    proposals.write_ranked(root, [_rule_candidate(slug)])
+    installed = repo / "AGENTS.md"
+    install.commit_install(root, install.prepare_install(root, slug))
+    rendered = installed.read_bytes()
+    # Reach the recordable state (installed-but-unrecorded): orphan, revert, restore.
+    installed.write_text("hand-edited", encoding="utf-8")
+    proposals.revert_proposal(root, slug)
+    installed.write_bytes(rendered)
+
+    preview = install.prepare_install(root, slug)
+    assert preview.records_acceptance is True
+    ledger_before = proposals.ledger_history(root, slug)
+
+    # The world changes between preview and the write.
+    installed.write_text("changed after the preview", encoding="utf-8")
+
+    with pytest.raises(install.StaleArtifactError):
+        install.record_acceptance(root, preview)
+
+    # Nothing recorded, nothing backed up, the file left exactly as it now is.
+    assert proposals.load_proposal(root, slug).get("status") == "proposed"  # type: ignore[union-attr]
+    assert proposals.ledger_history(root, slug) == ledger_before
+    assert not (root / "backups").exists()
+    assert installed.read_text(encoding="utf-8") == "changed after the preview"
 
 
 # --- foreign-target detection ---------------------------------------------------

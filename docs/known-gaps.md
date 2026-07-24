@@ -277,3 +277,64 @@ not carry frontmatter), but the emitter should not depend on that.
 **Direction.** Emitter-side: strip or merge a draft's own frontmatter; derive
 `description` from the proposal title or rationale, falling back to
 `candidate_type` only as a last resort. Test with a frontmatter-bearing draft.
+
+---
+
+### G4 — no project-level store lock: concurrent curate passes can interleave store mutations
+
+- **status:** open
+- **severity:** major — reachable in normal operation, and it is the prerequisite
+  for *any* safe automatic reclamation of tombstone residue.
+- **found:** 2026-07-19 by Codex (provenance Slice B review, round 3 —
+  `P1-DATA-INTEGRITY-003`), with a deterministic interleaving probe.
+
+Nothing serializes mutations to a project's store. `SessionStart` launches
+**detached `curate --if-stale` processes** (`adapters/recall_common.py`), and the
+staleness check and `curate()` call are not guarded (`cli/__init__.py`), so a
+second process can pass the stale gate while the first has not yet consumed its
+raws. `upsert_curated`, `soft_delete_curated`, and `prune_tombstones` can all
+therefore run concurrently against the same files, as can the seed importer and
+the MCP `memory_remember` path.
+
+What this costs today, concretely:
+
+- **Duplicated fold work.** Two passes can read the same unconsumed raw and both
+  plan against it; `mark_consumed` is one-way, so the loser's writes still land.
+- **Interleaved supersession.** An upsert and a soft-delete of the same slug can
+  interleave so the tombstone holds pre-upsert content while the active file
+  holds post-upsert content.
+- **It blocks safe reclamation.** An active fact with a same-slug tombstone is
+  indistinguishable on disk from the midpoint of an in-flight
+  `soft_delete_curated`, and `.tombstones/<slug>.md` is a **shared path** a racing
+  delete can atomically replace. So no code may delete a "stale" tombstone: it can
+  destroy an in-flight one, after which the racing delete unlinks the active file
+  and **the fact is lost**. Two variants were implemented and reverted during the
+  Slice B review, each caught by a deterministic probe — an upsert-time clear plus
+  a pass-start sweep, then a failed soft-delete rolling its own tombstone back.
+  Spec §1 now forbids unowned tombstone deletion outright.
+
+- **`prune_tombstones` has a live TOCTOU** _(found 2026-07-19, Codex round 4;
+  pre-dates Slice B)_. It reads `tombstoned_at`, decides the entry is past grace,
+  then unlinks the **path** — without proving that is still the file it inspected.
+  A soft-delete can atomically replace that path with a *fresh* in-flight
+  tombstone in between; prune deletes the replacement, the soft-delete then
+  unlinks the active file, both calls report success, and **neither copy remains**.
+  Reproduced with the default 14-day grace. The age gate constrains the contents
+  *inspected*, not the file version eventually unlinked — an earlier draft of
+  spec §1 and ADR-0022 wrongly cited it as race-proof; that claim is retracted.
+  Fixing it needs the ownership boundary below (or an atomic claim —
+  rename-to-claim, verify, then delete-or-restore); a second timestamp check, an
+  inode check, or a delay all leave a TOCTOU window.
+
+Because of these, spec §1 leaves residue in place: it is invisible to readers
+(`curated/` is authoritative) and reclaimed only by prune, whose own race is
+recorded above. **The store's no-loss property therefore holds for a single
+mutating process, not for concurrent ones.**
+
+**This needs an ADR.** A lock is a contract change, not a quiet edit: it must
+define the boundary (per-project? per-store?), cover **every** mutating entry
+point (curator, seed importer, MCP), pick a mechanism that works on the 3-OS CI
+matrix (`fcntl.flock` is POSIX-only), and state stale-lock policy for a killed
+holder — plus what a blocked detached `curate --if-stale` should do (skip, not
+queue, most likely, since it is a background freshness pass). Prune's TOCTOU
+should be closed in the same change, since it needs the same ownership.

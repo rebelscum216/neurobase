@@ -1546,6 +1546,7 @@ accumulates.
 | `recommend edit <slug>` | — | Opens `$EDITOR` (or, non-interactively, prints for redirection) on the proposal body/draft; on save, overwrites body/draft and appends an `edited` ledger event | Writes proposal file + ledger only; `status` unchanged |
 | `recommend accept <slug>` | `[--target user\|project]` `[--yes]` | Renders the artifact (§12.8), diffs against the current target, asks consent (`--yes` skips the prompt, never the diff), backs up touched files, writes, flips `status: accepted`, sets `installed_path` (and, for `type: skill`, resolves `target` to the scope actually used), appends `accepted` | Writes artifact(s) + proposal + ledger; backup first (workstream F: "accept requires consent unless `--yes`") |
 | `recommend reject <slug>` | `[--reason TEXT]` | Flips `status: rejected`, records `reason`, appends `rejected` | Writes proposal + ledger only (workstream F: "reject updates proposal + ledger") |
+| `recommend revert <slug>` | `[--yes]` | **Drift repair only** (ADR-0020): on an `accepted` proposal whose managed artifact is no longer live on disk (*missing* file, or *orphaned* — the block/skill removed from a file that remains), flips `status: accepted` → `proposed`, clears `installed_path`, appends `reverted` (carrying the liveness `reason`). A *live* managed artifact (the slug's rule sentinel, or *any* SKILL.md at the canonical path — whatever else changed around it) or an *unresolvable* target is refused. The installed artifact is **never deleted** — revert corrects the store record, it does not uninstall (G2) | Writes proposal + ledger only; consent-gated (`--yes` skips the prompt) |
 | `status --recommender` | — | Prints precision, edited rate, survival, recurrence-reduction, or "insufficient data" per §12.9 | Read-only; may opportunistically refresh a survival check |
 
 `--target` is meaningful only for `type: skill` proposals (it selects
@@ -1569,6 +1570,48 @@ named-status CLI error" to workstream F's test list before this ships):**
   `reject` must not be usable as a backdoor that flips an accepted proposal's
   metadata to `rejected` while the real installed artifact sits untouched and
   now out of sync with its own proposal record.
+- `revert` is the sanctioned way back from `accepted` — but **drift repair
+  only, never an un-accept** (ADR-0020, G2). It is gated on whether the
+  proposal's **managed artifact is still live on disk** — *not* on whether the
+  target file's bytes changed (that is survival's question, §12.9, and is
+  deliberately different). Liveness is judged by the slug-scoped artifact
+  re-derived from the proposal: a rule is live while its opening **sentinel**
+  `<!-- neurobase:rule:<slug>` is in the target (the identity token — whitespace
+  after `<!--` and anything after the slug are ignored, a longer slug never
+  matches, and a lone *closing* marker is not liveness), a skill while its
+  `SKILL.md` **exists** —
+  **whatever else the user changed around it**. The check fails closed in three
+  ways: it looks at **every** plausible location (the recorded `installed_path`
+  plus the re-derived target under every registered project root, so a moved and
+  re-registered repo can't read as gone); a skill's liveness is **existence; its frontmatter is never
+  parsed** (deliberately — CRLF, CR-only, a UTF-8 BOM and fence
+  whitespace each defeated an ownership parser while the skill was still
+  installed, so the parse is not asked at all); and a candidate that cannot be
+  read — a directory, a permissions failure, or invalid UTF-8 — yields
+  `unresolvable` rather than "missing". One consequence of the existence rule: a
+  skill whose contents the user *replaced* stays non-revertable until the file is
+  deleted. Revert is allowed *only* when no live artifact remains: the target is
+  **missing**, or **orphaned** (a file is present but our block/skill was removed
+  from it). It then flips back to
+  `proposed` — the review queue — clears `installed_path`, and appends a
+  `reverted` event carrying the liveness `reason`. A **live** managed artifact is
+  a hard, named error, and so is an **unresolvable** target (project unregistered
+  or proposal malformed, so absence cannot be *proven* — fail closed). Any
+  non-`accepted` status is a hard, named-status error as before. Crucially revert
+  is *not* an uninstall: it never deletes or rewrites the artifact on disk, so it
+  is not the `reject`-backdoor the rule above forbids — and because a live
+  artifact is non-revertable, the `accept → revert → reject` sequence that would
+  orphan a live managed file cannot even begin, *however* the surrounding file
+  was edited. (Round 2 keyed this on a whole-file hash, so an edit outside a rule
+  block wrongly read as revertable — review F1.) To retire a *live* accepted
+  proposal, remove the managed block/skill by hand first (it then reads
+  `orphaned`/`missing`), then `revert` and `reject`. The ledger keeps the full
+  proposed→accepted→reverted history, and the survival/precision metrics — which
+  key on current status, not the ledger (§12.9) — drop a reverted proposal
+  cleanly. A reverted proposal can be re-`accept`ed (reinstalls) or `reject`ed
+  (retires) like any other `proposed` one. Liveness (`proposals.artifact_state`,
+  sentinel/existence) and survival (`metrics`, whole-file hash) are separate
+  predicates by design — they answer different questions.
 - `accept` on an already-`accepted` proposal is the one case that stays
   allowed — re-running it re-renders the artifact and re-diffs against
   whatever is on disk now, which is what makes the no-op rule below possible
@@ -1579,8 +1622,17 @@ named-status CLI error" to workstream F's test list before this ships):**
   acceptance.
 
 If the rendered artifact is already byte-for-byte identical to what
-`accept` would write, `accept` is a no-op: it reports "already up to date"
-and performs no backup, no write, and no ledger event (`status` unchanged).
+`accept` would write, `accept`'s behavior depends on the proposal's own record
+(ADR-0020 D44): if it already reads `accepted`, this is the idempotent no-op —
+"already up to date", no backup, no write, no ledger event, `status` unchanged.
+If it does *not* (the installed-but-unrecorded state a drift-repair `revert`
+leaves behind once the user restores the bytes, and the target is
+Neurobase-owned), `accept` records the acceptance — stamping `status: accepted`,
+`installed_path`, and a fresh `installed_hash` — while still writing and backing
+up nothing. This is what makes re-acceptance reachable after a revert; without
+it a reverted proposal whose artifact was restored would be stranded `proposed`
+forever. A **foreign** target (a file Neurobase never owned) is excluded from
+this path — matching bytes never silently claim ownership of a user's own file.
 
 ### 12.8 Artifact emitters (`recommender/emit_skill.py`, `recommender/emit_rules.py`)
 
@@ -1768,7 +1820,12 @@ behavior" in one place without re-reading the whole section.
 | No `<root>/proposals/` at all | `list`/`show`/`metrics` degrade to empty — matches `recommendations_list`'s own `[]` contract | Invariants |
 | `accept`/`edit` on `rejected`/`superseded` | Hard CLI error naming the blocking status; never reopened | §12.7 |
 | `reject` on `accepted`/`rejected`/`superseded` | Hard CLI error naming the blocking status; no v1 uninstall-by-reject | §12.7 |
-| `accept` with an unchanged diff | No-op, "already up to date," no write, no backup, no ledger event | §12.7 |
+| `revert` on any non-`accepted` status | Hard CLI error naming the blocking status; revert is defined only on `accepted` | §12.7 |
+| `revert` on an `accepted` proposal whose managed artifact is missing or orphaned | Flips to `proposed`, clears `installed_path`, appends `reverted` (with liveness `reason`); never deletes the artifact on disk | §12.7, ADR-0020 (G2) |
+| `revert` on an `accepted` proposal whose managed artifact is still live (marker/skill present, even if the file was edited around it) | Hard CLI error — revert is drift repair, not an uninstall; remove the managed block/skill by hand first | §12.7, ADR-0020 (F1) |
+| `revert` on an `accepted` proposal whose target can't be resolved (project unregistered / malformed) | Hard CLI error — fail closed rather than risk orphaning a live artifact | §12.7, ADR-0020 |
+| `accept` with an unchanged diff, proposal already `accepted` | No-op, "already up to date," no write, no backup, no ledger event | §12.7 |
+| `accept` with an unchanged diff, proposal `proposed` + Neurobase-owned target | Records acceptance (status/`installed_path`/`installed_hash`), no write, no backup — the installed-but-unrecorded case. Both sides of the preview are re-verified at the write boundary: a hard error (CLI exit 1 / web 409) if the target bytes changed, or if re-rendering the current proposal no longer produces an identical artifact (path/target/bytes/ownership). The validated document is bound to the write (`accept_proposal(expect=…)`) so the version checked is the version accepted | §12.7, ADR-0020 |
 | `accept --target project` with no `project` on the proposal | Hard CLI error; never guesses a project | §12.8 |
 | `accept` where `proposal.project` no longer exists in `registry.toml` | Hard CLI error naming the stale project; never a bare `KeyError` | §12.8 |
 | `accept` onto a foreign (non-Neurobase) SKILL.md, including one with unparseable frontmatter | Treated as "not owned"; written only through the single diff/consent/backup gate, diff view calls it out explicitly | §12.8 |
@@ -1859,3 +1916,72 @@ no resources and no prompt are registered — and `resources/list` is still `[]`
 / `codex mcp add`) under the **same consent → diff → backup** flow as the hook
 installers (§7). `doctor` checks the server is registered and startable per
 agent; `uninstall` removes any registration it added.
+
+## 14. Web UI contract (`webui/`, Web UI Phase 1)
+
+A local, loopback-only web server (`neurobase ui`) — a **second presentation
+layer** over the same core the CLI drives. Phase 1 scope is the Suggestions
+review surface; later phases extend this section rather than bypassing it.
+
+### Layering
+
+- `webui/` is a **peer of `cli/`**: both sit on `core/`, `brain/`, and the mid
+  tier; **neither imports the other's code**. The one sanctioned coupling is the
+  launcher: the `ui` CLI command lazily imports `neurobase.webui.app.serve`
+  inside its body (the `mcp serve` pattern) so starlette/jinja2/uvicorn stay off
+  the hook fast path.
+- Choreography shared with the CLI lives in named mid-tier services
+  (`recommender/install.py` — `prepare_install`/`commit_install`), never in a
+  lateral import between the two edges.
+
+### Serving
+
+- The server **MUST bind `127.0.0.1` only**; no `--host` option exists. This is
+  a local tool by charter — exposure beyond loopback requires real auth first
+  and is out of contract.
+- `neurobase ui` **MUST run the §10/D11 schema check** on the resolved root
+  before serving anything.
+- `jinja2` and `uvicorn` are direct base dependencies (no extras).
+
+### Request discipline
+
+- Every request — any method — **MUST carry a loopback `Host` authority**
+  (`127.0.0.1`, `localhost`, or `::1`, any port); anything else answers 403
+  before routing. The socket bind does not constrain the HTTP `Host` value: a
+  DNS-rebound hostname resolves to loopback and would otherwise become
+  same-origin with this server, so the boundary is enforced on the header, not
+  just the socket.
+- Every read route is a **side-effect-free GET**; every mutation is a **POST**.
+- Every POST **MUST additionally pass, before routing**: (a) a same-origin
+  check — `Origin` header, falling back to `Referer`, netloc-matched against
+  the (already loopback-validated) `Host`; and (b) a CSRF token check — one
+  per-process `secrets.token_urlsafe(32)` embedded as a hidden form field and
+  compared with `secrets.compare_digest`. Failures answer 403. No cookies, no
+  sessions, nothing persisted — a server restart invalidates all outstanding
+  forms by design.
+- Successful POSTs answer **303 See Other** (post/redirect/get) with any flash
+  message carried as a query parameter.
+- Expected failures render the error template with typed status codes (404
+  not-found, 409 decided/blocked-status, 400 malformed) — never a raw 500.
+
+### Parity with the CLI (§12 discipline)
+
+- Accept **MUST** flow through `install.prepare_install` → `commit_install`:
+  status guard before any render/diff/write, diff preview, backup under
+  `<root>/backups/<ts>/`, atomic write, ledger `accepted` event with
+  `installed_hash`. The committing POST **MUST re-run `prepare_install`
+  fresh** — a GET-time preview is never trusted. A no-op install
+  (before == after) short-circuits with no ledger event.
+- Consent binds to the **exact previewed diff**: the confirm form carries a
+  fingerprint of the previewed result (resolved path, target, exact
+  before/after bytes), and the committing POST **MUST verify the freshly
+  prepared result matches it** — on mismatch (or a missing fingerprint) answer
+  a typed 409 with **no backup, no artifact write, no proposal mutation, and
+  no ledger event**; the user re-previews. Fresh preparation without this
+  binding would authorize bytes the user never saw.
+- Reject and edit call the same `proposals` functions as the CLI, with the same
+  blocked-status rules (§12.7).
+- Draft bodies **MUST be redacted at display time** (§12.8) — never render an
+  unredacted draft, even hand-edited/legacy.
+- Metrics rendering follows §12.9: `None` renders as *insufficient data*, never
+  a fake measured zero.

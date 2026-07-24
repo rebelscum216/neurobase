@@ -411,6 +411,28 @@ def test_survival_not_survived_when_artifact_cannot_be_read(tmp_path: Path) -> N
     assert result.survival["prefer-uv-run"] == "not_survived"
 
 
+def test_legacy_hashless_survival_is_existence_only_even_for_a_directory_path(
+    tmp_path: Path,
+) -> None:
+    """Review P2-REGRESSION-002: a hashless legacy acceptance whose path *exists*
+    but can't be read as file bytes (a directory) must stay "survived" past the
+    window — existence-only, exactly as `a219301` did. The round-2 refactor read
+    bytes before checking existence and flipped this to "not_survived"; survival
+    keeps its own existence-first ordering, distinct from revert's liveness."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW)
+    installed_path = tmp_path / "AGENTS.md"
+    _accept(root, "prefer-uv-run", installed_path=installed_path, now=NOW)
+    _rewrite_ledger_event(root, "prefer-uv-run", "accepted", installed_hash=_DROP)
+    installed_path.unlink()
+    installed_path.mkdir()  # exists, but not readable as bytes
+
+    result = metrics.compute_metrics(root, now=NOW + timedelta(days=31))
+
+    # No recorded hash ⇒ existence-only ⇒ present ⇒ survived (not not_survived).
+    assert result.survival["prefer-uv-run"] == "survived"
+
+
 # --- recurrence reduction (advisory, §12.9 / D19) ----------------------------
 #
 # The aggregate `after / before` ratio over near-duplicate raw captures. Note
@@ -554,3 +576,31 @@ def test_recurrence_reduction_skips_proposal_with_unparseable_acceptance(tmp_pat
 
     assert result.decided == 1  # still decided; only the timestamp is unusable
     assert result.recurrence_reduction is None
+
+
+def test_reverted_proposal_drops_out_of_metrics(tmp_path: Path) -> None:
+    """G2: metrics key on current frontmatter status, not the ledger. A reverted
+    proposal (back to `proposed`) must count as neither accepted nor decided, even
+    though its `accepted` ledger event still exists — so revert repairs drift
+    without corrupting precision or survival."""
+    from neurobase.recommender import install
+
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    core_projects.register_project(root, repo, slug="neurobase")
+    proposals.write_ranked(root, [_ranked("prefer-uv-run")], now=NOW)
+    install.commit_install(root, install.prepare_install(root, "prefer-uv-run"))
+
+    before = metrics.compute_metrics(root, now=NOW)
+    assert before.accepted == 1 and before.decided == 1
+
+    # Revert is drift repair only (ADR-0020) — the managed artifact has to have
+    # actually gone for there to be anything to repair.
+    (repo / "AGENTS.md").unlink()
+    proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    after = metrics.compute_metrics(root, now=NOW + timedelta(minutes=2))
+    assert after.accepted == 0
+    assert after.decided == 0
+    assert after.precision is None  # no decided proposals → insufficient data

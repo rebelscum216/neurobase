@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from neurobase.cli import app
@@ -177,3 +178,206 @@ def test_skill_foreign_ownership_and_redaction(
     assert artifact.foreign is True
     assert "AKIAIOSFODNN7EXAMPLE" not in artifact.after
     assert "neurobase_managed: true" in artifact.after
+
+
+def _skill_artifact_frontmatter(after: str) -> tuple[dict[str, object], str]:
+    """Split a rendered skill artifact into (our frontmatter mapping, body). The
+    body must not itself reopen a `---` block — that would be the G3 doubling."""
+    assert after.startswith("---\n")
+    our_fm, sep, body = after[4:].partition("\n---\n")
+    assert sep, "artifact has no closing frontmatter fence"
+    parsed = yaml.safe_load(our_fm)
+    assert isinstance(parsed, dict)
+    return parsed, body
+
+
+def test_skill_description_prefers_title_over_candidate_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G3: `description` is a human title (the draft's `#` heading), never the
+    `candidate_type` mining label (`repeated-instruction`)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    candidate = _candidate(kind="skill", target="user-skill")
+    candidate = RankedCandidate(
+        **{**candidate.__dict__, "draft": "# Stage git changes surgically\n\nDo the thing."}
+    )
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    fm, _body = _skill_artifact_frontmatter(emitters.prepare(root, doc, skill_scope="user").after)
+
+    assert fm["description"] == "Stage git changes surgically"
+    assert fm["description"] != candidate.candidate_type
+
+
+def test_skill_strips_draft_own_frontmatter_no_doubling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G3: a draft carrying its own `---` frontmatter must not yield a SKILL.md
+    with two frontmatter blocks; our managed keys win and a `description` the draft
+    sets is salvaged (better than the heading or the label)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    candidate = _candidate(kind="skill", target="user-skill")
+    draft = "---\ndescription: A precise git staging helper\nname: bogus\n---\n\n# Heading\n\nBody."
+    candidate = RankedCandidate(**{**candidate.__dict__, "draft": draft})
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    artifact = emitters.prepare(root, doc, skill_scope="user")
+    fm, body = _skill_artifact_frontmatter(artifact.after)
+
+    # exactly one frontmatter block — the body never reopens one
+    assert not body.lstrip().startswith("---")
+    # our managed keys win; the draft's `name: bogus` never leaks in
+    assert fm["name"] == "durable-rule"
+    assert fm["neurobase_managed"] is True
+    assert "bogus" not in artifact.after
+    # the draft's own description is salvaged; its real content survives
+    assert fm["description"] == "A precise git staging helper"
+    assert "# Heading" in body
+    assert "Body." in body
+
+
+def _skill_candidate_with_draft(draft: str) -> RankedCandidate:
+    return RankedCandidate(
+        **{**_candidate(kind="skill", target="user-skill").__dict__, "draft": draft}
+    )
+
+
+def test_skill_rejects_draft_with_invalid_yaml_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: a leading `---` block with invalid YAML must fail closed (ValueError),
+    never be embedded verbatim under our block (which would re-double frontmatter)."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    candidate = _skill_candidate_with_draft("---\nfoo: [unclosed\n---\n\n# H\n\nBody.")
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    with pytest.raises(ValueError, match="not valid YAML"):
+        emitters.prepare(root, doc, skill_scope="user")
+
+
+def test_skill_rejects_draft_with_non_mapping_frontmatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: a leading `---` block that parses to a non-mapping (a scalar — e.g. an
+    ordinary Markdown rule around prose) must fail closed, never silently drop the
+    text between the fences."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    candidate = _skill_candidate_with_draft("---\nintro paragraph\n---\n# H\n\nBody.")
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    with pytest.raises(ValueError, match="not a YAML mapping"):
+        emitters.prepare(root, doc, skill_scope="user")
+
+
+def test_skill_preserves_a_mid_body_horizontal_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: a `---` rule that is NOT the leading block is body content — never
+    mistaken for frontmatter, never stripped."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    candidate = _skill_candidate_with_draft("# H\n\nfirst\n\n---\n\nsecond")
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    _fm, body = _skill_artifact_frontmatter(emitters.prepare(root, doc, skill_scope="user").after)
+
+    assert "first" in body and "second" in body
+    assert "\n---\n" in body  # the rule survived intact
+
+
+def test_skill_strips_frontmatter_without_trailing_newline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: a valid mapping fence that ends at EOF (no blank line after the closing
+    `---`) is still detected and stripped."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    candidate = _skill_candidate_with_draft("---\ndescription: Terse helper\n---")
+    root, _repo = _setup(tmp_path, candidate)
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+
+    fm, body = _skill_artifact_frontmatter(emitters.prepare(root, doc, skill_scope="user").after)
+
+    assert fm["description"] == "Terse helper"
+    assert not body.lstrip().startswith("---")
+
+
+# --- ADR-0020 D43: the rule sentinel grammar (review F1, round 5) -------------
+
+
+def test_rule_sentinel_matches_regardless_of_the_explanatory_suffix() -> None:
+    """The identity token is `<!-- neurobase:rule:<slug>`; everything after it is
+    prose. Re-wrapping or rewording the parenthetical must not change whether the
+    block is found."""
+    pattern = emitters.rule_sentinel("prefer-uv-run")
+    canonical = emitters._rule_start_marker("prefer-uv-run")
+
+    assert pattern.search(canonical)
+    assert pattern.search(canonical.replace("generated by", "generated  by"))
+    assert pattern.search("<!-- neurobase:rule:prefer-uv-run -->")
+    assert pattern.search("<!--   neurobase:rule:prefer-uv-run (anything at all) -->")
+    assert pattern.search("<!-- neurobase:rule:prefer-uv-run\n    (wrapped) -->")
+
+
+def test_rule_sentinel_does_not_match_a_longer_slug() -> None:
+    """`foo` must not find `foo-bar`'s block — otherwise one proposal reads live
+    off another's artifact."""
+    assert (
+        emitters.rule_sentinel("prefer-uv").search("<!-- neurobase:rule:prefer-uv-run -->") is None
+    )
+    assert (
+        emitters.rule_sentinel("prefer-uv-run").search("<!-- neurobase:rule:prefer-uv-run2 -->")
+        is None
+    )
+    assert (
+        emitters.rule_sentinel("prefer-uv-run").search("<!-- neurobase:rule:prefer-uv -->") is None
+    )
+
+
+def test_rule_sentinel_never_matches_the_closing_marker() -> None:
+    """A lone closing marker is not liveness — the `/` is what distinguishes it,
+    and `\\s*` must not span it."""
+    assert (
+        emitters.rule_sentinel("prefer-uv-run").search("<!-- /neurobase:rule:prefer-uv-run -->")
+        is None
+    )
+
+
+def test_reaccept_replaces_a_block_whose_marker_suffix_was_edited(tmp_path: Path) -> None:
+    """The write uses the same sentinel as the liveness check, so a hand-edited
+    opening comment is REPLACED by the canonical one — not duplicated beside it,
+    which is what a full-string match would have done."""
+    root, repo = _setup(tmp_path, _candidate())
+    doc = proposals.load_proposal(root, "durable-rule")
+    assert doc is not None
+    emitters.write_atomic(emitters.prepare(root, doc))
+    installed = repo / "AGENTS.md"
+    installed.write_text(
+        installed.read_text(encoding="utf-8").replace("generated by", "generated  by"),
+        encoding="utf-8",
+    )
+
+    artifact = emitters.prepare(root, doc)
+
+    # Exactly one block, carrying the canonical marker again.
+    assert len(emitters.rule_sentinel("durable-rule").findall(artifact.after)) == 1
+    assert artifact.after.count("<!-- /neurobase:rule:durable-rule -->") == 1
+    assert emitters._rule_start_marker("durable-rule") in artifact.after
+    assert "generated  by" not in artifact.after

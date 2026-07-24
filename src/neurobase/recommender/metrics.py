@@ -150,16 +150,10 @@ def compute_metrics(
 
 def _latest_accepted_event(root: Path, slug: str) -> dict[str, Any] | None:
     """The most recent ``accepted`` ledger event for ``slug`` — a proposal can
-    be re-accepted (accept is idempotent, §12.7), so there may be more than
-    one. ``None`` when there is no resolvable ``accepted`` event at all."""
-    candidates = [
-        (event, when)
-        for event in proposals.ledger_history(root, slug)
-        if event.get("event") == "accepted" and (when := _parse_iso(event.get("at"))) is not None
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda pair: pair[1])[0]
+    be re-accepted (accept is idempotent, §12.7), so there may be more than one.
+    Delegates to ``proposals.latest_accepted_event`` (the one implementation),
+    ``None`` when there is no resolvable ``accepted`` event."""
+    return proposals.latest_accepted_event(root, slug)
 
 
 def _survival_one(
@@ -176,7 +170,15 @@ def _survival_one(
     if the event recorded an ``installed_hash`` that no longer matches the
     file's current bytes; ``"survived"`` otherwise. A ledger event that
     predates the ``installed_hash`` feature (a legacy proposal, D2) falls back
-    to existence-only — it cannot detect modification, only presence."""
+    to **existence-only** — it cannot detect modification, only presence.
+
+    This is deliberately NOT ``proposals.artifact_state``: survival asks "did the
+    accepted *bytes* survive verbatim" (a whole-file hash question), whereas
+    revert asks "is the managed artifact still live" (a marker/ownership
+    question). Round 2 tried to share one classifier and broke the legacy
+    existence-only fallback for a hashless acceptance whose path is a directory
+    (review P2-REGRESSION-002); the two questions are answered separately, and
+    this function keeps its own proven existence-first ordering."""
     event = _latest_accepted_event(root, slug)
     if event is None:
         return "insufficient_data"

@@ -24,8 +24,8 @@ from typing import Any
 
 import pytest
 
-from neurobase.core import store
-from neurobase.recommender import corpus, proposals
+from neurobase.core import projects, store
+from neurobase.recommender import corpus, emitters, install, proposals
 from neurobase.recommender.corpus import EvidenceRef, ledger_path, proposal_path
 from neurobase.recommender.ranker import RankedCandidate, Scores
 
@@ -447,3 +447,317 @@ def test_draft_markers_extract_verbatim_and_fail_closed_on_duplicates() -> None:
     assert proposals.extract_draft(body) == "# Exact draft\n\n- keep markdown"
     assert proposals.extract_draft(body + proposals.DRAFT_START) is None
     assert proposals.replace_draft(body + proposals.DRAFT_END, "replacement") is None
+
+
+# --- G2 / ADR-0020: revert is drift repair, never an un-accept ---------------
+#
+# Revertability is judged by whether the slug's MANAGED ARTIFACT is still live
+# on disk (rule marker / owned SKILL.md), not by a whole-file hash — round-2
+# review F1 showed an edit *outside* a rule block flips the file hash while the
+# managed block stays live. So these tests install a real block via the install
+# service and then manipulate the target the way a user would.
+
+
+def _register(root: Path, repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    projects.register_project(root, repo, slug="neurobase")
+
+
+def _accept_real(tmp_path: Path, root: Path, *, slug: str = "prefer-uv-run") -> Path:
+    """Register a project and really accept `slug` through the install service, so
+    the target on disk carries the genuine managed rule block + marker. Returns
+    the installed AGENTS.md path."""
+    repo = tmp_path / "repo"
+    _register(root, repo)
+    proposals.write_ranked(root, [_ranked(slug=slug)], now=NOW)
+    install.commit_install(root, install.prepare_install(root, slug))
+    return repo / "AGENTS.md"
+
+
+def _marker(slug: str = "prefer-uv-run") -> str:
+    return emitters._rule_start_marker(slug)
+
+
+def test_revert_flips_accepted_to_proposed_and_clears_install(tmp_path: Path) -> None:
+    """G2: on real drift (the managed block is gone), revert returns an accepted
+    proposal to `proposed`, clears the dangling `installed_path`, and appends
+    exactly one `reverted` event while keeping the full ledger history."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.write_text("the user replaced the whole file", encoding="utf-8")  # marker gone
+
+    prior = proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    assert prior == "accepted"
+    doc = _read(root, "prefer-uv-run")
+    assert doc.get("status") == "proposed"
+    assert doc.get("installed_path") is None
+    assert [e["event"] for e in _ledger_events(root)] == ["proposed", "accepted", "reverted"]
+
+
+def test_revert_never_deletes_the_artifact_on_disk(tmp_path: Path) -> None:
+    """G2: revert corrects the store record only — the target file (with whatever
+    the user left in it) is untouched (revert is not an uninstall, ADR-0020)."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.write_text("hand-edited by the user, no managed block", encoding="utf-8")
+
+    proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    assert installed.exists()
+    assert installed.read_text(encoding="utf-8") == "hand-edited by the user, no managed block"
+
+
+def test_revert_only_allowed_on_accepted(tmp_path: Path) -> None:
+    """G2: revert is defined only on `accepted`; every other status is a hard,
+    named-status error (mirrors the blocked-status rules of §12.7)."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+
+    with pytest.raises(ValueError, match="only an accepted proposal"):
+        proposals.revert_proposal(root, "prefer-uv-run")  # still proposed
+
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW)
+    with pytest.raises(ValueError, match="status is rejected"):
+        proposals.revert_proposal(root, "prefer-uv-run")
+
+
+def test_revert_missing_proposal_raises(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    with pytest.raises(ValueError, match="not found or malformed"):
+        proposals.revert_proposal(root, "does-not-exist")
+
+
+def test_reverted_proposal_can_be_reaccepted(tmp_path: Path) -> None:
+    """G2: a reverted proposal is a normal `proposed` one again — re-accepting it
+    reinstalls the managed block and flips it back to `accepted`."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.unlink()  # user deleted the file → the managed artifact is gone
+    proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    install.commit_install(root, install.prepare_install(root, "prefer-uv-run"))
+
+    assert _read(root, "prefer-uv-run").get("status") == "accepted"
+    assert _marker() in installed.read_text(encoding="utf-8")
+
+
+# --- ADR-0020 D43: revertability is liveness, not whole-file identity --------
+
+
+def test_revert_refuses_a_live_managed_block(tmp_path: Path) -> None:
+    """ADR-0020 D43 / review F1: a rule whose managed block is still on disk is
+    NOT revertable — even after the user edited the file *around* the block. The
+    round-2 hole was exactly this: an edit outside the block flipped the file
+    hash to `modified` and let `accept → revert → reject` orphan the live rule."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    # Edit OUTSIDE the managed block: the whole file changed, the block is intact.
+    installed.write_text(
+        installed.read_text(encoding="utf-8") + "\n\n## My own notes\nunrelated line\n",
+        encoding="utf-8",
+    )
+    assert _marker() in installed.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="still installed"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    doc = _read(root, "prefer-uv-run")
+    assert doc.get("status") == "accepted"
+    assert doc.get("installed_path") == str(installed)
+    assert [e["event"] for e in _ledger_events(root)] == ["proposed", "accepted"]
+
+
+def test_revert_refuses_an_edit_inside_a_still_present_block(tmp_path: Path) -> None:
+    """ADR-0020 D43 (Codex verification case 2): a hand-tweak *inside* the block
+    leaves the marker present, so the managed artifact is still live and revert
+    is refused — the rule is installed, just edited."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    text = installed.read_text(encoding="utf-8")
+    installed.write_text(text.replace("Always invoke Python", "ALWAYS invoke Python"), "utf-8")
+    assert _marker() in installed.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="still installed"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    assert _read(root, "prefer-uv-run").get("status") == "accepted"
+
+
+def test_revert_refuses_when_target_is_unresolvable(tmp_path: Path) -> None:
+    """ADR-0020 D43: if the target can't be re-derived (project unregistered), we
+    cannot prove the artifact is gone, so revert fails closed rather than risk
+    orphaning it."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.unlink()  # even though the file is gone...
+    # ...drop the project registration so the target can't be re-derived.
+    (root / "registry.toml").unlink()
+
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
+
+    assert _read(root, "prefer-uv-run").get("status") == "accepted"
+
+
+def test_revert_allows_a_missing_artifact(tmp_path: Path) -> None:
+    """ADR-0020 D43: the original G2 drift — the user deleted the installed file
+    by hand — is exactly what revert is for. Ledger reason = `missing`."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.unlink()
+
+    assert proposals.revert_proposal(root, "prefer-uv-run", now=NOW) == "accepted"
+
+    assert _read(root, "prefer-uv-run").get("status") == "proposed"
+    assert _ledger_events(root)[-1]["reason"] == proposals.ARTIFACT_MISSING
+
+
+def test_revert_allows_an_orphaned_artifact(tmp_path: Path) -> None:
+    """ADR-0020 D43: the target file is still there but the user removed our
+    managed block from it — the managed artifact is gone, so revert repairs the
+    record. Ledger reason = `orphaned`."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.write_text("# My AGENTS.md\n\nI deleted the neurobase block.\n", encoding="utf-8")
+    assert _marker() not in installed.read_text(encoding="utf-8")
+
+    proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
+
+    assert _read(root, "prefer-uv-run").get("status") == "proposed"
+    assert _ledger_events(root)[-1]["reason"] == proposals.ARTIFACT_ORPHANED
+    # The rest of the file is left exactly as the user left it.
+    assert "I deleted the neurobase block." in installed.read_text(encoding="utf-8")
+
+
+def test_revert_of_accepted_with_no_installed_path_reresolves_the_target(tmp_path: Path) -> None:
+    """ADR-0020 D43 (Codex case 3): `accepted` with `installed_path: null` does
+    NOT mean the artifact is gone — the target is re-derived from the proposal.
+    If the managed block is still live there, revert is refused."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    assert _marker() in installed.read_text(encoding="utf-8")  # block is live
+    doc = _read(root, "prefer-uv-run")
+    frontmatter = dict(doc.frontmatter)
+    frontmatter["installed_path"] = None  # incomplete bookkeeping, artifact still live
+    store.write_doc(doc.file_path, frontmatter, doc.body)
+
+    with pytest.raises(ValueError, match="still installed"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
+
+    # But once the live block is actually gone, the same null-path record reverts.
+    installed.unlink()
+    assert proposals.revert_proposal(root, "prefer-uv-run", now=NOW) == "accepted"
+    assert _read(root, "prefer-uv-run").get("status") == "proposed"
+
+
+def test_artifact_state_classifies_by_liveness(tmp_path: Path) -> None:
+    """The liveness classification `revert` keys on (ADR-0020): live while the
+    marker is present (even after surrounding edits), orphaned when the block is
+    removed but the file remains, missing when the file is gone."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    doc = _read(root, "prefer-uv-run")
+
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_LIVE
+
+    installed.write_text(installed.read_text("utf-8") + "\nextra user line\n", "utf-8")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_LIVE
+
+    installed.write_text("no managed block here", encoding="utf-8")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_ORPHANED
+
+    installed.unlink()
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_MISSING
+
+
+def test_artifact_state_is_unresolvable_when_a_candidate_cannot_be_read(tmp_path: Path) -> None:
+    """Review P2-CORRECTNESS-005: `_read_preserving` raises `OSError` for a
+    directory (or unreadable file) where the artifact should be. That must be
+    classified — fail closed as `unresolvable`, since absence is unproven — not
+    escape the classifier as an `IsADirectoryError` traceback."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.unlink()
+    installed.mkdir()  # a directory now sits where the managed file was
+
+    doc = _read(root, "prefer-uv-run")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_UNRESOLVABLE
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
+    assert _read(root, "prefer-uv-run").get("status") == "accepted"
+
+
+def test_artifact_state_is_unresolvable_when_a_candidate_is_not_valid_utf8(
+    tmp_path: Path,
+) -> None:
+    """Review P2-CORRECTNESS-005 (round 4): the rule is "could not read it", not
+    "raised OSError". `read_target_text` decodes UTF-8, so invalid bytes raise
+    `UnicodeDecodeError` — which must classify as `unresolvable`, not escape."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.write_bytes(b"\xff\xfe not valid utf-8 \xc3\x28")
+
+    doc = _read(root, "prefer-uv-run")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_UNRESOLVABLE
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
+    assert _read(root, "prefer-uv-run").get("status") == "accepted"
+
+
+def test_accept_proposal_expect_guard_refuses_a_changed_document(tmp_path: Path) -> None:
+    """Review P1-DATA-INTEGRITY-004 (round 4): `accept_proposal` reloads the
+    proposal itself, so a caller that validated one version had no way to bind
+    *that* version to the write. `expect=` closes it — mutate deterministically
+    between the caller's read and the write, and nothing is recorded."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    validated = _read(root, "prefer-uv-run")
+
+    # A concurrent writer changes the proposal after the caller validated it.
+    frontmatter = dict(validated.frontmatter)
+    frontmatter["candidate_type"] = "repeated-correction"
+    store.write_doc(validated.file_path, frontmatter, validated.body)
+
+    with pytest.raises(proposals.ProposalChangedError):
+        proposals.accept_proposal(
+            root,
+            "prefer-uv-run",
+            target="AGENTS.md",
+            installed_path=Path("/repo/AGENTS.md"),
+            expect=validated,
+            now=NOW,
+        )
+
+    assert _read(root, "prefer-uv-run").get("status") == "proposed"
+    assert [e["event"] for e in _ledger_events(root)] == ["proposed"]
+
+
+def test_artifact_state_finds_a_live_artifact_at_a_second_registered_root(
+    tmp_path: Path,
+) -> None:
+    """Review F1 (round 3): liveness must consider every registered root, not just
+    `roots[0]`, or a moved+re-registered project reads `missing` while the live
+    block sits at the new root."""
+    import shutil
+
+    root = tmp_path / "store"
+    _accept_real(tmp_path, root)
+    moved = tmp_path / "moved-repo"
+    shutil.move(str(tmp_path / "repo"), str(moved))
+    projects.register_project(root, moved, slug="neurobase")
+
+    doc = _read(root, "prefer-uv-run")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_LIVE
+
+
+def test_revert_stays_refused_across_a_reaccept(tmp_path: Path) -> None:
+    """A re-accepted proposal (two `accepted` events) with a live block is still
+    refused — liveness is read from the marker on disk now, not from any event."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    install.commit_install(root, install.prepare_install(root, "prefer-uv-run"))  # re-accept
+    assert _marker() in installed.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="still installed"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=6))

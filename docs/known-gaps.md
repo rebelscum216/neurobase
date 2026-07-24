@@ -186,3 +186,94 @@ uninstall/recovery **require**. Where D11 matters for these commands is installi
 skips the backup); the **non-purge uninstall and `--restore-backup` paths open no
 handle** — the backup/restore itself is a schema-independent maintenance exception
 (spec §10).
+
+---
+
+### G2 — accepted-proposal state can drift from disk; there is no revert path
+
+- **status:** fixed (2026-07-24, ADR-0020) — `recommend revert` is now
+  **drift-repair-only**, gated on whether the proposal's **managed artifact is
+  still live on disk** (the slug's rule sentinel, or *any* SKILL.md at the
+  canonical path), *not* on a
+  whole-file hash: allowed only when the artifact is *missing* (target file gone)
+  or *orphaned* (file present but our block/skill removed), and refused when it is
+  *live* or *unresolvable*. Liveness fails closed three ways: it checks **every**
+  plausible location (recorded `installed_path` + the target under every
+  registered project root); a rule is live while its opening sentinel
+  `<!-- neurobase:rule:<slug>` is present (one grammar, shared with the write so
+  they cannot disagree) and a **skill is live if its file exists** (liveness is
+  deliberately not a frontmatter-parsing question — CRLF, CR-only, a BOM and fence
+  whitespace each defeated a parser while the skill stayed installed, so the parse
+  is not asked); and any unreadable candidate (directory, permissions, invalid
+  UTF-8) yields `unresolvable` rather than "gone". That closes the
+  findings in `docs/reviews/2026-07-23-g2-g3-recommender-fixes.md` across three
+  rounds: round-1 F1/F2/F4; round-2 F1 (a whole-file-hash gate let an edit
+  *outside* a rule block make it revertable while the block stayed live), F2 (a
+  matching-but-unrecorded artifact records acceptance without a write, so
+  re-accept after a revert is reachable — D44), P1 (the record path re-reads the
+  target at the write boundary) and P2 (survival keeps its own existence-first
+  whole-file check, separate from revert's liveness); and round-3 F1 (CRLF-owned
+  skill + multi-root project both read as gone), P1-004 (a concurrent
+  `recommend edit` during the confirm prompt could record a draft that was never
+  installed — the proposal is now re-verified at the same boundary), P2-005
+  (`OSError` escaped the classifier) and P3-006 (stale `--help`); and round-4 F1
+  (CR-only/BOM/fence-whitespace — fixed at the cause by dropping frontmatter
+  parsing from skill liveness entirely), P1-004 again (a *field subset* cannot
+  capture render-relevant state, e.g. `candidate_type`; the guard now compares the
+  re-render and binds the validated document to the write) and P2-005 again
+  (`UnicodeDecodeError` is a read failure too). Regressions
+  drive the *real* install service through the CLI and the web UI POST. A real
+  un-accept (uninstall of a live artifact) remains deferred, exactly as ADR-0007
+  left it.
+- **severity:** minor — nothing corrupts, but the store's view of the present was
+  wrong: a proposal stayed `accepted` with a dangling `installed_path` after its
+  artifact was removed by hand, and §12.7 makes reject-on-accepted a hard error,
+  so there was no sanctioned way back.
+- **found:** 2026-07-16 by Andrew (live browser smoke of Web UI Phase 1 —
+  accepted `surgical-git-staging`, then deleted the installed SKILL.md; the
+  proposal still reads `accepted`).
+
+**Detail.** Accept records `status: accepted`, `installed_path`, and a ledger
+`accepted` event with `installed_hash` (ADR-0011). `revert` asks a distinct
+question from survival — "is the managed artifact still live to orphan?"
+(`proposals.artifact_state`, by sentinel/existence) versus "did the accepted bytes
+survive verbatim?" (`metrics._survival_one`, whole-file hash) — so the record can
+be made honest (`proposed`, no `installed_path`) precisely when no live artifact
+remains. `recommend list`/`show` and the web UI rendering an explicit drift
+signal (the app-shell plan's Phase S gallery) is still worthwhile polish, but is
+no longer load-bearing: the store can now be corrected, not just
+annotated.
+
+---
+
+### G3 — the skill emitter can double frontmatter and misuses `candidate_type` as `description`
+
+- **status:** fixed (2026-07-23) — `_skill` (`recommender/emitters.py`) now strips a
+  draft's own leading `---` frontmatter via `_split_leading_frontmatter` before wrapping
+  (so exactly one block ships, salvaging a draft-set `description`), and derives
+  `description` from the draft's `description`/`#` heading, falling to `candidate_type`
+  only as a last resort. Hardened after Codex review (F3): the splitter detects the
+  leading fence *structurally* and **fails closed** (raises) on an invalid-YAML or
+  non-mapping leading block, rather than embedding a second block (invalid case, which
+  had left G3 reproducible) or silently dropping the text (non-mapping/`---`-rule case).
+  Regression-tested (`test_emitters.py` — doubling, description, invalid-YAML,
+  non-mapping, mid-body rule, no-trailing-newline fence; the fail-closed and
+  description/doubling tests all mutation-verified to fail pre-fix).
+- **severity:** minor — the installed artifact is valid enough for Claude to
+  load, but reads wrong.
+- **found:** 2026-07-16 by Andrew (same live smoke; emitted SKILL.md had two
+  frontmatter blocks and `description: repeated-correction`).
+
+**Detail.** `_skill` (`recommender/emitters.py:65-86`) wraps the managed draft
+in a generated frontmatter block (`name`, `description`, `neurobase_slug`,
+`neurobase_managed`) and prepends a `# <slug>` heading when the draft lacks one.
+A draft that itself begins with `---` frontmatter is embedded verbatim →
+doubled frontmatter, with consumers reading only the first block. And
+`description:` is set to `candidate_type` (`emitters.py:80` —
+`str(doc.get("candidate_type") or title)`), so skills ship with descriptions
+like `repeated-correction`. Partly a fixture-authoring artifact (drafts should
+not carry frontmatter), but the emitter should not depend on that.
+
+**Direction.** Emitter-side: strip or merge a draft's own frontmatter; derive
+`description` from the proposal title or rationale, falling back to
+`candidate_type` only as a last resort. Test with a frontmatter-bearing draft.

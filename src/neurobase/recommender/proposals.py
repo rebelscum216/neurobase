@@ -432,13 +432,22 @@ def read_ledger(root: Path) -> list[dict[str, Any]]:
 
 
 def _append_ledger(
-    root: Path, slug: str, event: str, at_iso: str, candidate_type: str | None
+    root: Path,
+    slug: str,
+    event: str,
+    at_iso: str,
+    candidate_type: str | None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Append one ledger event line (§12.2). A ``proposed`` write records
-    ``candidate_type`` for the miner's later per-type reject summary (§12.5)."""
+    ``candidate_type`` for the miner's later per-type reject summary (§12.5);
+    ``extra`` carries event-specific keys (a ``reverted`` event's drift
+    ``reason``, ADR-0020) without every caller reimplementing the append."""
     record: dict[str, Any] = {"at": at_iso, "slug": slug, "event": event}
     if candidate_type is not None:
         record["candidate_type"] = candidate_type
+    if extra:
+        record.update(extra)
     path = ledger_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -519,6 +528,12 @@ def reject_proposal(
     return status
 
 
+class ProposalChangedError(ValueError):
+    """Raised when ``accept_proposal``'s ``expect`` guard finds the proposal on
+    disk is no longer the document the caller validated (ADR-0020 D44, review
+    P1-DATA-INTEGRITY-004)."""
+
+
 def accept_proposal(
     root: Path,
     slug: str,
@@ -526,6 +541,7 @@ def accept_proposal(
     target: str,
     installed_path: Path,
     installed_hash: str | None = None,
+    expect: store.Document | None = None,
     now: datetime | None = None,
 ) -> None:
     """Record a successful artifact installation after the write completes.
@@ -534,10 +550,23 @@ def accept_proposal(
     tell "modified since acceptance" apart from "never touched" without
     diffing against anything else on disk. ``None`` for callers that don't
     compute one — the survival check falls back to existence-only for those
-    (legacy) events."""
+    (legacy) events.
+
+    ``expect`` (ADR-0020 D44) binds this write to a document the caller already
+    validated: if the proposal reloaded here differs from it, raise
+    ``ProposalChangedError`` and write nothing. Without it a caller that checks
+    the proposal and *then* calls this function has a window in between — this
+    function does its own independent reload — so the version it validated need
+    not be the version that becomes ``accepted`` (review P1-DATA-INTEGRITY-004).
+    A defensive equality guard, not a lock: it closes the reachable
+    check-then-write gap, and cannot serialize two concurrent writers."""
     doc = load_proposal(root, slug)
     if doc is None:
         raise ValueError(f"proposal {slug!r} not found or malformed")
+    if expect is not None and (doc.frontmatter != expect.frontmatter or doc.body != expect.body):
+        raise ProposalChangedError(
+            f"proposal {slug!r} changed between validation and this write — nothing recorded"
+        )
     status = str(doc.get("status") or "proposed")
     if status in {"rejected", "superseded"}:
         raise ValueError(f"cannot accept proposal {slug!r}: status is {status}")
@@ -554,6 +583,177 @@ def accept_proposal(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+# --- artifact liveness: is a managed artifact still live to orphan? (ADR-0020) --
+
+#: The liveness states an accepted proposal's *managed artifact* can be in. What
+#: matters for `revert` is whether reverting would orphan a still-installed
+#: Neurobase artifact — NOT whether the target file's bytes survived verbatim
+#: (that is survival, §12.9, a separate question). So the classification is by
+#: the slug-scoped marker / skill ownership, re-derived from the proposal, never
+#: by a whole-file hash (round-2 review F1: an edit *outside* a rule block flips
+#: the file hash while the managed block stays live).
+ARTIFACT_LIVE = "live"  #: rule sentinel present, or a SKILL.md exists — NON-revertable
+ARTIFACT_MISSING = "missing"  #: target file absent entirely
+ARTIFACT_ORPHANED = "orphaned"  #: target present but our block/skill is gone from it
+ARTIFACT_UNRESOLVABLE = "unresolvable"  #: target can't be resolved — NON-revertable (fail closed)
+
+#: The liveness states in which no live managed artifact remains to orphan, and
+#: only these (ADR-0020 D43, review F1). `live` and `unresolvable` are refused:
+#: the first would orphan a live artifact, the second cannot *prove* one is gone.
+REVERTABLE_ARTIFACT_STATES = frozenset({ARTIFACT_MISSING, ARTIFACT_ORPHANED})
+
+
+def latest_accepted_event(root: Path, slug: str) -> dict[str, Any] | None:
+    """The most recent ``accepted`` ledger event for ``slug`` — a proposal can
+    be re-accepted (accept is idempotent, §12.7), so there may be more than
+    one. ``None`` when there is no resolvable ``accepted`` event at all. Used by
+    ``metrics``'s survival check (§12.9)."""
+    candidates = [
+        (event, when)
+        for event in ledger_history(root, slug)
+        if event.get("event") == "accepted" and (when := _parse_iso(event.get("at"))) is not None
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda pair: pair[1])[0]
+
+
+def artifact_state(root: Path, doc: store.Document, slug: str) -> str:
+    """Classify an accepted proposal's *managed artifact* by liveness (ADR-0020
+    D43) — the question ``revert`` must answer. Returns ``live`` when the slug's
+    opening sentinel (rule), or *any* SKILL.md at the canonical path (skill), is
+    still on disk at **any**
+    plausible install location, regardless of surrounding foreign bytes;
+    ``missing`` when no candidate target exists; ``orphaned`` when a candidate
+    exists but no longer holds our block/skill; ``unresolvable`` when the target
+    can't be re-derived *or* a candidate can't be read — refused fail-closed
+    rather than assumed gone.
+
+    Every candidate is checked (``emitters.candidate_target_paths``: the recorded
+    ``installed_path`` plus the re-derived target under every registered project
+    root), because concluding "gone" from one stale root would orphan a live
+    artifact at another (review F1, round 3). A candidate that raises ``OSError``
+    — a directory or an unreadable file where the artifact should be — makes the
+    verdict ``unresolvable`` rather than escaping as a traceback (review
+    P2-CORRECTNESS-005): we cannot prove absence, so we refuse.
+
+    Note this is deliberately NOT survival's whole-file-hash comparison
+    (``metrics._survival_one``): a rule block stays live under any edit *outside*
+    it, so reverting on a mere file-hash change would orphan a live artifact
+    (round-2 review F1). The two questions are distinct and answered separately.
+    ``slug`` is accepted for signature symmetry with the metrics helpers; the
+    targets are re-derived from ``doc``."""
+    from neurobase.recommender import emitters  # local: emitters imports proposals
+
+    try:
+        candidates = emitters.candidate_target_paths(root, doc)
+    except ValueError:
+        return ARTIFACT_UNRESOLVABLE
+
+    present = False
+    indeterminate = False
+    for path in candidates:
+        try:
+            text = emitters.read_target_text(path)
+        except (OSError, UnicodeError):
+            # ANY failure to read a candidate — a directory, a permissions error
+            # (OSError), or bytes that aren't valid UTF-8 (UnicodeDecodeError, a
+            # UnicodeError) — leaves absence unproven, so it must not read as
+            # "gone". Catching one specific exception type is what let round 4's
+            # invalid-UTF-8 target escape (review P2-CORRECTNESS-005); the rule is
+            # "could not read it", not "raised OSError".
+            indeterminate = True
+            continue
+        if not path.exists():
+            continue
+        present = True
+        if emitters.candidate_is_live(text, doc):
+            return ARTIFACT_LIVE
+    if indeterminate:
+        return ARTIFACT_UNRESOLVABLE
+    return ARTIFACT_ORPHANED if present else ARTIFACT_MISSING
+
+
+def revert_proposal(root: Path, slug: str, *, now: datetime | None = None) -> str:
+    """Repair the drift where the store still reads ``accepted`` but the
+    proposal's managed artifact is no longer live on disk (§12.7, G2, ADR-0020):
+    flip the proposal back to ``proposed``, clear its now-dangling
+    ``installed_path``, and append exactly one ``reverted`` ledger event carrying
+    the liveness ``reason``. Returns the prior status (always ``"accepted"`` on
+    success).
+
+    **Drift repair only — never an un-accept.** ``revert`` is allowed only when
+    ``artifact_state`` is ``missing`` or ``orphaned`` — i.e. no live managed
+    artifact remains to orphan. A ``live`` artifact (the slug's rule marker or
+    any SKILL.md at the canonical path — *whatever* else changed around it) is
+    refused,
+    and so is an ``unresolvable`` one (target can't be re-derived, so absence
+    cannot be proven). That boundary is load-bearing: with it removed,
+    ``accept → revert → reject`` would leave a live Neurobase-managed artifact
+    installed under a ``rejected`` proposal — precisely the orphaning §12.7's
+    blocked ``reject``-on-``accepted`` rule exists to prevent (review F1). Round
+    2 got this wrong by keying on a whole-file hash, so a user edit *outside* a
+    rule block made the file "modified" and revertable while the block stayed
+    live; liveness is judged by the sentinel / file existence instead.
+
+    The artifact itself is still **never touched** on any path — v1 has no
+    uninstall-by-command (ADR-0007, unchanged). To retire a live artifact, remove
+    the managed block/skill by hand first; the proposal then reads
+    ``orphaned``/``missing`` and reverts. Because the survival/precision metrics
+    key on current frontmatter status rather than the ledger (§12.9), a reverted
+    proposal drops out of them cleanly while the ledger keeps the full
+    proposed→accepted→reverted history."""
+    doc = load_proposal(root, slug)
+    if doc is None:
+        raise ValueError(f"proposal {slug!r} not found or malformed")
+    status = str(doc.get("status") or "proposed")
+    if status != "accepted":
+        raise ValueError(
+            f"cannot revert proposal {slug!r}: status is {status} "
+            "(only an accepted proposal can be reverted)"
+        )
+    state = artifact_state(root, doc, slug)
+    refusal = revert_refusal(slug, doc, state)
+    if refusal is not None:
+        raise ValueError(refusal)
+    stamp = _iso(now if now is not None else datetime.now(UTC))
+    frontmatter = dict(doc.frontmatter)
+    frontmatter["status"] = "proposed"
+    frontmatter["installed_path"] = None
+    frontmatter["updated_at"] = stamp
+    store.write_doc(doc.file_path, frontmatter, doc.body)
+    _append_ledger(root, slug, "reverted", stamp, None, {"reason": state})
+    return status
+
+
+def revert_refusal(slug: str, doc: store.Document, state: str) -> str | None:
+    """The named-state error for a revert the liveness guard refuses, or ``None``
+    when ``state`` is revertable. Both refusals say what to do next, since
+    "remove the artifact first" is the sanctioned route to the un-accept revert
+    deliberately is not.
+
+    Public so the CLI can refuse *before* prompting for consent rather than
+    after; ``revert_proposal`` remains the authority and re-checks at write
+    time, so a CLI that skipped this would still be safe."""
+    if state in REVERTABLE_ARTIFACT_STATES:
+        return None
+    where = doc.get("installed_path") or "its installed artifact"
+    if state == ARTIFACT_UNRESOLVABLE:
+        return (
+            f"cannot revert proposal {slug!r}: its install target cannot be resolved "
+            "(unregistered project or malformed proposal), so whether a managed "
+            "artifact is still installed cannot be verified. revert repairs drift — "
+            "it is not an uninstall (ADR-0020); refusing rather than risk orphaning "
+            "a live artifact."
+        )
+    return (
+        f"cannot revert proposal {slug!r}: {where} is still installed (its managed "
+        "block/skill is live on disk). revert repairs drift — it is not an uninstall "
+        "(ADR-0020). Remove the managed block/skill by hand first if you no longer "
+        "want it."
+    )
 
 
 # --- body rendering + redaction ---------------------------------------------

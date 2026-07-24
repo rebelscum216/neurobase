@@ -8,6 +8,7 @@ is atomic (temp file + rename). Nodes and ``index.md`` are pure functions of
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import tomllib
@@ -25,6 +26,12 @@ from neurobase.core.config import load_config
 SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 RAW_SUBDIRS = ("raw", "curated", "nodes", ".tombstones")
 STORE_SCHEMA_VERSION = 1
+
+# The per-pass curator journal, one JSON object per line under a project's
+# memory dir. Owned by core (not the curator) so the writer (curator) and any
+# core reader — e.g. ``core.graph`` reading the fold record for provenance —
+# share one canonical name rather than a cross-layer format dependency.
+CURATOR_LOG = ".curator-log.jsonl"
 
 _DOC_RE = re.compile(r"\A---\n(?P<frontmatter>.*?)\n---\n\n(?P<body>.*)\Z", re.DOTALL)
 
@@ -309,6 +316,16 @@ def upsert_curated(
         "agent_last": agent_last,
         "updated_at": _now_iso(),
     }
+    # NOTE: a same-slug tombstone is deliberately NOT deleted here. Writing
+    # curated/<slug> makes the slug active, so any tombstone becomes stale
+    # residue — but deleting it cannot be done safely: that same
+    # active+tombstoned shape is also the midpoint of an in-flight
+    # ``soft_delete_curated``, and without cross-process ownership this write
+    # cannot tell the two apart. Deleting an in-flight tombstone would let the
+    # concurrent delete unlink the active file and lose the fact outright.
+    # Instead the residue is resolved by spec §1's rule (curated/ is
+    # authoritative, so readers see the slug as active) and collected by
+    # ``prune_tombstones`` once its grace expires. See ADR-0022.
     return write_doc(path, frontmatter, body)
 
 
@@ -337,7 +354,24 @@ def list_curated(root: Path, project: str, active_only: bool = True) -> list[Doc
 
 def soft_delete_curated(root: Path, project: str, slug: str) -> Path:
     """Tombstone a curated fact: move it to ``.tombstones/``, recoverable
-    until ``prune_tombstones`` hard-deletes it past the grace period."""
+    until ``prune_tombstones`` hard-deletes it past the grace period.
+
+    Two-file move, so not atomic: the tombstone is written *first*, then the
+    active file is unlinked (spec §1).
+
+    This function **never deletes the tombstone path**, not even to undo its own
+    failed move. ``.tombstones/<slug>.md`` is shared, and without a project lock
+    (`known-gaps.md` G4) this process cannot prove the file there is still the
+    one it wrote — a racing soft-delete of the same slug may have replaced it
+    with *its* in-flight tombstone, and deleting that copy loses the fact
+    outright. So:
+
+    - ``FileNotFoundError`` on the unlink means the active file is already gone
+      (a racing soft-delete completed the move); that is success, not failure.
+    - any other unlink error propagates, and the tombstone simply stays. The
+      caller sees the error; readers are unaffected because ``curated/`` is
+      authoritative while both copies exist; the residue is reclaimed by
+      ``prune_tombstones`` once its grace expires."""
     _require_slug(slug, "fact slug")
     mem = memory_dir(project, root)
     src = mem / "curated" / f"{slug}.md"
@@ -347,7 +381,8 @@ def soft_delete_curated(root: Path, project: str, slug: str) -> Path:
     frontmatter["tombstoned_at"] = _now_iso()
     dest = mem / ".tombstones" / f"{slug}.md"
     write_doc(dest, frontmatter, doc.body)
-    src.unlink()
+    with contextlib.suppress(FileNotFoundError):
+        src.unlink()
     return dest
 
 

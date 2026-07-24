@@ -19,6 +19,7 @@ Hard rules preserved here:
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,9 @@ DEFAULT_DISTILL = "auto"
 DEFAULT_DISTILL_CHUNK_CHARS = distill_mod.DISTILL_CHUNK_CHARS
 OVERSIZE_RAW_MARKER = "\n\n[truncated for plan payload]"
 NODE_SUFFIX = "-status"
-CURATOR_LOG = ".curator-log.jsonl"
+# Canonical name now lives in core.store (the graph reader shares it); aliased
+# here so existing ``engine.CURATOR_LOG`` references keep resolving.
+CURATOR_LOG = store.CURATOR_LOG
 
 PLAN_SYSTEM = """\
 You are the curator of a durable, cross-agent engineering memory. You are given \
@@ -53,7 +56,8 @@ tombstone, supersede, or reword it; carry it forward unchanged.
 - A fact is one durable, self-contained statement — not a session log.
 - Slugs are stable kebab-case matching ^[a-z0-9-]+$.
 - Include only facts that change; omit unchanged ones.
-- In each upsert's "from_raw", list the raw filenames the fact draws on.
+- In each upsert's "from_raw", list the raw filenames the fact draws on — using \
+only filenames present in this request's raw_captures.
 
 Respond with ONLY a JSON object — no prose, no code fences — exactly of the form:
 {"upserts": [{"slug": "...", "body": "...", "supersedes": ["..."], "from_raw": ["..."]}], \
@@ -186,29 +190,53 @@ def _safe_soft_delete(handle: StoreHandle, project: str, slug: str) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class _ApplyResult:
+    """What one batch's upserts produced, for the caller's step-4/5/6
+    bookkeeping and the fold journal (spec §2, ADR-0022)."""
+
+    upserted: set[str]  # slugs that landed this batch
+    superseded_by: dict[str, str]  # old slug -> the landed slug that supersedes it
+    edges: dict[str, list[str]]  # landed slug -> validated raw filenames (from_raw ∩ batch)
+    dropped: int  # from_raw names on landed facts absent from the batch (hallucinated)
+
+
 def _apply_upserts(
-    handle: StoreHandle, project: str, upserts: list[dict[str, Any]]
-) -> tuple[set[str], list[str]]:
-    """Apply upserts (spec §2 step 4). Returns (upserted slugs, superseded
-    slugs to tombstone). Empty slug/body skipped; supersedes filtered of self;
-    bad slug skipped with a warning."""
+    handle: StoreHandle, project: str, upserts: list[dict[str, Any]], batch: set[str]
+) -> _ApplyResult:
+    """Apply upserts (spec §2 step 4). Empty slug/body skipped; supersedes
+    filtered of self; bad slug skipped with a warning.
+
+    ``from_raw`` is validated against ``batch`` — the raw filenames actually
+    shown to the model this batch. Names outside it are LLM hallucinations
+    (including echoes of old raw basenames in a fact body's lineage block); they
+    are dropped before reaching the permanent ``provenance`` record and counted
+    (ADR-0022 B1). The returned edges + supersedes map feed the fold journal (B2)."""
     upserted: set[str] = set()
-    superseded: list[str] = []
+    superseded_by: dict[str, str] = {}
+    edges: dict[str, list[str]] = {}
+    dropped = 0
     for upsert in upserts:
         slug = str(upsert.get("slug", "")).strip()
         body = str(upsert.get("body", "")).strip()
         if not slug or not body:
             continue
         supersedes = [s for s in (upsert.get("supersedes") or []) if s and s != slug]
-        from_raw = [r for r in (upsert.get("from_raw") or []) if r]
-        provenance = [f"raw/{name}" for name in from_raw]
+        from_raw = [str(r) for r in (upsert.get("from_raw") or []) if r]
+        validated = [name for name in from_raw if name in batch]
+        provenance = [f"raw/{name}" for name in validated]
         try:
             handle.upsert_curated(project, slug, body, provenance=provenance, supersedes=supersedes)
         except store.InvalidSlugError:
             continue  # bad slug ⇒ skip + warn (the model occasionally emits one)
         upserted.add(slug)
-        superseded.extend(str(s) for s in supersedes)
-    return upserted, superseded
+        dropped += len(from_raw) - len(validated)
+        # Union across repeated upserts of one slug in a batch, order-preserving.
+        merged = edges.setdefault(slug, [])
+        merged.extend(name for name in validated if name not in merged)
+        for old in supersedes:
+            superseded_by.setdefault(str(old), slug)
+    return _ApplyResult(upserted, superseded_by, edges, dropped)
 
 
 def _synthesize(handle: StoreHandle, project: str, brain: Brain) -> None:
@@ -239,10 +267,22 @@ def _strip_outer_fence(text: str) -> str:
     return text
 
 
-def _log_pass(handle: StoreHandle, project: str, summary: dict[str, Any]) -> None:
+def _log_pass(
+    handle: StoreHandle,
+    project: str,
+    summary: dict[str, Any],
+    *,
+    fold: dict[str, Any] | None = None,
+) -> None:
+    """Append one pass record to the journal. ``fold`` (ADR-0022 B2), when
+    given, rides alongside the summary keys — it is deliberately NOT a summary
+    key, because the CLI prints the summary as JSON and the fold carries raw
+    session ids (loopback-only sensitivity, spec §2)."""
     mem = handle.memory_dir(project)
     mem.mkdir(parents=True, exist_ok=True)
     record = {**summary, "at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}
+    if fold is not None:
+        record["fold"] = fold
     with (mem / CURATOR_LOG).open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -339,7 +379,15 @@ def curate(
     upsert_count = 0
     superseded_count = 0
     tombstone_count = 0
+    dropped_from_raw = 0
     plan_error: str | None = None
+
+    # Fold journal (ADR-0022 B2): accumulated across committed batches, written
+    # once at pass end. Each list holds only what actually applied this pass.
+    fold_consumed: list[dict[str, Any]] = []
+    fold_edges: dict[str, list[str]] = {}
+    fold_superseded: list[dict[str, str]] = []
+    fold_tombstoned: list[str] = []
 
     while remaining:
         # Reload after every committed batch: later plans must see facts added,
@@ -377,31 +425,49 @@ def curate(
         upserts = plan.get("upserts") or []
         tombstones = plan.get("tombstones") or []
         pinned = _pinned_slugs(curated)
+        batch_names = {doc.file_path.name for doc in batch_docs}
 
         # D-b guard (spec §2): user-directed facts are pinned — drop any plan
         # step that would reword, supersede, or tombstone one.
         upserts = [u for u in upserts if str(u.get("slug", "")).strip() not in pinned]
 
         # Step 4: upserts + tombstone superseded (unless re-upserted / pinned).
-        upserted, superseded_slugs = _apply_upserts(handle, project, upserts)
-        upsert_count += len(upserted)
-        superseded_count += sum(
-            _safe_soft_delete(handle, project, slug)
-            for slug in dict.fromkeys(superseded_slugs)
-            if slug not in upserted and slug not in pinned
-        )
+        applied = _apply_upserts(handle, project, upserts, batch_names)
+        upsert_count += len(applied.upserted)
+        dropped_from_raw += applied.dropped
+        for slug, raws in applied.edges.items():
+            merged = fold_edges.setdefault(slug, [])
+            merged.extend(name for name in raws if name not in merged)
+        for old_slug, new_slug in applied.superseded_by.items():
+            if old_slug in applied.upserted or old_slug in pinned:
+                continue
+            if _safe_soft_delete(handle, project, old_slug):
+                superseded_count += 1
+                # Record only where the soft-delete actually applied — the sole
+                # record that outlives multi-generation supersession + pruning.
+                fold_superseded.append({"slug": old_slug, "by": new_slug})
 
         # Step 5: explicit tombstones (skip a slug upserted in this batch or pinned).
         for entry in tombstones:
             slug = str(entry.get("slug", "")).strip()
-            if not slug or slug in upserted or slug in pinned:
+            if not slug or slug in applied.upserted or slug in pinned:
                 continue
             if _safe_soft_delete(handle, project, slug):
                 tombstone_count += 1
+                fold_tombstoned.append(slug)
 
-        # Step 6 per batch: the plan was valid and its state is durable.
+        # Step 6 per batch: the plan was valid and its state is durable. Capture
+        # session identity at consumption time so the edge outlives raw retention.
         for doc in batch_docs:
             handle.mark_consumed(doc.file_path)
+            fold_consumed.append(
+                {
+                    "file": doc.file_path.name,
+                    "session_id": doc.get("session_id"),
+                    "agent": doc.get("agent"),
+                    "captured_at": doc.get("captured_at"),
+                }
+            )
         remaining = remaining[len(batch_docs) :]
 
     if dry_run:
@@ -440,6 +506,32 @@ def curate(
         }
         _log_pass(handle, project, summary)
         return summary
+
+    # Reconcile the fold's removal lists against pass-end reality (D22). The
+    # per-batch guards above only see the current batch's upserts, so a slug
+    # soft-deleted by an EARLIER batch and re-upserted by a LATER one is active
+    # at pass end — on balance the pass did not remove it. The active set is the
+    # oracle ("active at pass end" == "not removed by this pass"): drop the false
+    # fold entry and un-count it, keeping each count == len(its fold list). This
+    # repairs the JOURNAL only. The resurrected slug's old tombstone stays on
+    # disk as documented residue — deleting it cannot be made concurrency-safe
+    # (spec §1) — but it is invisible to readers, which resolve in favour of
+    # curated/, and prune collects it after the grace period.
+    final_active = {str(d.get("name", d.file_path.stem)) for d in handle.list_curated(project)}
+    kept_superseded: list[dict[str, str]] = []
+    for entry in fold_superseded:
+        if entry["slug"] in final_active:
+            superseded_count -= 1
+        else:
+            kept_superseded.append(entry)
+    fold_superseded = kept_superseded
+    kept_tombstoned: list[str] = []
+    for slug in fold_tombstoned:
+        if slug in final_active:
+            tombstone_count -= 1
+        else:
+            kept_tombstoned.append(slug)
+    fold_tombstoned = kept_tombstoned
 
     # Steps 7/8 run whenever at least one batch committed — including when a
     # LATER batch failed. Derived state must never lag committed facts: the node
@@ -489,8 +581,11 @@ def curate(
         "upserts": upsert_count,
         "superseded": superseded_count,
         "tombstones": tombstone_count,
+        "dropped_from_raw": dropped_from_raw,
         "pruned_tombstones": len(pruned),
-        "active_facts": len(handle.list_curated(project)),
+        # final_active is the pass-end active set computed above; prune/synth
+        # touch only .tombstones/ and nodes/, never curated/, so it still holds.
+        "active_facts": len(final_active),
         **pass_budget.summary(),
     }
     if unconsumed_left:
@@ -499,7 +594,20 @@ def curate(
         summary["error"] = plan_error
     if synth_error is not None:
         summary["synth_error" if plan_error is not None else "error"] = synth_error
-    _log_pass(handle, project, summary)
+
+    # Fold journal (ADR-0022 B2): written whenever ≥1 batch committed — the same
+    # gate as steps 7–8 above. It records exactly the committed batches, so it
+    # rides the after-commit error path too (a later batch failing must not erase
+    # the durable session identity of raws already consumed this pass). It never
+    # reaches the returned/printed summary; it enriches the journal record only.
+    fold = {
+        "v": 1,
+        "consumed": fold_consumed,
+        "edges": fold_edges,
+        "superseded": fold_superseded,
+        "tombstoned": fold_tombstoned,
+    }
+    _log_pass(handle, project, summary, fold=fold if batch_count else None)
     return summary
 
 

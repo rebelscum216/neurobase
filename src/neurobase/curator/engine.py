@@ -533,11 +533,22 @@ def curate(
             kept_tombstoned.append(slug)
     fold_tombstoned = kept_tombstoned
 
-    # Steps 7/8 run whenever at least one batch committed — including when a
-    # LATER batch failed. Derived state must never lag committed facts: the node
-    # is what recall injects, so skipping synthesis here would hide every fact
-    # the successful batches wrote until some future pass happened to succeed —
-    # and a permanently-failing raw would make that "never" (D22).
+    # Steps 7/8 run on every path that reaches here — including when a LATER
+    # batch failed after ≥1 committed. Derived state must never lag committed
+    # facts: the node is what recall injects, so skipping synthesis here would
+    # hide every fact the successful batches wrote until some future pass
+    # happened to succeed — and a permanently-failing raw would make that
+    # "never" (D22).
+    #
+    # Codex P2-DOCS-PLAN-ACCURACY-001: this is NOT gated on `batch_count`, and
+    # an earlier version of this comment wrongly implied it was. The only early
+    # return above is the `plan_error is not None and batch_count == 0` abort, so
+    # a *bounded* zero-commit stop — budget exhaustion on the first plan call,
+    # which breaks the loop with `plan_error` unset — reaches here and prunes and
+    # synthesizes with nothing committed. That is intended: both are idempotent
+    # housekeeping over state already on disk (the same property `--resynth`
+    # relies on). The fold IS `batch_count`-gated, a deliberately stricter
+    # condition — see ADR-0022 for why silence beats an empty fold record.
     pruned = handle.prune_tombstones(project, older_than_days=tombstone_grace_days)
 
     # Per spec §2's partial-failure contract, ANY failure here — brain error, a
@@ -583,8 +594,13 @@ def curate(
         "tombstones": tombstone_count,
         "dropped_from_raw": dropped_from_raw,
         "pruned_tombstones": len(pruned),
-        # final_active is the pass-end active set computed above; prune/synth
-        # touch only .tombstones/ and nodes/, never curated/, so it still holds.
+        # final_active is the pass-end active set computed above, still valid
+        # here: prune does not alter curated/ MEMBERSHIP (it collects expired
+        # .tombstones/ entries), and synthesis preserves curated paths and
+        # active status. Note synthesis is not write-free — _synthesize calls
+        # linkify, which rewrites active curated bodies (Codex
+        # P3-DOCS-PLAN-ACCURACY-002) — but a count/membership set is unaffected
+        # by a body rewrite.
         "active_facts": len(final_active),
         **pass_budget.summary(),
     }

@@ -147,8 +147,7 @@ deliberately not inherited.
 **Fold gating — one refinement over the plan's literal text.** The plan wrote
 "ok/partial → fold present; error/noop → no fold." That conflated the two error
 paths. The gate implemented here is **"a batch committed"** (`batch_count > 0`,
-not a dry run) — the *same* condition that already gates steps 7–8 (D22: derived
-state must not lag committed facts). This subsumes ok/partial **and the
+not a dry run). This subsumes ok/partial **and the
 after-commit error path** (a later batch failed after ≥1 committed): those
 committed raws *are* consumed, and dropping their fold would erase exactly the
 durable session identity the journal exists to provide. It excludes the
@@ -156,6 +155,31 @@ first-batch abort (`batch_count == 0`, nothing committed) and noop (early return
 — identical outcomes to the plan's intent for those. On the after-commit error
 path the fold reflects only the committed batches; the failed batch's raws are
 unconsumed and appear nowhere in it.
+
+**The fold gate is deliberately STRICTER than the steps 7–8 gate — they are not
+the same condition.** An earlier draft of this ADR claimed they were; that was
+wrong, and the difference is observable. Steps 7–8 (prune, synthesize) are
+guarded only by the `plan_error is not None and batch_count == 0` early return,
+so a pass that stops on a *bounded* condition with nothing committed — budget
+exhaustion on the very first plan call, which breaks the loop with `plan_error`
+unset — falls through and still prunes and synthesizes with `batch_count == 0`.
+The fold does not: it is gated on `batch_count` directly.
+
+That asymmetry is intended, and the two gates answer different questions:
+
+- **Prune and synthesize are idempotent housekeeping over `curated/`.** Both are
+  pure functions of state already on disk, so running them on a zero-commit pass
+  is harmless and mildly useful — it is the same self-healing property that lets
+  `--resynth` work and that D22 relies on when a later batch fails. Skipping them
+  would make derived state lag for no benefit.
+- **The fold is a claim about what THIS pass consumed.** Writing an empty fold
+  for a pass that consumed nothing is not harmless: a reader (Slice A) would
+  count it as a real pass that attributed no facts, which is a different
+  statement from "no pass ran." Silence is the honest record.
+
+See `test_no_fold_when_the_budget_stops_the_pass_before_any_batch_commits`
+(`tests/test_curate_budget.py`), which pins both halves of this: fold absent,
+prune and synthesis still performed.
 
 **Supporting move.** `CURATOR_LOG` moves to `core.store` (the canonical owner),
 aliased from `curator.engine` for back-compat, so a core reader

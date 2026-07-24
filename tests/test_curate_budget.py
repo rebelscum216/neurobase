@@ -500,6 +500,14 @@ def test_no_fold_when_the_budget_stops_the_pass_before_any_batch_commits(root: P
     graph reader would count as a real pass that attributed no facts.
     """
     _seed(root, "proj", 3)
+    # A tombstone to prune, so step 7 running is OBSERVABLE rather than a
+    # no-op that would pass either way (see the P2-DOCS-PLAN-ACCURACY-001 block
+    # at the end of this test). `tombstone_grace_days=0` puts it past grace.
+    store.upsert_curated(root, "proj", "doomed", "body")
+    store.soft_delete_curated(root, "proj", "doomed")
+    tomb = store.memory_dir("proj", root) / ".tombstones" / "doomed.md"
+    assert tomb.exists()  # precondition
+
     # Past the deadline on the very first debit: __post_init__ reads 0.0, the
     # first plan call reads 999.0 > max_seconds.
     ticks = iter([0.0] + [999.0] * 500)
@@ -513,7 +521,7 @@ def test_no_fold_when_the_budget_stops_the_pass_before_any_batch_commits(root: P
     )
     brain = FakeBrain()
 
-    summary = engine.curate(root, "proj", brain, pass_budget=pass_budget)
+    summary = engine.curate(root, "proj", brain, pass_budget=pass_budget, tombstone_grace_days=0)
 
     assert brain.plan_calls == 0  # nothing ever planned
     assert summary["batches"] == 0
@@ -522,3 +530,17 @@ def test_no_fold_when_the_budget_stops_the_pass_before_any_batch_commits(root: P
 
     (record,) = _read_log(root, "proj")
     assert "fold" not in record  # no committed batch ⇒ no fold record
+
+    # Codex P2-DOCS-PLAN-ACCURACY-001: this same path is ALSO the one place the
+    # fold gate and the steps 7/8 gate visibly diverge, so pin both halves here
+    # rather than leaving the asymmetry to prose. Prune and synthesis are NOT
+    # `batch_count`-gated — they are idempotent housekeeping over `curated/` and
+    # deliberately still run on a bounded zero-commit stop. If someone "fixes"
+    # the asymmetry by commit-gating them, this fails and sends them to ADR-0022.
+    assert summary["pruned_tombstones"] == 1  # step 7 ran
+    assert not tomb.exists()  # ...and actually hard-deleted the expired tombstone
+    # Step 8 ran too. `brain.text` is NOT the probe here — with zero active facts
+    # `_synthesize` short-circuits to the placeholder body without calling the
+    # model — so assert on the artifact synthesis always writes.
+    node = store.memory_dir("proj", root) / "nodes" / f"{engine.node_name('proj')}.md"
+    assert node.exists()

@@ -1,6 +1,6 @@
 ---
 slug: provenance-slice-b-v2
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/provenance-slice-b-v2
@@ -154,4 +154,94 @@ uv run python scripts/check_store_chokepoint.py
 
 ## Reviewer findings  _(Reviewer — Codex)_
 
-> _Awaiting round 1._
+**Round 1 verdict: CHANGES REQUESTED** — 3× P2, 1× P3, no P0/P1. Port surface,
+leakage, tombstone reasoning, counters, and the budget recalibration all cleared
+in Codex's non-blocking notes.
+
+### P2-DOCS-PLAN-ACCURACY-001 — fold gate ≠ steps-7/8 gate
+- **severity:** major (P2)
+- **location:** `docs/adr/0022-curator-fold-journal.md:149`, `docs/how-it-works.md:909`
+- **issue:** ADR + how-it-works say the fold's `batch_count > 0` gate is "the same
+  condition that already gates steps 7–8." It is not: on the zero-commit
+  budget-stop path (`tests/test_curate_budget.py:490`), prune (`engine.py:541`)
+  and synthesis (`engine.py:559`) run unconditionally while only the fold
+  (`engine.py:610`) is `batch_count`-gated.
+- **suggested direction:** pick one truth and make docs+code agree. Either
+  document that the fold has a *stricter* commit gate than steps 7–8 (if the code
+  is intended), or commit-gate steps 7–8 too. Add a regression test on the
+  first-call budget stop asserting the chosen prune/synth behavior alongside fold
+  absence.
+- **resolution:** resolved — **docs-only** (Andrew's call: the code stays). All
+  THREE inaccurate places fixed, including the inline comment at `engine.py:536`
+  the finding did not cite. ADR-0022 now states the fold gate is deliberately
+  *stricter* and gives the reasoning: prune/synthesis are idempotent housekeeping
+  over state already on disk (the property `--resynth` relies on), whereas an
+  empty fold would assert a pass that consumed nothing, where silence is the
+  honest record. `test_no_fold_when_the_budget_stops_the_pass_before_any_batch_commits`
+  now pins both halves — and had to be strengthened first: asserting
+  `"pruned_tombstones" in record` would have passed either way with no tombstone
+  present, so it now seeds an expired tombstone with `tombstone_grace_days=0` to
+  make prune observable. **Mutation-verified twice:** gating prune on
+  `batch_count` → `assert 0 == 1`; gating `_synthesize` → node file absent.
+
+### P2-TEST-GAP-001 — hallucinated-name test doesn't protect fold edges
+- **severity:** major (P2)
+- **location:** `tests/test_curator.py:593`
+- **issue:** `test_hallucinated_from_raw_dropped_and_counted` asserts curated
+  frontmatter + `dropped_from_raw` but never reads `fold.edges`. A mutation
+  keeping `provenance` on `validated` while feeding the raw `from_raw` into
+  `_ApplyResult.edges` (`engine.py:236`) would put ghost filenames into the
+  trusted journal and stay green. The separate fold-edge test uses only valid
+  names, so it can't catch it.
+- **suggested direction:** read the journal in the adversarial test and assert
+  `fold.edges == {"fact-a": ["r1.md"]}` with no ghost name anywhere in the edge
+  map; keep the existing frontmatter/dropped-count assertions.
+- **resolution:** resolved. `test_hallucinated_from_raw_dropped_and_counted` now
+  reads the journal and asserts `fold.edges == {"fact-a": ["r1.md"]}`, plus a
+  flattened check that no ghost name appears under any slug. The frontmatter and
+  `dropped_from_raw` assertions are kept — distinct outputs. **Mutation-verified:**
+  accumulating the raw `from_raw` into `_ApplyResult.edges` while leaving
+  `provenance` validated produced `{'fact-a': ['r1.md', 'ghost-1.md',
+  'ghost-2.md']}` — and got past both pre-existing assertions first, exactly as
+  the finding predicted.
+
+### P2-TEST-GAP-002 — "only applied soft-deletes" lacks a false-apply probe
+- **severity:** major (P2)
+- **location:** `tests/test_curator.py:687`, `:714`
+- **issue:** the excluded supersession target is skipped via re-upsert, never via
+  a *failed* `_safe_soft_delete`; the explicit-tombstone test exercises only a
+  successful delete. Coverage confirms the false branches at `engine.py:444` and
+  `:455` are uncovered. A refactor that appends/counts a removal *before*
+  checking `_safe_soft_delete` would journal a delete that never happened and
+  stay green.
+- **suggested direction:** add missing-target probes for both `superseded` and
+  explicit `tombstoned` paths, asserting the fold list is empty and the matching
+  count is zero. Optional invalid-slug variant.
+- **resolution:** resolved. Three probes added:
+  `test_fold_superseded_omits_a_target_that_does_not_exist`,
+  `test_fold_tombstoned_omits_a_target_that_does_not_exist`, and the invalid-slug
+  variant `test_fold_tombstoned_omits_an_invalid_slug`. Each asserts the fold list
+  is empty AND the matching summary count is zero. **Mutation-verified:** hoisting
+  both append/increment pairs out of their `if _safe_soft_delete(...)` branches
+  failed all three — and **every pre-existing test in `test_curator.py` still
+  passed**, confirming the gap was total. The existing re-upsert/pinned tests are
+  untouched.
+
+### P3-DOCS-PLAN-ACCURACY-002 — `final_active` comment overstates synthesis
+- **severity:** nit (P3)
+- **location:** `src/neurobase/curator/engine.py:586`
+- **issue:** comment says prune/synthesis "touch only `.tombstones/` and
+  `nodes/`, never `curated/`," but `_synthesize` → `linkify.linkify`
+  (`engine.py:253`) rewrites active curated bodies. The cached set is still sound
+  for membership/count (paths + status preserved); only the stated reason is
+  wrong.
+- **suggested direction:** reword to "prune does not alter `curated/` membership
+  and synthesis/linkify preserves curated paths/status" rather than "never
+  touches the directory."
+- **resolution:** resolved. Comment reworded to say prune does not alter curated
+  *membership* and synthesis preserves curated paths/active status, and it now
+  names linkify's body rewrite explicitly so the stronger false claim cannot be
+  re-derived. `final_active` is unchanged; no extra `list_curated` call.
+
+**Verdict:** changes-requested — two mutation-surviving test gaps on the new
+provenance contract plus a doc/code equivalence that isn't true.

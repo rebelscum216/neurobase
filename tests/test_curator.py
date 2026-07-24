@@ -610,6 +610,19 @@ def test_hallucinated_from_raw_dropped_and_counted(root: Path) -> None:
     assert doc["provenance"] == ["raw/r1.md"]  # only the validated name survived
     assert summary["dropped_from_raw"] == 2
 
+    # Codex P2-TEST-GAP-001: the journal is a SECOND permanent consumer of the
+    # same validation, and the assertions above do not protect it. Validating
+    # only for `provenance` while accumulating the raw `from_raw` into
+    # `_ApplyResult.edges` would keep every assertion above green and still put
+    # ghost filenames into the map Slice A reads back after raw retention
+    # expires. The fold-edge test elsewhere cannot catch it either — it only
+    # ever passes a valid filename, so validated and unvalidated agree there.
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["edges"] == {"fact-a": ["r1.md"]}
+    # Belt-and-braces: no ghost anywhere in the edge map, under any slug.
+    all_edge_names = {name for names in record["fold"]["edges"].values() for name in names}
+    assert all_edge_names == {"r1.md"}
+
 
 def test_summary_key_set_is_exact_and_carries_no_fold(root: Path) -> None:
     """B2: `fold` must never join the returned/printed summary (it carries raw
@@ -719,6 +732,62 @@ def test_fold_tombstoned_records_explicit_removals(root: Path) -> None:
     engine.curate(root, "proj", FakeBrain(plan))
     (record,) = _read_log(root, "proj")
     assert record["fold"]["tombstoned"] == ["stale"]
+
+
+# Codex P2-TEST-GAP-002: the two tests above prove the SKIP guards (re-upserted /
+# pinned), which return before `_safe_soft_delete` is ever called. Neither
+# reaches the case where the call is made and FAILS. That leaves the false
+# branches of both `if _safe_soft_delete(...)` uncovered, so moving the fold
+# append and the counter increment outside the successful branch would journal —
+# and count — a removal that never happened, with every existing test still
+# green. A model naming a slug that does not exist is a routine fail-soft path,
+# not a hostile-tree hypothetical: the plan is LLM output.
+
+
+def test_fold_superseded_omits_a_target_that_does_not_exist(root: Path) -> None:
+    """`supersedes` names a slug with no curated file — the soft-delete fails,
+    so nothing may be journalled or counted."""
+    store.ensure_tree("proj", root)
+    _write_raw(root, "proj", "r1.md")
+    plan = {
+        "upserts": [
+            {
+                "slug": "fact-y",
+                "body": "y",
+                "supersedes": ["never-existed"],
+                "from_raw": ["r1.md"],
+            }
+        ],
+        "tombstones": [],
+    }
+    summary = engine.curate(root, "proj", FakeBrain(plan))
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["superseded"] == []
+    assert summary["superseded"] == 0
+    assert summary["upserts"] == 1  # the upsert itself still landed
+
+
+def test_fold_tombstoned_omits_a_target_that_does_not_exist(root: Path) -> None:
+    """Same probe on the explicit-tombstone path (spec §2 step 5)."""
+    store.ensure_tree("proj", root)
+    _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [], "tombstones": [{"slug": "never-existed", "reason": "gone"}]}
+    summary = engine.curate(root, "proj", FakeBrain(plan))
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["tombstoned"] == []
+    assert summary["tombstones"] == 0
+
+
+def test_fold_tombstoned_omits_an_invalid_slug(root: Path) -> None:
+    """A malformed slug cannot resolve to a path at all — same contract: the
+    pass fails soft and journals nothing."""
+    store.ensure_tree("proj", root)
+    _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [], "tombstones": [{"slug": "Not A Slug!", "reason": "gone"}]}
+    summary = engine.curate(root, "proj", FakeBrain(plan))
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["tombstoned"] == []
+    assert summary["tombstones"] == 0
 
 
 def test_fold_rides_after_commit_error_and_records_only_committed(root: Path) -> None:

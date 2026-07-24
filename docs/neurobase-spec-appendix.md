@@ -270,9 +270,13 @@ active-fact-count trend (the bloat alarm). The filename is a **core-owned**
 constant (`core.store.CURATOR_LOG`), so a core reader may consume the record
 without a cross-layer format dependency.
 
-**Fold record (ADR-0022).** Whenever a pass commits at least one batch (the same
-gate as steps 7–8), its journal line carries a `fold` object alongside the
-summary keys — a per-pass, raw→fact audit trail:
+**Fold record (ADR-0022).** Whenever a pass commits at least one batch, its
+journal line carries a `fold` object alongside the summary keys — a per-pass,
+raw→fact audit trail. This gate is **stricter than steps 7–8's**, deliberately:
+a bounded zero-commit stop (budget exhaustion on the first plan call) still
+prunes and synthesizes — both are idempotent over state already on disk — but
+writes no fold, because an empty fold would assert a pass that consumed nothing
+where silence is the honest record. See ADR-0022.
 
 ```json
 "fold": {

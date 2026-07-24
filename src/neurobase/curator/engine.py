@@ -611,11 +611,13 @@ def curate(
     if synth_error is not None:
         summary["synth_error" if plan_error is not None else "error"] = synth_error
 
-    # Fold journal (ADR-0022 B2): written whenever ≥1 batch committed — the same
-    # gate as steps 7–8 above. It records exactly the committed batches, so it
-    # rides the after-commit error path too (a later batch failing must not erase
-    # the durable session identity of raws already consumed this pass). It never
-    # reaches the returned/printed summary; it enriches the journal record only.
+    # Fold journal (ADR-0022 B2): written whenever ≥1 batch committed — a
+    # STRICTER gate than steps 7–8 above, which run even on a bounded zero-commit
+    # stop (see the comment on the prune call). It records exactly the committed
+    # batches, so it rides the after-commit error path too (a later batch failing
+    # must not erase the durable session identity of raws already consumed this
+    # pass). It never reaches the returned/printed summary; it enriches the
+    # journal record only.
     fold = {
         "v": 1,
         "consumed": fold_consumed,

@@ -6,7 +6,7 @@ reviewer: codex
 branch: feat/provenance-slice-b-v2
 diff: git diff main...feat/provenance-slice-b-v2
 created: 2026-07-24
-round: 1
+round: 2
 ---
 
 # Review: provenance Slice B (v2) — `from_raw` validation + curator fold journal
@@ -245,3 +245,37 @@ in Codex's non-blocking notes.
 
 **Verdict:** changes-requested — two mutation-surviving test gaps on the new
 provenance contract plus a doc/code equivalence that isn't true.
+
+---
+
+## Round 2 — 2026-07-24 (tip `35556c6`)
+
+**Verdict: CHANGES REQUESTED** — `P2-TEST-GAP-001`, `P2-TEST-GAP-002` and
+`P3-DOCS-PLAN-ACCURACY-002` all confirmed **fixed**, with Codex verifying the
+named mutations are killed and that the previously-missed engine branches no
+longer appear in the coverage report. No new finding IDs opened; no regression
+from the fix commit (`git diff 62d26fb..35556c6 -- src/` confirmed comments
+only). Codex also independently validated the strengthened budget-stop test.
+
+`P2-DOCS-PLAN-ACCURACY-001` came back **partially fixed** — two more same-gate
+claims survived the round-1 fix:
+
+- `docs/neurobase-spec-appendix.md:274` — the **normative spec**, which this repo
+  treats as law.
+- `src/neurobase/curator/engine.py:615` — the comment sitting *nearest the
+  executable fold gate*.
+
+**The lesson, recorded because it cost a round.** Round 1 fixed the three
+*instances* of the false claim that were in front of me (two cited, one found
+next to them) instead of eliminating the *claim*. A re-raised finding ID means
+the previous fix hit the reviewer's reproduction, not the rule. The correct move
+— done this round — was a repository-wide search for the equivalence assertion,
+then fixing every hit and re-running the search as the verification step.
+
+**Resolution (round 2):** both remaining claims corrected in the same docs-only
+spirit; the spec now states the fold gate is stricter and why, and the engine
+comment cross-references the prune-call comment rather than restating the gate.
+Verified by re-running the repo-wide sweep: the only surviving matches are the
+ADR sentence that *denies* the equivalence and this baton quoting the finding.
+`git diff -- src/` contains no non-comment line. `make ci` green: **1352 passed,
+1 skipped, 91.95% cov**, all 5 stages.

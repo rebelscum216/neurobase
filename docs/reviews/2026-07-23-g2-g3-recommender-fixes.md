@@ -1,6 +1,6 @@
 ---
 slug: g2-g3-recommender-fixes
-status: awaiting-review
+status: approved-with-nits
 author: claude
 reviewer: codex
 branch: feat/webui-phase1-suggestions
@@ -770,3 +770,44 @@ The gap was mine: the code did not do what its own docstring, ADR-0020 and spec
 - Specific scope: the sentinel grammar (is the identity token right, and is the
   boundary guard correct?), the write/liveness consistency in `_rule` including
   its duplicate/misorder validation, and whether ADR/spec/help now match the code.
+
+---
+
+## Round 6 review  _(Reviewer — Codex, 2026-07-24)_ — ✅ APPROVED WITH NITS
+
+Reviewed `git diff 447c29b..c3ad694` @ `c3ad694` (HEAD verified twice; repo left
+clean). 19 focused regressions + an adversarial sentinel matrix + the real CLI
+`generated  by` reproduction + `make ci` (1299 passed, 91.87%).
+
+**Prior findings: F1 fixed · P1-DATA-INTEGRITY-004 fixed · P2-CORRECTNESS-005
+fixed · P3-UX-API-CONTRACT-006 fixed. No blocking findings remain.**
+
+Reviewer's verification of the sentinel: it escapes the slug, is case-sensitive
+for the identity token, tolerates whitespace only where specified, excludes longer
+valid slugs via `(?![a-z0-9-])`, and cannot match the slash-prefixed closing
+marker; case changes or a newline inside `neurobase:rule:<slug>` correctly do not
+match. The `_rule` splice keeps its fail-closed pair validation under the
+variable-length match (two sentinels, duplicate closes, lone markers and reversed
+order all raise before mutation), a suffix-edited pair is replaced in place with
+canonical output, and another slug's block is preserved.
+
+**Open, optional, non-blocking — P3-DOCS-PLAN-ACCURACY-007:** stale "owned
+SKILL.md" / "marker-ownership" shorthand remains in a few *summary* lines
+(spec §12.7 command-table row, known-gaps G2, an ADR-0020 consequence) and in two
+`proposals.py` docstrings, while the detailed text is correct. Documentation only;
+the reviewer states it needs no further review round.
+
+## Relay outcome
+
+**6 rounds; APPROVED WITH NITS.** Findings per round: 4 → 4 → 4 → 1 → 1 → 0
+blocking.
+
+The durable lesson, learned the expensive way in rounds 3–5: **a repeated finding
+means the fix hit the example, not the cause.** Three consecutive rounds patched
+the specific reproduction — normalize *this* newline form, compare *this* extra
+field, catch *this* exception type — and each time the reviewer found the next
+member of the same class. It only converged once each was reframed to ask the
+real question: liveness by **existence/sentinel** rather than parsing; the
+**re-render** rather than a field subset; **"could not read it"** rather than a
+named exception. This is the same trap recorded from the store-lock relay, and it
+cost three rounds again.

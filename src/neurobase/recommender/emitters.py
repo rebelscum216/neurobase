@@ -147,46 +147,87 @@ def _rule_path(root: Path, doc: store.Document) -> Path:
     return _project_root(root, doc) / target
 
 
-def target_path(root: Path, doc: store.Document) -> Path:
-    """The canonical on-disk path an accepted proposal's artifact occupies,
-    re-derived from the proposal (not from its recorded `installed_path`) so it
-    resolves even for a proposal whose `installed_path` is null. Raises
-    `ValueError` for an unknown type or unresolvable target."""
+def _project_roots(root: Path, doc: store.Document) -> list[Path]:
+    """**Every** registered root for the proposal's project, not just the first.
+    `_project_root` (singular) picks `roots[0]` for *rendering*, which is where a
+    fresh accept writes; a liveness check must not inherit that narrowing —
+    re-registering a moved repo under the same slug leaves `[old, new]`, and
+    concluding "gone" from the stale `roots[0]` alone would orphan the live
+    artifact sitting at `new` (review F1, round 3)."""
+    project = doc.get("project")
+    if not isinstance(project, str) or not project:
+        raise ValueError("this proposal has no single source project")
+    roots = open_store(root, StoreMode.READ).load_registry().get(project)
+    if not roots:
+        raise ValueError(f"proposal project {project!r} is not registered")
+    return [Path(entry) for entry in roots]
+
+
+def candidate_target_paths(root: Path, doc: store.Document) -> list[Path]:
+    """Every place this proposal's managed artifact could plausibly be installed,
+    most-authoritative first (ADR-0020 D39, review F1 round 3).
+
+    Liveness must **fail closed across locations**: it is not enough to check the
+    one path a fresh render would target. So this returns the recorded
+    `installed_path` (the concrete file accept actually wrote — never ignored when
+    non-null) *plus* the re-derived target under every registered project root
+    (so a null `installed_path` still resolves, and a moved/re-registered project
+    is still covered). Order-preserving and de-duplicated.
+
+    Raises `ValueError` for an unknown proposal type or an unresolvable project —
+    callers treat that as fail-closed, never as "gone"."""
+    kind = str(doc.get("type") or "")
+    slug = str(doc.get("name") or "")
+    candidates: list[Path] = []
+
+    recorded = doc.get("installed_path")
+    if isinstance(recorded, str) and recorded:
+        candidates.append(Path(recorded))
+
+    if kind == "skill":
+        scope = _skill_scope(doc)
+        if scope == "user":
+            candidates.append(Path.home() / ".claude" / "skills" / slug / "SKILL.md")
+        else:
+            for base in _project_roots(root, doc):
+                candidates.append(base / ".claude" / "skills" / slug / "SKILL.md")
+    elif kind == "rule":
+        target = str(doc.get("target") or "")
+        if target not in {"AGENTS.md", "CLAUDE.md"}:
+            raise ValueError(f"invalid rule target {target!r}")
+        for base in _project_roots(root, doc):
+            candidates.append(base / target)
+    else:
+        raise ValueError(f"unsupported proposal type {kind!r}")
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
+def text_holds_managed_artifact(text: str, doc: store.Document) -> bool:
+    """Does ``text`` (one candidate target's current contents) still hold this
+    proposal's *managed artifact* (ADR-0020 D39)?
+
+    - **rule:** the slug's `neurobase:rule:<slug>` marker is present, no matter
+      what foreign bytes surround it. An edit *outside* the block leaves it live;
+      deleting the block (or the file) makes it gone.
+    - **skill:** the text still carries our ownership frontmatter
+      (`_owned_skill`), which is newline-agnostic — a genuinely owned SKILL.md
+      converted to CRLF keeps both ownership keys and must still read as live
+      (review F1, round 3).
+    """
     kind = str(doc.get("type") or "")
     slug = str(doc.get("name") or "")
     if kind == "skill":
-        return _skill_path(root, doc, slug, _skill_scope(doc))
-    if kind == "rule":
-        return _rule_path(root, doc)
-    raise ValueError(f"unsupported proposal type {kind!r}")
-
-
-def managed_artifact_live(root: Path, doc: store.Document) -> bool:
-    """Is this accepted proposal's *managed artifact* still live on disk
-    (ADR-0020 D39)? This is the question `revert` must ask — distinct from "did
-    the target file's bytes survive verbatim" (survival, §12.9). The target file
-    can change freely around a managed rule block; what matters for revert is
-    whether reverting would orphan a still-installed Neurobase artifact.
-
-    - **rule:** the slug's `neurobase:rule:<slug>` marker is still present, no
-      matter what foreign bytes surround it. An edit *outside* the block leaves
-      it live; deleting the block (or the whole file) makes it gone.
-    - **skill:** the SKILL.md still exists *and* still carries our ownership
-      frontmatter (`_owned_skill`). A missing file, or one the user replaced with
-      their own content, is gone.
-
-    Raises `ValueError` if the target cannot be resolved (unregistered project,
-    invalid target family, or an unknown proposal type) — the caller must treat
-    "can't resolve" as fail-closed (do not revert), never as "gone"."""
-    kind = str(doc.get("type") or "")
-    slug = str(doc.get("name") or "")
-    if kind == "skill":
-        text = _read_preserving(_skill_path(root, doc, slug, _skill_scope(doc)))
         return _owned_skill(text, slug)
     if kind == "rule":
-        text = _read_preserving(_rule_path(root, doc))
         return _rule_start_marker(slug) in text
-    raise ValueError(f"unsupported proposal type {kind!r}")
+    return False
 
 
 def _skill(root: Path, doc: store.Document, slug: str, draft: str, scope: str) -> Artifact:
@@ -217,10 +258,19 @@ def _skill(root: Path, doc: store.Document, slug: str, draft: str, scope: str) -
 
 
 def _owned_skill(text: str, slug: str) -> bool:
+    """Is ``text`` a SKILL.md Neurobase owns for ``slug`` — i.e. does its leading
+    frontmatter carry both ownership keys (§12.8)?
+
+    Newline-agnostic on purpose (review F1, round 3): ownership is a property of
+    the *frontmatter values*, not the file's line endings. Matching `---\\n`
+    literally made a genuinely owned SKILL.md converted to CRLF read as foreign,
+    which let `revert` treat a live installed skill as gone and orphan it. CRLF
+    is normalized for parsing only — nothing is rewritten on disk."""
+    normalized = text.replace("\r\n", "\n")
     try:
-        if not text.startswith("---\n") or "\n---\n" not in text[4:]:
+        if not normalized.startswith("---\n") or "\n---\n" not in normalized[4:]:
             return False
-        frontmatter, _body = text[4:].split("\n---\n", 1)
+        frontmatter, _body = normalized[4:].split("\n---\n", 1)
         fm = yaml.safe_load(frontmatter)
         return (
             isinstance(fm, dict)

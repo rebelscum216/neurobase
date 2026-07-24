@@ -603,29 +603,52 @@ def latest_accepted_event(root: Path, slug: str) -> dict[str, Any] | None:
 def artifact_state(root: Path, doc: store.Document, slug: str) -> str:
     """Classify an accepted proposal's *managed artifact* by liveness (ADR-0020
     D39) — the question ``revert`` must answer. Returns ``live`` when the slug's
-    managed marker (rule) or owned SKILL.md (skill) is still on disk regardless
-    of surrounding foreign bytes; ``missing`` when the target file is absent;
-    ``orphaned`` when the target file is present but our block/skill is no longer
-    in it (the user removed the block or replaced the skill); ``unresolvable``
-    when the target can't be re-derived (unregistered project, invalid target,
-    unknown type) — refused fail-closed rather than assumed gone.
+    managed marker (rule) or owned SKILL.md (skill) is still on disk at **any**
+    plausible install location, regardless of surrounding foreign bytes;
+    ``missing`` when no candidate target exists; ``orphaned`` when a candidate
+    exists but no longer holds our block/skill; ``unresolvable`` when the target
+    can't be re-derived *or* a candidate can't be read — refused fail-closed
+    rather than assumed gone.
+
+    Every candidate is checked (``emitters.candidate_target_paths``: the recorded
+    ``installed_path`` plus the re-derived target under every registered project
+    root), because concluding "gone" from one stale root would orphan a live
+    artifact at another (review F1, round 3). A candidate that raises ``OSError``
+    — a directory or an unreadable file where the artifact should be — makes the
+    verdict ``unresolvable`` rather than escaping as a traceback (review
+    P2-CORRECTNESS-005): we cannot prove absence, so we refuse.
 
     Note this is deliberately NOT survival's whole-file-hash comparison
     (``metrics._survival_one``): a rule block stays live under any edit *outside*
     it, so reverting on a mere file-hash change would orphan a live artifact
     (round-2 review F1). The two questions are distinct and answered separately.
     ``slug`` is accepted for signature symmetry with the metrics helpers; the
-    target is re-derived from ``doc`` (its ``name``/``type``/``target``)."""
+    targets are re-derived from ``doc``."""
     from neurobase.recommender import emitters  # local: emitters imports proposals
 
     try:
-        path = emitters.target_path(root, doc)
-        live = emitters.managed_artifact_live(root, doc)
+        candidates = emitters.candidate_target_paths(root, doc)
     except ValueError:
         return ARTIFACT_UNRESOLVABLE
-    if live:
-        return ARTIFACT_LIVE
-    return ARTIFACT_MISSING if not path.exists() else ARTIFACT_ORPHANED
+
+    present = False
+    indeterminate = False
+    for path in candidates:
+        try:
+            text = emitters.read_target_text(path)
+        except OSError:
+            # A directory, or a file we cannot read, where the artifact might be:
+            # absence is unproven, so this must not read as "gone".
+            indeterminate = True
+            continue
+        if not path.exists():
+            continue
+        present = True
+        if emitters.text_holds_managed_artifact(text, doc):
+            return ARTIFACT_LIVE
+    if indeterminate:
+        return ARTIFACT_UNRESOLVABLE
+    return ARTIFACT_ORPHANED if present else ARTIFACT_MISSING
 
 
 def revert_proposal(root: Path, slug: str, *, now: datetime | None = None) -> str:

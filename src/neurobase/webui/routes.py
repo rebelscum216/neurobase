@@ -352,7 +352,9 @@ async def _accept_view(request: Request) -> Response:
         # 409 if it changed under us rather than record a stale hash.
         try:
             recorded = install.record_acceptance(root, preview)
-        except install.StaleArtifactError as exc:
+        except install.StalePreviewError as exc:
+            # Target or proposal moved under us between preparation and the write
+            # (P1-DATA-INTEGRITY-001 / -004) — record nothing, surface a 409.
             return _error_response(request, 409, str(exc))
         return _redirect_with_flash(
             slug, f"Already installed at {recorded.path} — recorded the acceptance."

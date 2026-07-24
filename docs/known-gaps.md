@@ -196,18 +196,24 @@ handle** — the backup/restore itself is a schema-independent maintenance excep
   still live on disk** (the slug's rule marker / owned SKILL.md), *not* on a
   whole-file hash: allowed only when the artifact is *missing* (target file gone)
   or *orphaned* (file present but our block/skill removed), and refused when it is
-  *live* or *unresolvable*. That closes the findings in
-  `docs/reviews/2026-07-23-g2-g3-recommender-fixes.md` across two rounds: round-1
-  F1/F2/F4 and round-2 F1 (a whole-file-hash gate let an edit *outside* a rule
-  block make it revertable while the block stayed live — so `accept → edit →
-  revert → reject` still orphaned it; liveness by marker closes this), F2 (a
+  *live* or *unresolvable*. Liveness fails closed three ways: it checks **every**
+  plausible location (recorded `installed_path` + the target under every
+  registered project root), skill ownership is **newline-agnostic** (CRLF), and an
+  unreadable candidate yields `unresolvable` rather than "gone". That closes the
+  findings in `docs/reviews/2026-07-23-g2-g3-recommender-fixes.md` across three
+  rounds: round-1 F1/F2/F4; round-2 F1 (a whole-file-hash gate let an edit
+  *outside* a rule block make it revertable while the block stayed live), F2 (a
   matching-but-unrecorded artifact records acceptance without a write, so
-  re-accept after a revert is reachable — D40), plus round-2 P1 (the record path
-  re-reads the target at the write boundary so a stale preview can't stamp a wrong
-  hash) and P2 (survival keeps its own existence-first whole-file check, separate
-  from revert's liveness). Regressions drive the *real* install service through
-  the CLI and the web UI POST. A real un-accept (uninstall of a live artifact)
-  remains deferred, exactly as ADR-0007 left it.
+  re-accept after a revert is reachable — D40), P1 (the record path re-reads the
+  target at the write boundary) and P2 (survival keeps its own existence-first
+  whole-file check, separate from revert's liveness); and round-3 F1 (CRLF-owned
+  skill + multi-root project both read as gone), P1-004 (a concurrent
+  `recommend edit` during the confirm prompt could record a draft that was never
+  installed — the proposal is now re-verified at the same boundary), P2-005
+  (`OSError` escaped the classifier) and P3-006 (stale `--help`). Regressions
+  drive the *real* install service through the CLI and the web UI POST. A real
+  un-accept (uninstall of a live artifact) remains deferred, exactly as ADR-0007
+  left it.
 - **severity:** minor — nothing corrupts, but the store's view of the present was
   wrong: a proposal stayed `accepted` with a dangling `installed_path` after its
   artifact was removed by hand, and §12.7 makes reject-on-accepted a hard error,

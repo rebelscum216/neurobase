@@ -1023,15 +1023,20 @@ def recommend_revert(
     yes: bool = typer.Option(False, "--yes", "-y"),
     root: str | None = typer.Option(None, "--root"),
 ) -> None:
-    """Repair drift: return an accepted proposal whose artifact is gone or changed
-    to the review queue (G2, ADR-0020).
+    """Repair drift: return an accepted proposal whose managed artifact is no
+    longer installed to the review queue (G2, ADR-0020).
 
-    Flips `status: accepted` → `proposed` and clears the recorded `installed_path`,
-    so a proposal whose artifact you removed or edited by hand no longer reads
-    `accepted` out of sync with disk. Allowed *only* on that drift: an artifact
-    still installed and unchanged since acceptance is refused, because revert is
-    not an uninstall — it never deletes or rewrites the file. Remove the artifact
-    by hand first if that is what you meant.
+    Flips `status: accepted` → `proposed` and clears the recorded `installed_path`
+    so the store stops claiming an artifact that isn't there. Allowed *only* when
+    the managed artifact is genuinely gone — the target file is missing, or the
+    Neurobase-managed block / owned SKILL.md has been removed from it.
+
+    It is NOT an uninstall and never deletes or rewrites anything. While the
+    managed block or owned skill is still present it stays live, so revert is
+    refused — editing the file, inside the block or around it, does not make it
+    revertable. To retire a live artifact, delete the managed block (or the file)
+    by hand first, then revert. A target that cannot be resolved is also refused,
+    rather than assumed gone.
     """
     resolved_root = store.resolve_root(root)
     handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
@@ -1119,10 +1124,11 @@ def recommend_accept(
             return
         try:
             recorded = install.record_acceptance(handle.root, preview)
-        except install.StaleArtifactError as exc:
-            # P1-DATA-INTEGRITY-001: the target changed between the preview and now
-            # (e.g. during this confirm prompt) — record nothing rather than stamp
-            # a hash that disagrees with disk.
+        except install.StalePreviewError as exc:
+            # The target OR the proposal changed between the preview and now (e.g.
+            # during this confirm prompt) — record nothing rather than stamp an
+            # acceptance that describes something never installed
+            # (P1-DATA-INTEGRITY-001 / -004).
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1) from exc
         typer.echo(f"Accepted proposal {slug}: {recorded.path} (already installed; recorded only)")

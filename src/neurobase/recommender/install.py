@@ -37,9 +37,19 @@ class ProposalDecidedError(RuntimeError):
         super().__init__(f"cannot accept proposal {slug!r}: status is {status}")
 
 
-class StaleArtifactError(RuntimeError):
-    """Raised by ``record_acceptance`` when the target's bytes no longer match
-    the previewed render at the moment of the write (ADR-0020 D40, review
+class StalePreviewError(RuntimeError):
+    """Base for the record-only path's mutation-boundary refusals (ADR-0020 D40).
+
+    A record-only acceptance writes no artifact, so it can only be honest if
+    *both* sides of the preview still hold at the moment it records: the target
+    bytes it claims are installed, and the proposal whose draft produced them.
+    Either drifting between preview and write means the recorded acceptance would
+    describe something that was never true; callers surface this and record
+    nothing."""
+
+
+class StaleArtifactError(StalePreviewError):
+    """The target's bytes no longer match the previewed render (review
     P1-DATA-INTEGRITY-001). ``already_up_to_date`` held only when the preview was
     prepared; the file can change during a long interactive confirm prompt, and a
     no-write acceptance must never stamp a hash that disagrees with disk."""
@@ -49,6 +59,23 @@ class StaleArtifactError(RuntimeError):
         super().__init__(
             f"{path} changed after the acceptance was previewed — nothing was recorded. "
             "Re-run accept to preview and confirm the current state."
+        )
+
+
+class StaleProposalError(StalePreviewError):
+    """The *proposal* changed after the preview (review P1-DATA-INTEGRITY-004).
+
+    The target re-read alone is not enough: a concurrent ``recommend edit`` during
+    the confirm prompt leaves the installed bytes untouched, so the target check
+    passes against the stale render — while ``accept_proposal`` would then reload
+    and mark the *newly edited* draft accepted. The accepted proposal would
+    describe behavior that was never installed."""
+
+    def __init__(self, slug: str) -> None:
+        self.slug = slug
+        super().__init__(
+            f"proposal {slug!r} changed after the acceptance was previewed — nothing was "
+            "recorded. Re-run accept to preview and confirm the current draft."
         )
 
 
@@ -146,23 +173,39 @@ def record_acceptance(root: Path, preview: InstallPreview) -> InstallResult:
     record of what is installed, and the recorded ``installed_hash`` becomes the
     baseline a later survival check and a later ``revert`` both compare against.
     Raises ``ValueError`` if the preview is not in the recordable state, so the
-    no-op and record paths can never be confused at a call site."""
+    no-op and record paths can never be confused at a call site, and
+    ``StalePreviewError`` if either side of the preview drifted (see below)."""
     if not preview.records_acceptance:
         raise ValueError("preview is not in a recordable state; use commit_install")
     artifact = preview.artifact
-    # P1-DATA-INTEGRITY-001: `records_acceptance` was decided when the preview was
-    # prepared; between preview and this write the target can change (e.g. during
-    # a long interactive confirm prompt). Re-read it HERE, at the mutation
-    # boundary, and refuse if it no longer equals the previewed render — otherwise
-    # a no-write acceptance would durably stamp a hash that disagrees with disk.
-    # Read the same newline-preserving way the render was diffed against.
+    slug = str(preview.doc.get("name") or "")
+    # Both sides of the preview are re-verified HERE, at the mutation boundary,
+    # because a record-only acceptance writes nothing and so can only be honest if
+    # what it *claims* is still true. `records_acceptance` was decided when the
+    # preview was prepared, and an interactive confirm prompt can sit open
+    # arbitrarily long in between.
+    #
+    # (a) The target bytes (P1-DATA-INTEGRITY-001), read the same
+    #     newline-preserving way the render was diffed against — otherwise a
+    #     no-write acceptance could stamp a hash that disagrees with disk.
     if emitters.read_target_text(artifact.path) != artifact.after:
         raise StaleArtifactError(artifact.path)
+    # (b) The proposal itself (P1-DATA-INTEGRITY-004). A concurrent
+    #     `recommend edit` changes the draft while leaving the target untouched,
+    #     so check (a) still passes against the stale render — and
+    #     `accept_proposal` below reloads from disk, which would mark the *newly
+    #     edited* draft accepted while the installed artifact came from the old
+    #     one. Compare the render-relevant state (the managed draft region) and
+    #     the status, and refuse if either moved.
+    current = proposals.load_proposal(root, slug)
+    if current is None or str(current.get("status") or "") != str(preview.doc.get("status") or ""):
+        raise StaleProposalError(slug)
+    if proposals.extract_draft(current.body) != proposals.extract_draft(preview.doc.body):
+        raise StaleProposalError(slug)
     # The same hash commit_install records, over the same bytes — the artifact
     # on disk equals `artifact.after` (just re-verified), which is what makes this
     # path legitimate in the first place.
     installed_hash = hashlib.sha256(artifact.after.encode("utf-8")).hexdigest()
-    slug = str(preview.doc.get("name") or "")
     proposals.accept_proposal(
         root,
         slug,

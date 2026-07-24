@@ -200,6 +200,40 @@ def test_record_acceptance_refuses_a_preview_that_is_not_recordable(
     assert proposals.ledger_history(root, slug)[-1]["event"] == "proposed"
 
 
+def test_record_acceptance_refuses_a_stale_proposal(tmp_path: Path) -> None:
+    """Review P1-DATA-INTEGRITY-004: the target is untouched, but the *proposal's
+    draft* changed since the preview. Recording would mark the new draft accepted
+    while the installed artifact came from the old one — refuse, record nothing."""
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    _register(root, repo)
+    slug = "prefer-uv-run"
+    proposals.write_ranked(root, [_rule_candidate(slug)])
+    installed = repo / "AGENTS.md"
+    install.commit_install(root, install.prepare_install(root, slug))
+    rendered = installed.read_bytes()
+    installed.write_text("hand-edited", encoding="utf-8")
+    proposals.revert_proposal(root, slug)
+    installed.write_bytes(rendered)
+
+    preview = install.prepare_install(root, slug)
+    assert preview.records_acceptance is True
+    ledger_before = proposals.ledger_history(root, slug)
+
+    # The proposal moves under us; the TARGET is deliberately left alone.
+    assert proposals.save_edited_draft(root, slug, "A completely different rule.")
+
+    with pytest.raises(install.StaleProposalError):
+        install.record_acceptance(root, preview)
+
+    assert proposals.load_proposal(root, slug).get("status") == "proposed"  # type: ignore[union-attr]
+    assert [e["event"] for e in proposals.ledger_history(root, slug)] == [
+        *[e["event"] for e in ledger_before],
+        "edited",  # only the edit itself, no acceptance
+    ]
+    assert installed.read_bytes() == rendered
+
+
 def test_record_acceptance_refuses_a_stale_preview(tmp_path: Path) -> None:
     """Review P1-DATA-INTEGRITY-001: `records_acceptance` is decided at preview
     time, but the target can change before the write (e.g. during a long confirm

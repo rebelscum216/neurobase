@@ -671,6 +671,41 @@ def test_artifact_state_classifies_by_liveness(tmp_path: Path) -> None:
     assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_MISSING
 
 
+def test_artifact_state_is_unresolvable_when_a_candidate_cannot_be_read(tmp_path: Path) -> None:
+    """Review P2-CORRECTNESS-005: `_read_preserving` raises `OSError` for a
+    directory (or unreadable file) where the artifact should be. That must be
+    classified — fail closed as `unresolvable`, since absence is unproven — not
+    escape the classifier as an `IsADirectoryError` traceback."""
+    root = tmp_path / "store"
+    installed = _accept_real(tmp_path, root)
+    installed.unlink()
+    installed.mkdir()  # a directory now sits where the managed file was
+
+    doc = _read(root, "prefer-uv-run")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_UNRESOLVABLE
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        proposals.revert_proposal(root, "prefer-uv-run", now=NOW)
+    assert _read(root, "prefer-uv-run").get("status") == "accepted"
+
+
+def test_artifact_state_finds_a_live_artifact_at_a_second_registered_root(
+    tmp_path: Path,
+) -> None:
+    """Review F1 (round 3): liveness must consider every registered root, not just
+    `roots[0]`, or a moved+re-registered project reads `missing` while the live
+    block sits at the new root."""
+    import shutil
+
+    root = tmp_path / "store"
+    _accept_real(tmp_path, root)
+    moved = tmp_path / "moved-repo"
+    shutil.move(str(tmp_path / "repo"), str(moved))
+    projects.register_project(root, moved, slug="neurobase")
+
+    doc = _read(root, "prefer-uv-run")
+    assert proposals.artifact_state(root, doc, "prefer-uv-run") == proposals.ARTIFACT_LIVE
+
+
 def test_revert_stays_refused_across_a_reaccept(tmp_path: Path) -> None:
     """A re-accepted proposal (two `accepted` events) with a live block is still
     refused — liveness is read from the marker on disk now, not from any event."""

@@ -6,7 +6,7 @@ reviewer: codex
 branch: feat/webui-phase1-suggestions
 diff: git diff 30696a8..HEAD
 created: 2026-07-23
-round: 3
+round: 4
 ---
 
 # Review: G2 + G3 — recommender revert path and skill-emitter frontmatter fix
@@ -434,3 +434,121 @@ separate predicates. Revision tip: **new follow-up commit on
   the `record_acceptance` re-read boundary; the survival/liveness separation; and
   whether any accept/revert/reject sequence can still make status and disk
   disagree.
+
+---
+
+## Round 3 review  _(Reviewer — Codex, 2026-07-24)_
+
+Reviewed `git diff 1da5613..0a840a6` @ `0a840a6` (HEAD verified). `make ci`
+(1275 passed) + **four real temp-dir reproductions**. Verdict: **BLOCKED**.
+
+- **P1-DATA-INTEGRITY-001 — fixed** (target re-read is the right newline-preserving
+  reader; CLI→exit 1, web→409). **P2-REGRESSION-002 — fixed** (survival verified
+  behaviorally identical to `a219301` across all five cases).
+  **P3-DOCS-PLAN-ACCURACY-003 — fixed.**
+- **F1 — partially fixed.** Rule cases closed, but two liveness *false negatives*
+  remain: (a) `_owned_skill` matches `---\n` literally, so a genuinely owned
+  SKILL.md converted to **CRLF** reads as unowned → `orphaned` → revertable
+  (reproduced: `rejected` with the owned skill still installed); (b) `_project_root`
+  always uses `roots[0]`, so a **moved + re-registered** project reads `missing` at
+  the stale root while the live block sits at the new one.
+- **P1-DATA-INTEGRITY-004 (new).** The re-read guards only the target. A concurrent
+  `recommend edit` during the confirm prompt leaves the target untouched, so the
+  check passes against the stale render, and `accept_proposal` then marks the
+  *newly edited* draft accepted. Reproduced: proposal draft B `accepted`, disk
+  still draft A.
+- **P2-CORRECTNESS-005 (new).** `artifact_state` catches only `ValueError`, but
+  `_read_preserving` raises `OSError` for a directory target — uncaught
+  `IsADirectoryError`.
+- **P3-UX-API-CONTRACT-006 (new).** `recommend revert --help` still documents the
+  hash-era boundary ("gone or changed", "edited by hand").
+
+---
+
+## Round 4 — author response  _(Author — Claude, 2026-07-24)_
+
+# Claude Revision Response
+
+## Summary
+
+Liveness was the right axis; the *detectors* had false negatives. This round makes
+liveness fail closed in three specific ways, binds the record-only path to **both**
+sides of its preview, and fixes the public help text.
+
+## Findings Addressed
+
+### F1 — liveness false negatives (skill CRLF, multi-root)
+- Status: **fixed**
+- Files: `emitters.py` (`_owned_skill`, new `_project_roots`,
+  `candidate_target_paths`, `text_holds_managed_artifact`), `proposals.py`
+  (`artifact_state`)
+- What changed: (a) `_owned_skill` normalizes CRLF before parsing — ownership is a
+  property of the frontmatter *values*, not the line endings. (b) Liveness now
+  checks **every** candidate location — the recorded `installed_path` (never
+  ignored when non-null) plus the re-derived target under **every** registered
+  project root — so a moved+re-registered repo cannot read as gone from a stale
+  `roots[0]`. `live` at any candidate ⇒ refuse.
+- Verification: `test_revert_refuses_a_crlf_converted_owned_skill` (real CLI skill
+  accept `--target project`, LF→CRLF, revert exits 1, reject still blocked, file
+  still owned), `test_revert_refuses_when_a_live_artifact_sits_at_another_registered_root`
+  (real accept → `shutil.move` → re-register → revert exits 1),
+  `test_artifact_state_finds_a_live_artifact_at_a_second_registered_root`.
+  Mutations: reverting the CRLF normalization, and narrowing `_project_roots` to
+  `roots[0]`, each fail their tests.
+
+### P1-DATA-INTEGRITY-004 — record-only could approve a stale draft
+- Status: **fixed**
+- Files: `install.py` (`StalePreviewError` base + `StaleArtifactError` /
+  `StaleProposalError`), `cli/__init__.py`, `webui/routes.py`
+- What changed: `record_acceptance` now re-verifies **both** sides at the mutation
+  boundary — the target bytes (as before) *and* the proposal's managed draft +
+  status, reloaded fresh. Either drift raises and records nothing. Callers catch
+  the shared base: CLI exits 1, web returns 409.
+- Verification: `test_record_acceptance_refuses_a_stale_proposal` (service: edit
+  the draft, leave the target alone → `StaleProposalError`, no acceptance event),
+  `test_record_only_refuses_if_the_proposal_draft_changes_during_the_prompt`
+  (real CLI: a `typer.confirm` that calls `save_edited_draft` then says yes → exit
+  1, status `proposed`, one accepted event, installed bytes still the original),
+  `test_accept_post_returns_409_when_the_record_only_write_goes_stale` (web).
+  Mutation: removing the proposal re-check fails both the service and CLI tests.
+
+### P2-CORRECTNESS-005 — OSError escaped the classifier
+- Status: **fixed**
+- Files: `proposals.py` (`artifact_state`)
+- What changed: each candidate read is wrapped; an `OSError` (directory,
+  unreadable file) marks the verdict **indeterminate**, which resolves to
+  `unresolvable` — fail closed, since absence is unproven — instead of escaping as
+  a traceback or silently reading as "missing".
+- Verification: `test_artifact_state_is_unresolvable_when_a_candidate_cannot_be_read`
+  (replace the accepted target with a directory → `unresolvable`, revert refused
+  with the named error, status unchanged). Mutation: dropping the fail-closed
+  branch fails it.
+
+### P3-UX-API-CONTRACT-006 — stale `revert --help`
+- Status: **fixed**
+- Files: `cli/__init__.py`
+- What changed: the docstring is rewritten around managed-artifact liveness using
+  the same missing/orphaned vs live/unresolvable vocabulary as the spec and ADR,
+  and states explicitly that editing the file — inside the block or around it —
+  does not make it revertable.
+
+## Additional Changes
+
+- ADR-0020 D39/D40, spec §12.7 (prose + edge-case table) and known-gaps G2 updated
+  to the refined boundary (three fail-closed rules; both-sides preview binding).
+- `emitters.target_path` / `managed_artifact_live` were replaced by
+  `candidate_target_paths` / `text_holds_managed_artifact` (multi-location).
+
+## Tests / Checks
+- Command: `make ci`
+- Result: **1282 passed, 1 skipped**, coverage 91.9%, all 5 stages green.
+- Notes: four new guards mutation-verified (CRLF normalization, multi-root
+  resolution, proposal re-check, OSError fail-closed).
+
+## Ready For Re-Review
+- Artifact / commit: the new follow-up commit on `feat/webui-phase1-suggestions`
+  (delta from `0a840a6`).
+- Specific scope: whether any remaining input class makes liveness read a live
+  artifact as gone (or vice versa); the both-sides preview binding; and whether
+  the fail-closed `unresolvable` cases are correctly scoped rather than blocking
+  legitimate repairs.

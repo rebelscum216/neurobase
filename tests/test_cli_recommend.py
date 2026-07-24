@@ -360,8 +360,45 @@ def _accept_via_cli(tmp_path: Path, root: Path) -> Path:
     return installed
 
 
-def _status(root: Path) -> str | None:
-    doc = proposals.load_proposal(root, "prefer-uv-run")
+def _skill_ranked(slug: str = "commit-often") -> RankedCandidate:
+    return RankedCandidate(
+        slug=slug,
+        type="skill",
+        candidate_type="repeated-workflow",
+        title="Commit often",
+        rationale="Repeated workflow",
+        draft="Commit early and often.",
+        target="project-skill",
+        project="neurobase",
+        supersedes=[],
+        evidence=[EvidenceRef.proposal("old-example")],
+        scores=Scores(3, 2, 1.0, 6.0),
+        sessions=2,
+        agents=1,
+        projects=1,
+    )
+
+
+def _accept_skill_via_cli(tmp_path: Path, root: Path, slug: str = "commit-often") -> Path:
+    """Really accept a *skill* proposal, `--target project` only — never `user`,
+    which would write under the real ~/.claude/skills (repo SAFETY rule)."""
+    from neurobase.core import projects
+
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    projects.register_project(root, repo, slug="neurobase")
+    proposals.write_ranked(root, [_skill_ranked(slug)])
+    result = runner.invoke(
+        app, ["recommend", "accept", slug, "--target", "project", "--root", str(root), "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    installed = repo / ".claude" / "skills" / slug / "SKILL.md"
+    assert installed.exists()
+    return installed
+
+
+def _status(root: Path, slug: str = "prefer-uv-run") -> str | None:
+    doc = proposals.load_proposal(root, slug)
     assert doc is not None
     status = doc.get("status")
     return str(status) if status is not None else None
@@ -512,6 +549,90 @@ def test_reaccept_record_only_refuses_if_the_file_changes_during_the_prompt(
         if event["event"] == "accepted"
     ]
     assert len(accepted) == 1  # only the original accept, no stale record
+
+
+def test_revert_refuses_a_crlf_converted_owned_skill(tmp_path: Path) -> None:
+    """Review F1 (round 3): ownership is a property of the frontmatter *values*,
+    not the file's line endings. A genuinely owned SKILL.md converted to CRLF
+    keeps both ownership keys and is still installed — it must not read as gone
+    and let `revert → reject` orphan it. Reproduced by Codex through the CLI."""
+    root = tmp_path / "store"
+    installed = _accept_skill_via_cli(tmp_path, root)
+    lf_text = installed.read_text(encoding="utf-8")
+    # Newline-only conversion: identical content and ownership keys.
+    installed.write_bytes(lf_text.replace("\n", "\r\n").encode("utf-8"))
+
+    reverted = runner.invoke(
+        app, ["recommend", "revert", "commit-often", "--yes", "--root", str(root)]
+    )
+    rejected = runner.invoke(app, ["recommend", "reject", "commit-often", "--root", str(root)])
+
+    assert reverted.exit_code == 1
+    assert "still installed" in reverted.output
+    assert rejected.exit_code == 1  # reject stays blocked on `accepted`
+    assert _status(root, "commit-often") == "accepted"
+    assert installed.exists()
+    assert "neurobase_managed" in installed.read_text(encoding="utf-8")
+
+
+def test_revert_refuses_when_a_live_artifact_sits_at_another_registered_root(
+    tmp_path: Path,
+) -> None:
+    """Review F1 (round 3): `_project_root` renders against `roots[0]`, but a
+    moved repo re-registered under the same slug leaves `[old, new]`. Concluding
+    "gone" from the stale first root would orphan the live block at the new one,
+    so liveness checks every registered root (and the recorded install path)."""
+    import shutil
+
+    from neurobase.core import projects
+
+    root = tmp_path / "store"
+    _accept_via_cli(tmp_path, root)
+    moved = tmp_path / "moved-repo"
+    shutil.move(str(tmp_path / "repo"), str(moved))  # old root (and recorded path) now absent
+    projects.register_project(root, moved, slug="neurobase")  # registry: [old, new]
+
+    result = _revert(root, extra=["--yes"])
+
+    assert result.exit_code == 1
+    assert "still installed" in result.output
+    assert _status(root) == "accepted"
+    assert "<!-- neurobase:rule:prefer-uv-run" in (moved / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_record_only_refuses_if_the_proposal_draft_changes_during_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review P1-DATA-INTEGRITY-004: the target re-read alone is not enough. A
+    concurrent `recommend edit` during the confirm prompt leaves the installed
+    bytes untouched — so the target check passes against the stale render — while
+    `accept_proposal` would reload and mark the *newly edited* draft accepted.
+    Both sides of the preview are re-verified, so this records nothing."""
+    root = tmp_path / "store"
+    installed = _accept_via_cli(tmp_path, root)
+    rendered = installed.read_text(encoding="utf-8")
+    installed.write_text("temporarily different", encoding="utf-8")
+    assert _revert(root, extra=["--yes"]).exit_code == 0
+    installed.write_text(rendered, encoding="utf-8")  # installed-but-unrecorded
+
+    def _confirm_but_edit_the_draft(*_a: object, **_k: object) -> bool:
+        proposals.save_edited_draft(root, "prefer-uv-run", "A completely different rule.")
+        return True
+
+    monkeypatch.setattr(cli_module.typer, "confirm", _confirm_but_edit_the_draft)
+    result = runner.invoke(app, ["recommend", "accept", "prefer-uv-run", "--root", str(root)])
+
+    assert result.exit_code == 1
+    assert "changed after the acceptance was previewed" in result.output
+    assert _status(root) == "proposed"  # nothing recorded
+    accepted = [
+        event
+        for event in proposals.ledger_history(root, "prefer-uv-run")
+        if event["event"] == "accepted"
+    ]
+    assert len(accepted) == 1  # only the original accept
+    # The installed bytes still match the ORIGINAL draft, not the edited one.
+    assert installed.read_text(encoding="utf-8") == rendered
 
 
 def test_reaccept_of_an_already_accepted_proposal_stays_a_pure_no_op(

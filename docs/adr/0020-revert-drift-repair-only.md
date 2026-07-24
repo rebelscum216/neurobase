@@ -49,11 +49,28 @@ drift without becoming the un-accept ADR-0007 deferred?
   judged by the slug-scoped artifact re-derived from the proposal:
   `proposals.artifact_state` returns **live** (the `neurobase:rule:<slug>` marker
   is present, or the owned `SKILL.md` still carries our frontmatter — whatever
-  else changed around it), **missing** (target file absent), **orphaned** (target
-  present but our block/skill removed from it), or **unresolvable** (target can't
-  be re-derived — unregistered project, malformed proposal). Revert is allowed
+  else changed around it), **missing** (no candidate target exists), **orphaned**
+  (a candidate exists but no longer holds our block/skill), or **unresolvable**
+  (target can't be re-derived, *or* a candidate can't be read). Revert is allowed
   **only** on `missing` or `orphaned`; `live` and `unresolvable` are refused
   (the first would orphan a live artifact, the second cannot *prove* one is gone).
+
+  Liveness detection **fails closed in three specific ways**, each closing a real
+  reproduction from review round 3:
+  1. **Every plausible location is checked**, not just the one a fresh render
+     would target: `emitters.candidate_target_paths` returns the recorded
+     `installed_path` (never ignored when non-null) *plus* the re-derived target
+     under **every** registered project root. `_project_root` picks `roots[0]` for
+     rendering, but a repo moved and re-registered under the same slug leaves
+     `[old, new]` — concluding "gone" from the stale first root would orphan the
+     live artifact at the new one.
+  2. **Ownership detection is newline-agnostic.** `_owned_skill` normalizes CRLF
+     before parsing, because ownership is a property of the frontmatter *values*,
+     not the line endings: a genuinely owned SKILL.md converted to CRLF is still
+     installed and must not read as gone.
+  3. **Read failures are classified, not raised.** A directory (or unreadable
+     file) where the artifact should be yields `unresolvable`, never an escaping
+     `IsADirectoryError` and never a silent "missing".
   The artifact on disk is still never touched on any path — to retire a live
   artifact the user removes the managed block/skill by hand first, which puts the
   proposal in the `orphaned`/`missing` state revert then repairs. This closes F1
@@ -76,6 +93,17 @@ drift without becoming the un-accept ADR-0007 deferred?
   re-acceptance reachable after any revert and closes F2 without weakening the
   no-op contract.
 
+  Because this path writes no artifact, it can only be honest if **both sides of
+  the preview still hold at the moment it records**, and both are re-verified at
+  that mutation boundary (`StalePreviewError`): the **target bytes** must still
+  equal the previewed render (else the recorded hash would disagree with disk —
+  review P1-DATA-INTEGRITY-001), and the **proposal** must still carry the same
+  managed draft and status (else a concurrent `recommend edit` during the confirm
+  prompt would leave the target untouched, pass the byte check, and mark the
+  *newly edited* draft accepted while the installed artifact came from the old one
+  — review P1-DATA-INTEGRITY-004). Either drift records nothing: CLI exits 1, the
+  web POST returns 409.
+
 - **F4 — the record.** This ADR is that required record: revert adds a public
   command, a `reverted` ledger event (now carrying the liveness `reason`), and an
   `accepted → proposed` transition that ADR-0007 D14/D15 did not contemplate.
@@ -89,11 +117,19 @@ drift without becoming the un-accept ADR-0007 deferred?
 
 - **The `accept → revert → reject` backdoor is closed structurally**, not by
   convention: the sequence cannot begin, because revert refuses a *live* managed
-  artifact — including one whose surrounding file the user edited (round-2 F1).
+  artifact — including one whose surrounding file the user edited (round-2 F1),
+  one converted to CRLF, and one living at a second registered root (round-3 F1).
   A proposal and its disk artifact can no longer contradict each other through
   any supported command sequence — verified by real CLI regressions for an edit
   outside the block, an edit inside a still-present block, an accepted/null-path
-  record with a live target, and a genuinely missing/orphaned artifact.
+  record with a live target, a CRLF-converted owned skill, a moved+re-registered
+  project, and a genuinely missing/orphaned artifact.
+- **Liveness is deliberately conservative.** Every ambiguity resolves to "refuse":
+  an unreadable candidate, an unresolvable project, an unknown proposal type. The
+  cost is that a genuinely-gone artifact can occasionally need the user to fix the
+  registry before revert will repair the record; the benefit is that no ambiguity
+  can ever orphan live behavior. Given revert exists precisely to make the store
+  honest, refusing when we cannot tell is the only defensible default.
 - **Retiring a live accepted proposal is a two-step, user-visible act:** remove
   the managed block/skill by hand, then `revert` (now `orphaned`/`missing`) and
   `reject`. Both refusal messages say so. This is the deliberate cost of not

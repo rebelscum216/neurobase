@@ -486,6 +486,47 @@ def test_accept_post_records_acceptance_when_installed_but_unrecorded(
     )
 
 
+def test_accept_post_returns_409_when_the_record_only_write_goes_stale(
+    client: TestClient, app: Starlette, seed: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review P1-DATA-INTEGRITY-004 (web surface): if either side of the preview
+    drifts at the record-only mutation boundary, the shared service raises and the
+    route must surface a 409 having recorded nothing — not a 500, and never a
+    half-applied acceptance."""
+    from neurobase.webui import routes as webui_routes
+
+    doc = proposals.load_proposal(seed.root, seed.accepted_slug)
+    assert doc is not None
+    installed = Path(str(doc.get("installed_path")))
+    rendered = installed.read_bytes()
+    installed.write_text("hand-edited", encoding="utf-8")
+    proposals.revert_proposal(seed.root, seed.accepted_slug)
+    installed.write_bytes(rendered)  # installed-but-unrecorded
+
+    preview = install.prepare_install(seed.root, seed.accepted_slug, target="project")
+    assert preview.records_acceptance is True
+
+    def _stale(*_a: object, **_k: object) -> object:
+        raise install.StaleProposalError(seed.accepted_slug)
+
+    monkeypatch.setattr(webui_routes.install, "record_acceptance", _stale)
+    response = client.post(
+        f"/suggestions/{seed.accepted_slug}/accept",
+        data={
+            "csrf_token": app.state.csrf_token,
+            "target": "project",
+            "fingerprint": webui_routes._preview_fingerprint(preview),
+        },
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 409
+    after = proposals.load_proposal(seed.root, seed.accepted_slug)
+    assert after is not None and after.get("status") == "proposed"  # nothing recorded
+    assert installed.read_bytes() == rendered
+
+
 # --- reject ---------------------------------------------------------------------
 
 

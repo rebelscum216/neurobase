@@ -127,6 +127,13 @@
         color: var(--muted); border: 1px dashed var(--line-2); border-radius: 4px; padding: 1px 5px;
         text-transform: uppercase;
       }
+      .navitem .count {
+        margin-left: auto; font-family: var(--mono); font-size: 9px; font-weight: 600;
+        color: var(--muted); background: var(--panel-2); border-radius: 5px; padding: 1px 6px;
+        min-width: 14px; text-align: center; flex: none;
+      }
+      a.navitem.on .count { color: var(--ink); background: var(--panel); }
+      .navitem .count + .soon { margin-left: 6px; }
 
       .rail-foot {
         margin-top: auto; border-top: 1px solid var(--line); padding: 11px 16px;
@@ -341,7 +348,7 @@
         <div class="traffic" aria-hidden="true">
           <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
         </div>
-        <div class="chrome-center"><span class="lock" aria-hidden="true"></span> local.neurobase / suggestions</div>
+        <div class="chrome-center"><span class="lock" aria-hidden="true"></span> local.neurobase / {{ active_label | lower }}</div>
       </div>
       <div class="app">
         <aside class="rail">
@@ -351,19 +358,20 @@
           </div>
           <span class="store mono">{{ store_root_label }}</span>
           <nav aria-label="Primary">
-            <a class="navitem on" href="/suggestions"><span class="glyph">△</span> Suggestions</a>
-            <span class="navitem"><span class="glyph">◉</span> Graph <span class="soon">soon</span></span>
-            <span class="navitem"><span class="glyph">◵</span> Sessions <span class="soon">soon</span></span>
-            <span class="navitem"><span class="glyph">◈</span> Memory <span class="soon">soon</span></span>
-            <span class="navitem"><span class="glyph">✦</span> Skills <span class="soon">soon</span></span>
-            <span class="navitem"><span class="glyph">◷</span> Status <span class="soon">soon</span></span>
+            {% for item in nav %}
+            {% if item.enabled %}
+            <a class="navitem{% if item.active %} on{% endif %}" href="{{ item.href }}"><span class="glyph">{{ item.glyph }}</span> {{ item.label }}{% if item.count is not none %} <span class="count">{{ item.count }}</span>{% endif %}</a>
+            {% else %}
+            <span class="navitem"><span class="glyph">{{ item.glyph }}</span> {{ item.label }}{% if item.count is not none %} <span class="count">{{ item.count }}</span>{% endif %} <span class="soon">soon</span></span>
+            {% endif %}
+            {% endfor %}
           </nav>
           <div class="rail-foot"><span class="pulse-dot" aria-hidden="true"></span> server running</div>
         </aside>
         <div class="main">
           <div class="aurora" aria-hidden="true"></div>
           <div class="topbar">
-            <span class="crumb">neurobase / <b>Suggestions</b></span>
+            <span class="crumb">neurobase / <b>{% block crumb %}{{ active_label }}{% endblock %}</b></span>
             <span class="local-pill"><span class="pulse-dot" aria-hidden="true"></span>127.0.0.1 only</span>
           </div>
           <div class="scroll">

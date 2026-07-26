@@ -14,6 +14,7 @@ from starlette.templating import Jinja2Templates
 
 from neurobase.webui.routes import suggestions_routes
 from neurobase.webui.security import CSRF_FORM_FIELD, CSRFMiddleware, new_csrf_token
+from neurobase.webui.shell import shell_context
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -36,7 +37,9 @@ def build_app(root: Path) -> Starlette:
     wires the same-origin/CSRF middleware, and the Suggestions route table
     (``routes.py``).
     """
-    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # ``shell_context`` (registered here, not threaded per-handler) injects the
+    # left-rail nav + live counts into every template render (app-shell Phase 2a).
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR), context_processors=[shell_context])
     # The hidden form field name every mutating template must use — a Jinja
     # global rather than a value every route handler has to thread through
     # its own context, so it can never drift out of sync with

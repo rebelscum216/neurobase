@@ -31,17 +31,18 @@
 
 Nothing serializes mutations to a project's store. `SessionStart` launches a
 **detached `curate --if-stale`** for the active project
-(`adapters/recall_common.py:112`, `spawn_curate_if_stale` →
+(`adapters/recall_common.spawn_curate_if_stale` →
 `subprocess.Popen(..., start_new_session=True)`), and the staleness gate and the
 curate pass are two separate steps (`cli/__init__.py`: `is_stale(...)` then
 `run_curate(...)`), so a second launch can pass the gate while the first has not
 yet consumed its raws. The mutating primitives in `core/store.py` —
 `upsert_curated`, `soft_delete_curated`, `mark_consumed`, `prune_tombstones` —
 therefore run concurrently against the same files. The seed importer
-(`recommender/seed.py:244`) and the MCP `memory_remember` path
-(`mcp/server.py:200`) reach the same primitives, and **both scribes**
-(`adapters/claude/scribe.py:321`, `adapters/codex/scribe.py:303,317`) write raws
-through `store.write_raw()`.
+(`recommender/seed._import_tree`) and the MCP `memory_remember` path
+(`mcp/server.py`) reach the same primitives, and **both scribes**
+(`adapters/claude/scribe.py`, `adapters/codex/scribe.py`) write raws through
+`store.write_raw()`. (Line numbers are omitted deliberately — refer by symbol;
+they rot on every edit. P2-DOCS-PLAN-ACCURACY-001.)
 
 This costs, concretely (from the G4 finding, `P1-DATA-INTEGRITY-003`, with a
 deterministic interleaving probe):
@@ -140,15 +141,15 @@ acquired **once around the whole pass**, not per primitive:
 
 | Pass | Site | Mode |
 |---|---|---|
-| Curator pass (`run_curate`: consume → plan → upsert → soft-delete → **prune**) | `curator/engine.py` | blocking |
-| MCP `memory_remember` (single upsert) | `mcp/server.py:200` | blocking |
-| Seed import (batch of upserts) | `recommender/seed.py:244` | blocking |
+| Curator pass (`run_curate`: consume → plan → upsert → soft-delete → **prune**) | `curator/engine.run_curate` | blocking |
+| MCP `memory_remember` (single upsert) | `mcp/server.memory_remember` | blocking |
+| Seed import (batch of upserts) | `recommender/seed._import_tree` | blocking |
 | Detached `curate --if-stale` (background freshness) | `cli` passes `blocking_lock=False` | **non-blocking** |
 
 Holding it once around the whole curator pass is what makes `upsert_curated` and
 `soft_delete_curated` unable to interleave, and — because `prune_tombstones` is
-called only inside `run_curate` (`curator/engine.py:492`, its sole call site,
-confirmed in review) — **the prune TOCTOU closes structurally**: no soft-delete
+called only inside `run_curate` (`curator/engine._curate_unlocked`, its sole call
+site, confirmed in review) — **the prune TOCTOU closes structurally**: no soft-delete
 from another pass can replace a tombstone path mid-prune, because no other pass
 can be mutating this project at all. No rename-to-claim or second-timestamp check
 is needed, and we deliberately do **not** build one. (This holds once the wiring
@@ -236,18 +237,22 @@ silently no-op on a user's request.
   change-detection guard. It is **not** a compare-and-swap and must not be relied
   on as one: its check and its write are separate syscalls (P1-DATA-INTEGRITY-002).
 - **Verification status.** `core/lock.py`, the contended-scribe path, the curator
-  lock wiring, and two probe suites (`tests/test_store_lock.py`,
-  `tests/test_raw_consume_cas.py`) exist ahead of acceptance. The full mandatory
-  gate — `make ci`: ruff check, ruff format, mypy, pytest — is **green at 848
-  tests**. (An earlier revision claimed a green "full gate" on `pytest` alone
-  while `make ci` was red; that claim was wrong and is retracted.) The probes
-  cover cross-process mutual exclusion (8×40 == 320 exact, with an unlocked
-  control that corrupts), non-blocking skip, blocking timeout, release on
-  exception, **SIGKILL'd holder auto-release**, empty/garbage lockfile recovery,
-  successor-lock safety, canonical naming and oldest-first order for contended
-  captures, and the raw handoff driven through the **real** `engine.curate` — the
-  latter verified by mutation: neutralizing the curator lock makes both
-  end-to-end tests fail. **The Windows leg is exercised only in CI**, not on this
+  lock wiring, and three probe suites (`tests/test_store_lock.py`,
+  `tests/test_raw_consume_cas.py`, `tests/test_lock_wiring.py`) exist ahead of
+  acceptance. The full mandatory gate — `make ci`: ruff check, ruff format, mypy,
+  store-chokepoint, pytest — is **green at 1391 tests** on this branch. (An earlier
+  revision claimed a green "full gate" on `pytest` alone while `make ci` was red;
+  that claim was wrong and is retracted.) The probes cover cross-process mutual
+  exclusion (8×40 == 320 exact, with an unlocked control that corrupts),
+  non-blocking skip, blocking timeout, release on exception, **SIGKILL'd holder
+  auto-release**, empty/garbage lockfile recovery, successor-lock safety, canonical
+  naming and oldest-first order for contended captures, the **holder-vs-loser
+  same-instant handoff** (P1-DATA-INTEGRITY-001 — a contended capture never claims
+  the base a holder is about to write, in either interleaving), the wiring at each
+  real entry point (both scribes, seed import, MCP `memory_remember`, and the
+  CLI/engine `--if-stale` skip), and the raw handoff driven through the **real**
+  `engine.curate` — the latter verified by mutation: neutralizing the curator lock
+  makes both end-to-end tests fail. **The Windows leg is exercised only in CI**, not on this
   machine.
 
 ## Alternatives considered

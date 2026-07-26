@@ -238,18 +238,24 @@ def test_curator_journal_excludes_an_unconsumed_raw(tmp_path: Path) -> None:
 
 def test_contended_captures_keep_canonical_names_and_order(tmp_path: Path) -> None:
     """Two contended captures with **no pre-existing base file** must come back
-    from ``list_raw`` oldest-first and carry canonical ``{ts}_{agent}_{sid8}.md``
-    names. The earlier ``-2``-suffix scheme failed both: ``-`` sorts before ``.``,
-    so the second capture was returned first."""
+    from ``list_raw`` oldest-first, and their *canonical* (suffix-stripped)
+    portion must be a spec §1 ``{ts}_{agent}_{sid8}.md`` name. Each carries a
+    ``__gNNNN`` suffix because the bare base is a holder's namespace
+    (P1-DATA-INTEGRITY-001); the earlier ``-2``-suffix scheme failed both format
+    and order (``-`` sorts before ``.``, so the second capture came back first)."""
     with lock.project_lock(_mem(tmp_path)):
         first = _capture(tmp_path, "first capture", guarded=True)
         second = _capture(tmp_path, "second capture", guarded=True)
 
     assert first != second
     for path in (first, second):
+        assert re.search(r"__g\d{4,}(?=\.md$)", path.name), (
+            f"{path.name} must be generation-suffixed (the base is reserved for a holder)"
+        )
         assert re.fullmatch(
-            r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{6}Z_codex_[a-z0-9]+\.md", path.name
-        ), f"{path.name} is not a canonical spec §1 raw filename"
+            r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{6}Z_codex_[a-z0-9]+\.md",
+            store.canonical_raw_name(path.name),
+        ), f"{path.name} is not a canonical spec §1 raw filename once the suffix is stripped"
 
     docs = store.list_raw(tmp_path, PROJECT, unconsumed_only=True)
     bodies = [d.body for d in docs]
@@ -269,9 +275,11 @@ def test_contended_capture_filename_round_trips_from_its_frontmatter(tmp_path: P
     for path in (first, second):
         doc = store.read_doc(path)
         stamped = datetime.fromisoformat(str(doc.get("captured_at")).replace("Z", "+00:00"))
-        assert store.raw_filename(stamped, "codex", "sess1234") == path.name, (
-            f"{path.name} does not round-trip from its frontmatter captured_at"
-        )
+        # Contended captures carry a __gNNNN suffix (the base is a holder's), so the
+        # spec §1 round-trip is on the canonical timestamp/key portion.
+        assert store.raw_filename(stamped, "codex", "sess1234") == store.canonical_raw_name(
+            path.name
+        ), f"{path.name} does not round-trip from its frontmatter captured_at"
 
 
 def test_contended_capture_from_a_long_running_session_sorts_last(tmp_path: Path) -> None:
@@ -327,9 +335,12 @@ def test_list_raw_orders_by_capture_time_across_sessions(tmp_path: Path) -> None
     same = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
     later = datetime(2026, 7, 20, 12, 0, 1, tzinfo=UTC)
 
-    a0 = _claim_raw(tmp_path, same, "aaaa1111", "A0")
-    a1 = _claim_raw(tmp_path, same, "aaaa1111", "A1")  # collides → __g0001
-    a2 = _claim_raw(tmp_path, same, "aaaa1111", "A2")  # collides → __g0002
+    # Every contended claim is suffixed (the bare base is a holder's namespace),
+    # so the three same-instant A captures are __g0001, __g0002, __g0003 in claim
+    # order — never the bare base (P1-DATA-INTEGRITY-001).
+    a0 = _claim_raw(tmp_path, same, "aaaa1111", "A0")  # first claim → __g0001
+    a1 = _claim_raw(tmp_path, same, "aaaa1111", "A1")  # collides → __g0002
+    a2 = _claim_raw(tmp_path, same, "aaaa1111", "A2")  # collides → __g0003
     b = _claim_raw(tmp_path, later, "bbbb2222", "B genuinely later")
 
     order = [d.file_path for d in store.list_raw(tmp_path, PROJECT, unconsumed_only=True)]
@@ -346,7 +357,9 @@ def test_list_raw_orders_by_capture_time_across_sessions(tmp_path: Path) -> None
         assert store.canonical_raw_name(path.name) == store.raw_filename(
             stamped, "codex", doc.get("session_id")
         ), f"{path.name} timestamp portion does not round-trip"
-    assert "__g0001" in a1.name and "__g0002" in a2.name, "collisions must be generation-suffixed"
+    assert "__g0001" in a0.name and "__g0002" in a1.name and "__g0003" in a2.name, (
+        "every contended claim must be generation-suffixed in claim order"
+    )
 
 
 def test_microsecond_collision_at_second_boundary_keeps_order(tmp_path: Path) -> None:
@@ -373,10 +386,12 @@ def test_microsecond_collision_at_second_boundary_keeps_order(tmp_path: Path) ->
     )
 
 
-def test_uncontended_capture_filename_round_trips(tmp_path: Path) -> None:
-    """The common (non-collision) case still round-trips: a raw claimed with a
-    truthful, unique timestamp has a filename recomputable from its frontmatter,
-    with no generation suffix."""
+def test_solo_contended_capture_is_still_suffixed_and_round_trips(tmp_path: Path) -> None:
+    """Even with no collision at all, a contended (``unique=True``) claim carries
+    ``__g0001`` — the bare base is reserved for the lock holder
+    (P1-DATA-INTEGRITY-001). The *timestamp/key portion* still round-trips from
+    the frontmatter (spec §1): ``canonical_raw_name`` strips the suffix and the
+    remainder recomputes from ``captured_at``."""
     store.ensure_tree(PROJECT, tmp_path)
     path = _claim_raw(
         tmp_path, datetime(2026, 7, 20, 12, 0, 0, 123456, tzinfo=UTC), "aaaa1111", "solo"
@@ -384,8 +399,25 @@ def test_uncontended_capture_filename_round_trips(tmp_path: Path) -> None:
     doc = store.read_doc(path)
     stamped = store.parse_captured_at(doc.get("captured_at"))
     assert stamped is not None
-    assert store.raw_filename(stamped, "codex", doc.get("session_id")) == path.name
+    assert "__g0001" in path.name, f"a contended claim must reserve the base; got {path.name}"
+    assert store.canonical_raw_name(path.name) == store.raw_filename(
+        stamped, "codex", doc.get("session_id")
+    )
+
+
+def test_ordinary_holder_write_is_bare_and_round_trips(tmp_path: Path) -> None:
+    """The lock-holder's ordinary (``unique=False``) write keeps the bare
+    ``{ts}_{agent}_{sid8}.md`` name — no generation suffix — and round-trips
+    whole from its frontmatter. This is the base namespace a contended claim must
+    never touch (P1-DATA-INTEGRITY-001)."""
+    path = _capture(
+        tmp_path, "held", captured_at=datetime(2026, 7, 20, 12, 0, 0, 123456, tzinfo=UTC)
+    )
+    doc = store.read_doc(path)
+    stamped = store.parse_captured_at(doc.get("captured_at"))
+    assert stamped is not None
     assert "__g" not in path.name
+    assert store.raw_filename(stamped, "codex", doc.get("session_id")) == path.name
 
 
 def test_list_raw_orders_by_authoritative_captured_at_not_filename(tmp_path: Path) -> None:
@@ -423,6 +455,31 @@ def test_list_raw_orders_by_authoritative_captured_at_not_filename(tmp_path: Pat
     assert order == [x.name, y.name], "list_raw sorted by filename, not captured_at"
 
 
+def test_generation_tiebreak_is_numeric_past_four_digits(tmp_path: Path) -> None:
+    """P2-CORRECTNESS-001: within one instant/key, ``__g10000`` must sort *after*
+    ``__g9999``. A lexical filename tiebreak inverts them (``'1' < '9'``), so this
+    pins the numeric generation sort — without constructing ten thousand captures.
+    Two raws are written out of order under one ``captured_at`` and ``list_raw``
+    must return them in generation order."""
+    raw_dir = store.memory_dir(PROJECT, tmp_path) / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    ts, captured = "2026-07-20T12-00-00.000000Z", "2026-07-20T12:00:00Z"
+    g9999 = raw_dir / f"{ts}_codex_aaaa1111__g9999.md"
+    g10000 = raw_dir / f"{ts}_codex_aaaa1111__g10000.md"
+    frontmatter = {
+        "agent": "codex",
+        "session_id": "aaaa1111",
+        "captured_at": captured,
+        "consumed": False,
+    }
+    # write the higher generation first so a stable sort cannot fake the order
+    store.write_doc(g10000, frontmatter, "gen 10000")
+    store.write_doc(g9999, frontmatter, "gen 9999")
+
+    order = [d.file_path for d in store.list_raw(tmp_path, PROJECT)]
+    assert order == [g9999, g10000], [p.name for p in order]
+
+
 def test_contended_capture_claims_a_fresh_name_on_a_same_instant_collision(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -439,10 +496,12 @@ def test_contended_capture_claims_a_fresh_name_on_a_same_instant_collision(
     constructed.
 
     So freeze ``now`` and fire two contended captures into one instant. With
-    ``unique=True`` the second claims ``__g0001`` and both survive; without it,
-    ``write_raw`` resolves to the same session-keyed path and the second
-    silently overwrites the first — losing a capture, which is the entire bug
-    this module exists to prevent.
+    ``unique=True`` they claim ``__g0001`` then ``__g0002`` and both survive;
+    without it, ``write_raw`` resolves to the same session-keyed path and the
+    second silently overwrites the first — losing a capture, which is the entire
+    bug this module exists to prevent. (Neither ever claims the bare base — that
+    is reserved for a lock holder; see the P1-DATA-INTEGRITY-001 regression
+    below.)
     """
 
     class _FrozenClock:
@@ -457,7 +516,8 @@ def test_contended_capture_claims_a_fresh_name_on_a_same_instant_collision(
         second = _capture(tmp_path, "contended two", guarded=True)
 
     assert first != second, "the second contended capture overwrote the first"
-    assert "__g0001" in second.name, f"expected a generation suffix, got {second.name}"
+    assert "__g0001" in first.name, f"expected a generation suffix, got {first.name}"
+    assert "__g0002" in second.name, f"expected a generation suffix, got {second.name}"
     assert "contended one" in store.read_doc(first).body
     assert "contended two" in store.read_doc(second).body
 
@@ -466,3 +526,90 @@ def test_contended_capture_claims_a_fresh_name_on_a_same_instant_collision(
     assert order == [first, second], [p.name for p in order]
     times = {str(store.read_doc(p).get("captured_at")) for p in (first, second)}
     assert len(times) == 1, f"the collision moved a capture time: {times}"
+
+
+def _holder_write(root: Path, sid: str, captured_at: datetime, body: str) -> Path:
+    """The lock HOLDER's ordinary, session-keyed write (``unique=False``): it
+    lands on the bare ``{ts}_{agent}_{sid8}.md`` base and atomically replaces it."""
+    return store.write_raw(
+        root,
+        PROJECT,
+        agent="codex",
+        session_id=sid,
+        cwd="/tmp",
+        branch="main",
+        captured_at=captured_at,
+        body=body,
+        unique=False,
+    )
+
+
+def _loser_write(root: Path, sid: str, captured_at: datetime, body: str) -> Path:
+    """The lock LOSER's contended write (``unique=True``) — what
+    ``write_raw_guarded`` does when it cannot take the lock."""
+    return store.write_raw(
+        root,
+        PROJECT,
+        agent="codex",
+        session_id=sid,
+        cwd="/tmp",
+        branch="main",
+        captured_at=captured_at,
+        body=body,
+        unique=True,
+    )
+
+
+def test_contended_loser_and_lock_holder_never_lose_a_capture_either_order(
+    tmp_path: Path,
+) -> None:
+    """P1-DATA-INTEGRITY-001 regression. The bug lived between the lock *holder*
+    and a lock *loser* at the **same instant under the same agent/session key** —
+    the interleaving the frozen-clock test above could not construct, because it
+    only ever raced two losers, never a loser against the ordinary base write.
+
+    The holder does the ordinary session-keyed write to the bare base; the loser
+    writes ``unique=True``. Before the fix, ``unique`` claimed the bare base
+    whenever it was still *absent* — so a loser that ran first ``O_EXCL``-claimed
+    the exact base the holder was *about to* ``os.replace`` onto, and the holder's
+    atomic write then destroyed the loser's capture. The fix reserves the base for
+    the holder: a loser always takes ``__gNNNN``, so the two names are disjoint in
+    **either** interleaving. Both orderings must leave two distinct raws with both
+    bodies intact.
+
+    No threads: the interleaving is expressed as a strict call order at one frozen
+    instant. "Loser first, then holder" is the ordering that lost data; running the
+    loser's whole write before the holder's is exactly "the base is still absent
+    when the loser claims" — the pause Codex asked the regression to model.
+    """
+    instant = datetime(2026, 7, 20, 15, 30, 0, 500000, tzinfo=UTC)
+
+    def surviving(root: Path) -> set[str]:
+        return {p.name for p in (store.memory_dir(PROJECT, root) / "raw").glob("*.md")}
+
+    # --- Ordering 1: loser claims FIRST, then the holder writes the base --------
+    # (the data-losing interleaving; base absent when the loser claims)
+    a_root = tmp_path / "loser_first"
+    store.ensure_tree(PROJECT, a_root)
+    loser = _loser_write(a_root, "sess1234", instant, "loser capture")
+    holder = _holder_write(a_root, "sess1234", instant, "holder capture")
+
+    assert loser != holder, "the loser claimed the holder's base — its capture will be clobbered"
+    assert "__g" not in holder.name, "the holder must own the bare base"
+    assert "__g0001" in loser.name, "the loser must be pushed off the base onto a suffix"
+    assert len(surviving(a_root)) == 2, "a capture was lost when the holder overwrote the base"
+    assert "loser capture" in store.read_doc(loser).body
+    assert "holder capture" in store.read_doc(holder).body
+
+    # --- Ordering 2: holder writes the base FIRST, then the loser claims --------
+    # (already safe pre-fix; must stay safe — no regression the other way)
+    b_root = tmp_path / "holder_first"
+    store.ensure_tree(PROJECT, b_root)
+    holder2 = _holder_write(b_root, "sess1234", instant, "holder capture")
+    loser2 = _loser_write(b_root, "sess1234", instant, "loser capture")
+
+    assert loser2 != holder2
+    assert "__g" not in holder2.name and "__g0001" in loser2.name
+    assert len(surviving(b_root)) == 2, "the later contended claim collided with the base"
+    assert "holder capture" in store.read_doc(holder2).body
+    assert "loser capture" in store.read_doc(loser2).body

@@ -21,7 +21,12 @@ dependencies = [
     "typer>=0.12",
     "pyyaml>=6.0",
     "tomli-w>=1.0",
-    "filelock>=3.13",
+    # >=3.24.0: the flock(...)=ENOSYS -> SoftFileLock downgrade that ADR-0023 and
+    # known-gaps G4 rely on for the network-filesystem fallback arrived in 3.24.0
+    # (ADR-0023 / P2-ROLLOUT-CONFIG-001). An earlier resolution would propagate the
+    # OS error on a hook path instead of degrading, and the outer fail-safe would
+    # swallow it and capture nothing.
+    "filelock>=3.24.0",
     "anthropic>=0.40",
     "keyring>=24.0",
     "mcp==1.28.1",

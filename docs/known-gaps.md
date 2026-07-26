@@ -306,6 +306,11 @@ not carry frontmatter), but the emitter should not depend on that.
 - **found:** 2026-07-19 by Codex (provenance Slice B review, round 3 —
   `P1-DATA-INTEGRITY-003`), with a deterministic interleaving probe.
 
+> **The remainder of this entry is the original pre-fix analysis, kept as the
+> historical record of what the lock resolves. It is written in the present
+> tense of the unfixed store; read every "Nothing serializes…" / "can race" /
+> "needs an ADR" below as describing the state *before* ADR-0023.**
+
 Nothing serializes mutations to a project's store. `SessionStart` launches
 **detached `curate --if-stale` processes** (`adapters/recall_common.py`), and the
 staleness check and `curate()` call are not guarded (`cli/__init__.py`), so a

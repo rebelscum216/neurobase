@@ -223,6 +223,17 @@ def canonical_raw_name(name: str) -> str:
     return _GENERATION_RE.sub("", name)
 
 
+def _raw_generation(name: str) -> int:
+    """The integer generation from a raw filename's ``__gNNNN`` suffix, or 0 for a
+    bare (holder) name. Used as a **numeric** sort tiebreak so ``__g10000`` orders
+    *after* ``__g9999`` — a lexical filename sort inverts them (``'1' < '9'``),
+    which would contradict the claim-order tiebreak once the count crosses four
+    digits (ADR-0023 / P2-CORRECTNESS-001). ``captured_at`` remains authoritative;
+    this only disambiguates within a single instant/key."""
+    match = _GENERATION_RE.search(name)
+    return int(match.group()[len("__g") :]) if match else 0
+
+
 def parse_captured_at(value: Any) -> datetime | None:
     """Parse a raw's ``captured_at`` frontmatter to an aware UTC datetime, or
     ``None`` if absent/unparseable. The authoritative capture instant that
@@ -245,35 +256,47 @@ def raw_path(
 def _claim_fresh_raw_path(
     root: Path, project: str, agent: str, session_id: str | None, captured_at: datetime
 ) -> Path:
-    """Atomically claim a raw filename no other capture holds, **without ever
-    modifying the capture time** (spec §1; ADR-0023 / P1-CORRECTNESS-006).
+    """Atomically claim a raw filename for a **contended** capture, disjoint from
+    the ordinary session-keyed namespace and **without ever modifying the capture
+    time** (spec §1; ADR-0023 / P1-DATA-INTEGRITY-001, P1-CORRECTNESS-006).
 
-    The base name is the canonical ``{ts}_{agent}_{sid8}.md``. On the (in
-    practice near-impossible) event that a same-agent/session capture already
-    holds that exact microsecond, uniqueness comes from a **generation suffix**
-    ``__g0001``, ``__g0002``, … — *not* from advancing ``captured_at``. Three
-    earlier revisions advanced the timestamp (by a second, then by a microsecond)
-    to force a unique name; every one of them fabricated a later event time, and a
+    A contended capture **always** carries a ``__gNNNN`` generation suffix —
+    ``__g0001``, ``__g0002``, … — starting at generation 1; it **never** claims
+    the bare ``{ts}_{agent}_{sid8}.md`` base name, even when that base is absent.
+    That reservation is the P1-DATA-INTEGRITY-001 fix: the bare base is the name
+    an ordinary (lock-*holding*) writer produces with ``raw_path`` and overwrites
+    atomically (``os.replace``). A contended (lock-*losing*) writer runs
+    concurrently with that holder, so if it claimed the bare base while the base
+    was still absent, the holder's imminent atomic replace onto the same base
+    would destroy the contended capture outright. An ``O_EXCL`` claim on ``base``
+    only tests whether it *already* exists — it cannot see a base the holder is
+    *about to* create. Keeping every contended name in the ``__gNNNN`` namespace
+    makes it provably disjoint from any base a holder may write, in either
+    interleaving.
+
+    Uniqueness never comes from advancing ``captured_at``. Three earlier
+    revisions advanced the timestamp (by a second, then by a microsecond) to
+    force a unique name; every one fabricated a later event time, and a
     microsecond bump at ``…59.999999`` still rolls into the next second and can
     sort a capture past a genuinely-later one under another key. The capture time
     is an event fact and must never move; only the filename disambiguates.
 
-    Ordering does not depend on this suffix: ``list_raw`` sorts by the authoritative
+    Ordering does not depend on the suffix: ``list_raw`` sorts by the authoritative
     ``captured_at`` frontmatter (identical for every generation of one instant),
     and the suffix is only the stable tiebreak within that instant — zero-padded
-    so it sorts in claim order, and placed after ``_sid8`` where ``.`` (the base
-    ``.md``) sorts before ``_`` so generation 0 leads. Each candidate is claimed
-    with ``O_CREAT | O_EXCL`` so two racing callers never settle on one name."""
+    so it sorts in claim order, and placed after ``_sid8`` where ``.`` (a holder's
+    base ``.md``) sorts before ``_`` so the holder's capture leads its contenders.
+    Each candidate is claimed with ``O_CREAT | O_EXCL`` so two racing callers
+    never settle on one name."""
     base = raw_path(root, project, captured_at, agent, session_id)
     base.parent.mkdir(parents=True, exist_ok=True)
-    candidate = base
-    generation = 0
+    generation = 1
     while True:
+        candidate = base.with_name(f"{base.stem}__g{generation:04d}{base.suffix}")
         try:
             fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
             generation += 1
-            candidate = base.with_name(f"{base.stem}__g{generation:04d}{base.suffix}")
             continue
         os.close(fd)
         return candidate
@@ -305,14 +328,19 @@ def write_raw(
     must tolerate the absence of both keys.
 
     ``unique=True`` claims a fresh filename instead of session-keyed
-    overwriting, so the write cannot touch *any* existing raw. This is the
-    contended scribe path (ADR-0023): when the curator holds the project lock
-    it may be mid-consume on this session's raw, and overwriting it would
-    destroy a capture the plan never saw. The claimed name is the canonical
-    ``{ts}_{agent}_{sid8}.md`` — or, only on a same-instant same-key collision,
-    ``…_sid8__gNNNN.md`` (a generation suffix; ``captured_at`` is never moved) —
-    so ``list_raw``'s oldest-first contract still holds (it orders by
-    ``captured_at``).
+    overwriting, so the write cannot touch *any* raw a concurrent holder owns.
+    This is the contended scribe path (ADR-0023): when the curator holds the
+    project lock it may be mid-consume on this session's raw, and overwriting it
+    would destroy a capture the plan never saw. The claimed name **always**
+    carries a generation suffix — ``{ts}_{agent}_{sid8}__gNNNN.md`` (``NNNN``
+    starts at ``0001``; ``captured_at`` is never moved) — and **never** the bare
+    ``{ts}_{agent}_{sid8}.md`` base, which is reserved for the ordinary
+    lock-holding writer. Reserving the base is the P1-DATA-INTEGRITY-001 fix: a
+    contended writer that claimed the bare base while it was still absent would
+    be overwritten by the holder's imminent atomic replace onto that same base.
+    ``list_raw``'s oldest-first contract still holds regardless (it orders by the
+    authoritative ``captured_at``, with the suffix only a within-instant
+    tiebreak).
     """
     if unique:
         # captured_at is written to frontmatter UNCHANGED — the filename may carry
@@ -365,7 +393,12 @@ def list_raw(root: Path, project: str, unconsumed_only: bool = True) -> list[Doc
         docs.append(doc)
     return sorted(
         docs,
-        key=lambda d: (parse_captured_at(d.get("captured_at")) or _MIN_CAPTURED, d.file_path.name),
+        key=lambda d: (
+            parse_captured_at(d.get("captured_at")) or _MIN_CAPTURED,
+            canonical_raw_name(d.file_path.name),
+            _raw_generation(d.file_path.name),
+            d.file_path.name,
+        ),
     )
 
 

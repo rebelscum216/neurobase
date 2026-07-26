@@ -1,12 +1,12 @@
 ---
 slug: store-write-lock-v2
-status: blocked
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/store-write-lock-v2
 diff: git diff main...feat/store-write-lock-v2
 created: 2026-07-24
-round: 1
+round: 2
 ---
 
 # Review: per-project store write lock (v2) — ADR-0023, resolves G4
@@ -184,7 +184,20 @@ interleaving probe.
   chokepoint handle. Regression must freeze the holder's input timestamp and the
   fallback `now` to the same instant, pause the holder before its write, and prove
   two distinct raws with both bodies surviving — plus the opposite ordering.
-- **resolution:** _(Author fills)_
+- **resolution:** **resolved** (round 2). `_claim_fresh_raw_path`
+  (`core/store.py`) now starts at generation **1** and never claims the bare
+  base — a contended `unique=True` capture always takes `__gNNNN`, so its
+  namespace is provably disjoint from the bare base a lock holder writes with
+  `raw_path`+`os.replace`, in either interleaving. `captured_at`, non-blocking
+  behaviour, the `O_EXCL` claim, and the chokepoint handle are unchanged.
+  Regression `test_contended_loser_and_lock_holder_never_lose_a_capture_either_order`
+  (`tests/test_raw_consume_cas.py`) freezes both keys to one instant and runs
+  loser-first and holder-first orderings, asserting two distinct raws survive.
+  Verified faithful by mutation: restoring "claim the bare base first" makes it
+  fail with `loser == holder`. Four inherited tests that had pinned the old
+  bare-base behaviour were updated (they silently encoded the bug), and
+  `test_ordinary_holder_write_is_bare_and_round_trips` was split out to keep
+  holder-path coverage.
 
 ### P2-TEST-GAP-001 — port wiring not mutation-pinned at the production entry points
 - **severity:** major (P2)
@@ -200,7 +213,20 @@ interleaving probe.
   `scribe` functions, seed import, MCP `memory_remember`, and the CLI/engine
   `--if-stale` path; distinguish blocking from non-blocking and assert a WRITE
   handle is passed. Each must fail when its guard is removed.
-- **resolution:** _(Author fills)_
+- **resolution:** **resolved** (round 2). New suite `tests/test_lock_wiring.py`
+  drives the **real** entry points. A `_LockSpy` wraps `core.lock.project_lock`
+  (recording every acquire as `(memory_dir, blocking)`) and patches the store's
+  atomic writer to flag any `curated/` write made at lock depth 0. Tests:
+  both scribes route a contended capture through `write_raw_guarded` (a
+  `blocking=False` acquire is recorded, capture lands suffixed); seed import
+  serializes its curated writes under **one blocking** lock opened on a **WRITE**
+  handle (WRITE asserted via a patched `open_store`); MCP `memory_remember`
+  writes its fact under one blocking lock; the CLI maps `--if-stale`→
+  `blocking_lock=False` and explicit `curate`→`True` (parametrized); and
+  `engine.curate(blocking_lock=False)` returns `skipped-locked` when contended
+  (the previously-uncovered `engine.py` branch). Verified by mutation: removing
+  the write-raw-guard, the seed `with project_lock`, and the CLI mapping failed
+  exactly the four matching tests; the untouched MCP/engine tests stayed green.
 
 ### P2-CORRECTNESS-001 — generation tiebreak breaks past 9,999
 - **severity:** major (P2)
@@ -212,7 +238,15 @@ interleaving probe.
   define a bounded representation whose lexical order cannot roll over. Keep
   `captured_at` unchanged. Add a `__g9999`/`__g10000` boundary regression that
   does not require ten thousand captures.
-- **resolution:** _(Author fills)_
+- **resolution:** **resolved** (round 2). `list_raw` (`core/store.py`) now sorts
+  by `(captured_at, canonical_raw_name, _raw_generation, name)`, where
+  `_raw_generation` parses the `__gNNNN` suffix to an **int** — so `__g10000`
+  orders after `__g9999`. `captured_at` stays authoritative and unchanged.
+  Regression `test_generation_tiebreak_is_numeric_past_four_digits` writes a
+  `__g9999`/`__g10000` pair out of order under one `captured_at` and asserts the
+  numeric order; it fails under the old lexical tiebreak, without constructing
+  ten thousand captures. (`canonical_raw_name`'s `__g\d{4,}` regex already
+  handled 5-digit generations.)
 
 ### P2-ROLLOUT-CONFIG-001 — declared `filelock` minimum lacks the documented fallback
 - **severity:** major (P2)
@@ -226,7 +260,11 @@ interleaving probe.
   nothing.
 - **suggested direction:** raise the floor to ≥3.24.0 and regenerate the lock, or
   revise the fallback contract so it is true across the declared range.
-- **resolution:** _(Author fills)_
+- **resolution:** **resolved** (round 2). `pyproject.toml` raises the floor to
+  `filelock>=3.24.0` (the release the `flock(...)=ENOSYS`→`SoftFileLock`
+  downgrade landed in), with a comment citing this finding, and `uv.lock` was
+  regenerated (still resolves 3.29.6). The declared range now cannot resolve to a
+  version that propagates the OS error on a hook path.
 
 ### P3-DOCS-PLAN-ACCURACY-001 — G4/ADR retain stale pre-fix claims
 - **severity:** nit (P3)
@@ -239,8 +277,39 @@ interleaving probe.
   ported the ADR wholesale on renumber and did not audit its verification claims.)
 - **suggested direction:** label the remainder of G4 explicitly as historical
   pre-fix analysis, update the observed gate, refresh or drop brittle line numbers.
-- **resolution:** _(Author fills)_
+- **resolution:** **resolved** (round 2). `docs/known-gaps.md` G4 now carries a
+  blockquote explicitly labelling the remainder as historical pre-fix analysis
+  written in the unfixed store's present tense (covering both the "Nothing
+  serializes…" and "no-loss holds for a single process" claims). ADR-0023's
+  verification section records the current gate (**1391 tests**, five stages
+  including store-chokepoint) and the P1/wiring probes; brittle `:NNN` line refs
+  in the context paragraph and the mutator table were replaced with symbol
+  references (`recommender/seed._import_tree`, `mcp/server.memory_remember`,
+  `curator/engine._curate_unlocked`, …), which do not rot.
 
-**Verdict:** blocked — the lock-holder/contended-scribe handoff has a reproducible
-same-instant data-loss interleaving; G4 cannot be called closed until
+**Round-1 verdict:** blocked — the lock-holder/contended-scribe handoff has a
+reproducible same-instant data-loss interleaving; G4 cannot be called closed until
 P1-DATA-INTEGRITY-001 is fixed and regression-tested.
+
+---
+
+## Round 2 — author response  _(Claude)_
+
+All five round-1 findings are addressed above (each `resolution:` block, marked
+**resolved**). Landed as a single follow-up commit on `feat/store-write-lock-v2`
+over the round-1 tip `ae41b57` (no amend/rebase). Full gate green: `make ci` at
+**1391 passed, 1 skipped, 91.99% cov**, 5/5 stages, store-chokepoint clean with
+**no new exemption**. New/changed tests are mutation-verified (the P1 regression
+and each entry-point guard fail when the fix/guard is reverted).
+
+**Please re-review this round's diff.** The highest-value targets: (1) the
+P1 base-reservation invariant in `_claim_fresh_raw_path` — is the `__gNNNN`
+namespace *truly* disjoint from every path an ordinary holder can produce, in
+both interleavings? (2) `test_lock_wiring.py`'s `_LockSpy` — does the
+depth-at-write-time check actually pin "mutation inside the lock", or can a
+curated write slip past it? (3) the new numeric sort key — any raw whose
+`captured_at` is authoritative-but-absent still ordering deterministically?
+
+## Reviewer findings — round 2  _(Reviewer — Codex)_
+
+_(Codex appends round-2 findings here, then sets the `status:` field.)_

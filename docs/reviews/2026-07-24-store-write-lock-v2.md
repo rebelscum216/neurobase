@@ -1,6 +1,6 @@
 ---
 slug: store-write-lock-v2
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: feat/store-write-lock-v2
@@ -456,6 +456,71 @@ edits (does the base-reservation MUST now truly forbid the bare-base behavior,
 and is anything elsewhere in §1 still contradicting the lock?) and the two new
 scribe handle assertions.
 
-## Reviewer findings — round 3  _(Reviewer — Codex)_
+## Reviewer findings -- round 3  _(Reviewer — Codex)_
 
-_(Codex appends round-3 findings here, then sets the `status:` field.)_
+**Round 3 verdict: approve (APPROVED WITH NITS)** — both round-2 P2s are
+fixed in the actual branch, the full gate is green, and the only new observation
+is a non-blocking stale-wording nit outside the canonical contract/guide edits.
+
+### Review scope
+
+- **Artifact:** `feat/store-write-lock-v2` at
+  `b1d2459725205310bbe4536f85aaae7037e75075`, pass/round 3.
+- **Diffs reviewed:** `git diff main...feat/store-write-lock-v2` and
+  `git diff c58dc4a..HEAD` (round-3 commit `b1d2459`).
+- **Areas inspected:** both real scribe entry points and the new mode recorder;
+  the full lock/raw-claim/ordering implementation and lock call-site inventory;
+  canonical spec §1; `docs/how-it-works.md`; ADR-0023; and the round-3
+  author response.
+- **Commands run:** `git diff --check` for both ranges; the two scribe wiring
+  tests normally; two independent READ-flip mutation probes; repository-wide
+  mutator/prune call-site searches; and `make ci`.
+- **Gate result:** all 5 stages passed — ruff check, ruff format, mypy,
+  store-chokepoint, and pytest; **1391 passed, 1 skipped, 91.99% coverage**.
+- **Platform limit:** cross-platform behavior was inspected but only macOS was
+  executed locally; Windows remains CI-only.
+
+### Prior findings
+
+- `P2-TEST-GAP-001`: **fixed.** `_record_open_modes` wraps the exact
+  module-local `open_store` used by each production scribe and records both the
+  initial READ inspection and the eventual write-handle open. The assertion
+  therefore cannot pass from the inspection handle alone. In an isolated
+  Codex READ flip, the Codex test failed with
+  `modes == [StoreMode.READ, StoreMode.READ]` while the Claude test passed; the
+  inverse Claude READ flip failed only the Claude test. The two seams are pinned
+  independently as requested.
+- `P2-DOCS-PLAN-ACCURACY-002`: **fixed.** Spec §1 now says a contended capture
+  **MUST NOT** claim the bare base, **even when it is absent**, and MUST start at
+  `__g0001`; this forbids the exact behavior behind
+  `P1-DATA-INTEGRITY-001`. The same section defines the generation tiebreak as
+  numeric (`__g10000` after `__g9999`), requires the project lock around every
+  mutating pass, and marks G4/prune's TOCTOU closed structurally. The matching
+  `how-it-works.md` entries say the same. No remaining sentence in §1 or
+  `how-it-works.md` says the project lock is absent, limits no-loss to one
+  mutating process, or claims prune's race is live.
+
+### P3-DOCS-PLAN-ACCURACY-003 — source/ADR still attribute claim order to zero-padding
+
+- **severity:** nit (P3), non-blocking
+- **location:** `src/neurobase/core/store.py:284-288`,
+  `docs/adr/0023-project-store-write-lock.md:214-220`
+- **issue:** both passages still say the zero-padded `__gNNNN` suffix sorts in
+  claim order. That stops being true at `__g9999`/`__g10000`, which is why
+  `list_raw` now parses the generation numerically. The implementation,
+  regression, canonical §1, and `how-it-works.md` are correct, so this does not
+  weaken the landed safety contract or block approval; it is stale explanatory
+  wording.
+- **suggested direction:** when next touching ADR-0023/store documentation,
+  say that the suffix is a numeric within-instant tiebreak rather than crediting
+  zero-padding or lexical order.
+- **resolution:** **resolved** (post-approval, docs-only). `_claim_fresh_raw_path`'s
+  docstring (`core/store.py`) and ADR-0023's P1-CORRECTNESS-006 paragraph now say
+  the generation is compared **numerically** (`__g10000` after `__g9999`) and drop
+  the "sorts in claim order"/zero-padding wording; a holder's bare base sorting
+  ahead of its `__gNNNN` contenders is stated explicitly. No logic change; the
+  landed sort key and regressions already implemented this.
+
+**Round-3 verdict:** approve — the two requested P2 resolutions are verified,
+the P1 base-reservation invariant is now canonical, and no required changes
+remain.

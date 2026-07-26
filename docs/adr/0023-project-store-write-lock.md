@@ -212,11 +212,13 @@ silently no-op on a user's request.
   filename unique did so by fabricating a later timestamp — and a fabricated time
   inverts against another session's real one. Fixed at the root in two parts:
   (a) `list_raw` sorts by the parsed `captured_at` frontmatter (the authoritative
-  field) with the filename as a stable tiebreak, so ordering no longer depends on
-  `agent`/`sid8` bytes; (b) `captured_at` is **never modified** — a same-instant
-  same-key collision (near-impossible with a truthful microsecond `now`) is
-  disambiguated by a zero-padded **generation suffix** `__g0001` in the *filename
-  only*, which sorts after the base and in claim order within that instant. Four
+  field), with the generation compared **numerically** as a stable within-instant
+  tiebreak (`__g10000` after `__g9999`; a lexical filename sort would invert them),
+  so ordering no longer depends on `agent`/`sid8` bytes; (b) `captured_at` is
+  **never modified** — a same-instant same-key collision (near-impossible with a
+  truthful microsecond `now`) is disambiguated by a **generation suffix** `__g0001`
+  in the *filename only*, and a holder's bare base sorts ahead of its `__gNNNN`
+  contenders. Four
   revisions are retracted along the way, each of which fabricated event time to buy
   filename uniqueness: `-2`/`-3` suffixes (also broke sort), advancing only the
   filename (path/frontmatter disagreed), advancing a whole second, and advancing a

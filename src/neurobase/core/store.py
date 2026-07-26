@@ -283,11 +283,11 @@ def _claim_fresh_raw_path(
 
     Ordering does not depend on the suffix: ``list_raw`` sorts by the authoritative
     ``captured_at`` frontmatter (identical for every generation of one instant),
-    and the suffix is only the stable tiebreak within that instant — zero-padded
-    so it sorts in claim order, and placed after ``_sid8`` where ``.`` (a holder's
-    base ``.md``) sorts before ``_`` so the holder's capture leads its contenders.
-    Each candidate is claimed with ``O_CREAT | O_EXCL`` so two racing callers
-    never settle on one name."""
+    and the suffix is only the stable tiebreak within that instant — compared
+    **numerically** (`__g10000` after `__g9999`; a lexical filename sort would
+    invert them), and a holder's bare ``.md`` base sorts ahead of its ``__gNNNN``
+    contenders (`.` < `_`). Each candidate is claimed with ``O_CREAT | O_EXCL`` so
+    two racing callers never settle on one name."""
     base = raw_path(root, project, captured_at, agent, session_id)
     base.parent.mkdir(parents=True, exist_ok=True)
     generation = 1

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Sessions{% endblock %}
+{% block crumb %}Sessions{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1>Sessions</h1>
+    <p class="hero-sub">Every captured agent session — raw, before the curator folds it into memory.</p>
+  </div>
+  <div class="hero-pills">
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ rows | length }} captures</span>
+    <span class="hero-pill">{{ unconsumed }} unconsumed</span>
+  </div>
+</div>
+
+<div class="dash-lower">
+  <section class="card">
+    <div class="card-head">
+      <div><h2>Captures</h2><p>Newest first — open one to read its redacted transcript</p></div>
+      <div class="right"><span class="tiny-pill">{{ rows | length }} total</span></div>
+    </div>
+    {% if rows %}
+    <table>
+      <thead>
+        <tr><th>Session</th><th>Agent</th><th>Project</th><th>Branch</th><th>Captured</th><th>State</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td><a class="mono" href="/sessions/{{ row.project }}/{{ row.file }}">{{ row.session }}</a></td>
+          <td>{{ row.agent }}</td>
+          <td>{{ row.project }}</td>
+          <td class="mono">{{ row.branch }}</td>
+          <td class="mono">{{ row.captured_at[:19] if row.captured_at else "" }}</td>
+          <td><span class="status-chip {{ 'accepted' if row.consumed else 'proposed' }}">{{ 'consumed' if row.consumed else 'unconsumed' }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No sessions captured yet. They appear here as agents run with Neurobase hooks installed.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

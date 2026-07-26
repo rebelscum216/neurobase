@@ -12,7 +12,7 @@ from pathlib import Path
 from starlette.applications import Starlette
 from starlette.templating import Jinja2Templates
 
-from neurobase.webui.routes import suggestions_routes
+from neurobase.webui.routes import all_routes
 from neurobase.webui.security import CSRF_FORM_FIELD, CSRFMiddleware, new_csrf_token
 from neurobase.webui.shell import shell_context
 
@@ -49,7 +49,7 @@ def build_app(root: Path) -> Starlette:
     # global for the same reason as CSRF_FORM_FIELD above.
     templates.env.globals["store_root_label"] = _store_root_label(root)
 
-    app = Starlette(routes=suggestions_routes())
+    app = Starlette(routes=all_routes())
     app.state.root = root
     app.state.templates = templates
     app.state.csrf_token = new_csrf_token()

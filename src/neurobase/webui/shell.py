@@ -26,7 +26,7 @@ from neurobase.recommender import proposals
 # home surface). Flip ``enabled`` to True as each surface's route is added.
 _NAV: list[tuple[str, str, str, str, bool]] = [
     ("graph", "Graph", "◉", "/graph", False),
-    ("sessions", "Sessions", "◵", "/sessions", False),
+    ("sessions", "Sessions", "◵", "/sessions", True),
     ("memory", "Memory", "◈", "/memory", False),
     ("suggestions", "Suggestions", "△", "/suggestions", True),
     ("skills", "Skills", "✦", "/skills", False),

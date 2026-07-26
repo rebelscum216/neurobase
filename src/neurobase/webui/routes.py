@@ -26,7 +26,9 @@ from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
-from neurobase.core import store
+from neurobase.core import redact, store
+from neurobase.core.config import load_config
+from neurobase.core.store_handle import StoreMode, open_store
 from neurobase.recommender import corpus as recommend_corpus
 from neurobase.recommender import install, proposals
 from neurobase.recommender import metrics as recommend_metrics
@@ -48,6 +50,20 @@ def suggestions_routes() -> list[Route]:
         Route("/suggestions/{slug}/reject", _reject_view, methods=["POST"]),
         Route("/suggestions/{slug}/edit", _edit_view, methods=["GET", "POST"]),
     ]
+
+
+def sessions_routes() -> list[Route]:
+    """The Sessions surface (app-shell plan, Phase 2b): a read-only browser over
+    the raw captures the scribes write, before the curator folds them."""
+    return [
+        Route("/sessions", _list_sessions, methods=["GET"]),
+        Route("/sessions/{project}/{file}", _session_detail, methods=["GET"]),
+    ]
+
+
+def all_routes() -> list[Route]:
+    """Every surface's routes, in one table for the Starlette app (``app.py``)."""
+    return [*suggestions_routes(), *sessions_routes()]
 
 
 # --- small shared helpers ---------------------------------------------------
@@ -417,4 +433,88 @@ async def _edit_view(request: Request) -> Response:
     return _redirect_with_flash(slug, "Draft updated.")
 
 
-__all__ = ["suggestions_routes"]
+# --- Sessions (Phase 2b) ----------------------------------------------------
+
+
+def _redact_display(text: str) -> str:
+    """Redact at display time on every raw surface — a raw is scrubbed at capture
+    (D13), but a legacy/hand-edited capture may carry secrets the scribe never
+    saw, so re-scrub with the same pass every write path uses (§14 defense)."""
+    return redact.redact(text, load_config().redact.extra_patterns)
+
+
+def _capture_path(raw_dir: Path, file: str) -> Path | None:
+    """Resolve a capture filename to a real file **directly inside** ``raw_dir``,
+    or ``None``. Defense-in-depth: ``{file}`` is a single URL segment (Starlette
+    won't match a ``/``), but a crafted ``..``-bearing name is refused here rather
+    than trusted — the resolved path must have ``raw_dir`` as its immediate parent,
+    so it can neither escape the project's ``raw/`` nor dip into a subdirectory.
+    ``raw_dir`` must already be ``.resolve()``-d by the caller."""
+    path = (raw_dir / file).resolve()
+    if path.parent != raw_dir or not path.is_file():
+        return None
+    return path
+
+
+def _session_row(project: str, doc: store.Document) -> dict[str, Any]:
+    session_id = str(doc.get("session_id") or "")
+    return {
+        "project": project,
+        "file": doc.file_path.name,
+        "session": session_id[:8] or "—",
+        "agent": str(doc.get("agent") or "—"),
+        "branch": str(doc.get("branch") or "—"),
+        "captured_at": doc.get("captured_at"),
+        "consumed": bool(doc.get("consumed")),
+    }
+
+
+async def _list_sessions(request: Request) -> Response:
+    root = _root(request)
+    handle = open_store(root, StoreMode.READ)
+    rows: list[dict[str, Any]] = []
+    for project in handle.load_registry():
+        try:
+            for doc in handle.list_raw(project, unconsumed_only=False):
+                rows.append(_session_row(project, doc))
+        except (OSError, ValueError):
+            continue  # one unreadable project must not blank the whole surface
+    # Newest capture first — most recent activity at the top of a review list.
+    rows.sort(key=lambda r: str(r["captured_at"] or ""), reverse=True)
+    unconsumed = sum(1 for r in rows if not r["consumed"])
+    context = {"rows": rows, "unconsumed": unconsumed}
+    return _templates(request).TemplateResponse(request, "sessions_list.html", context)
+
+
+async def _session_detail(request: Request) -> Response:
+    root = _root(request)
+    project = request.path_params["project"]
+    file = request.path_params["file"]
+    handle = open_store(root, StoreMode.READ)
+    try:
+        raw_dir = (handle.memory_dir(project) / "raw").resolve()
+    except store.InvalidSlugError:
+        return _error_response(request, 404, "Unknown project.")
+    path = _capture_path(raw_dir, file)
+    if path is None:
+        return _error_response(request, 404, "No such capture.")
+    try:
+        doc = store.read_doc(path)
+    except (ValueError, OSError):
+        return _error_response(request, 404, "This capture is unreadable.")
+    session_id = str(doc.get("session_id") or "")
+    context = {
+        "project": project,
+        "session": session_id[:8] or "—",
+        "session_full": session_id,
+        "agent": str(doc.get("agent") or "—"),
+        "branch": str(doc.get("branch") or "—"),
+        "cwd": str(doc.get("cwd") or "—"),
+        "captured_at": doc.get("captured_at"),
+        "consumed": bool(doc.get("consumed")),
+        "body": _redact_display(doc.body),
+    }
+    return _templates(request).TemplateResponse(request, "session_detail.html", context)
+
+
+__all__ = ["all_routes", "sessions_routes", "suggestions_routes"]

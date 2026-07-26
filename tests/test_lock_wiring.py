@@ -99,6 +99,22 @@ def _mem(root: Path) -> Path:
     return store.memory_dir(PROJECT, root)
 
 
+def _record_open_modes(monkeypatch: pytest.MonkeyPatch, module: Any) -> list[StoreMode]:
+    """Patch ``module.open_store`` to record the ``StoreMode`` of every handle it
+    opens (delegating to the real one), so a test can assert the entry point
+    commits its writes through a WRITE handle — behaviour alone can't show it,
+    since ``StoreHandle`` does not yet enforce mode on its write methods."""
+    modes: list[StoreMode] = []
+    real_open = module.open_store
+
+    def _spy_open(root_: Path, mode: StoreMode) -> Any:
+        modes.append(mode)
+        return real_open(root_, mode)
+
+    monkeypatch.setattr(module, "open_store", _spy_open)
+    return modes
+
+
 def _codex_rollout(path: Path, cwd: str, agent_msg: str) -> Path:
     """§11.2-shaped rollout with a **stable** session-start timestamp — so the
     codex scribe's ordinary write is session-keyed and a second capture would
@@ -157,9 +173,13 @@ def test_codex_scribe_routes_a_contended_capture_through_the_guard(
     """With a pass holding the lock, the **real** codex scribe must reach for the
     project lock (non-blocking) and, losing it, write a fresh raw rather than
     overwrite the session-keyed one a curator may be consuming. Revert the scribe
-    to a bare ``store.write_raw`` and no ``blocking=False`` acquire is recorded."""
+    to a bare ``store.write_raw`` and no ``blocking=False`` acquire is recorded.
+    The capture must also be committed through a **WRITE** handle (round 1 asked
+    for this explicitly): flip the scribe's ``open_store`` to ``READ`` and the
+    handle assertion — not behaviour — is what catches it."""
     root, repo = _enable(tmp_path)
     spy = _LockSpy(monkeypatch)
+    modes = _record_open_modes(monkeypatch, codex_scribe)
     rollout = _codex_rollout(tmp_path / "rollout.jsonl", str(repo), "did the thing")
 
     with lock.project_lock(_mem(root)):  # a curate pass holds it
@@ -170,15 +190,19 @@ def test_codex_scribe_routes_a_contended_capture_through_the_guard(
         "the codex scribe did not take the non-blocking project lock — it bypassed the guard"
     )
     assert "__g" in written.name, "a contended capture must land on a fresh generation-suffixed raw"
+    assert StoreMode.WRITE in modes, (
+        "the codex scribe must commit its capture through a WRITE handle"
+    )
 
 
 def test_claude_scribe_routes_a_contended_capture_through_the_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The same guarantee for the claude scribe (identical ``write_raw_guarded``
-    call site, separately revertable)."""
+    """The same guarantees for the claude scribe (identical ``write_raw_guarded``
+    call site and WRITE handle, separately revertable)."""
     root, repo = _enable(tmp_path)
     spy = _LockSpy(monkeypatch)
+    modes = _record_open_modes(monkeypatch, claude_scribe)
     transcript = _claude_transcript(tmp_path / "t.jsonl", str(repo), "fixed the null check")
 
     with lock.project_lock(_mem(root)):
@@ -191,6 +215,9 @@ def test_claude_scribe_routes_a_contended_capture_through_the_guard(
         "the claude scribe did not take the non-blocking project lock — it bypassed the guard"
     )
     assert "__g" in written.name, "a contended capture must land on a fresh generation-suffixed raw"
+    assert StoreMode.WRITE in modes, (
+        "the claude scribe must commit its capture through a WRITE handle"
+    )
 
 
 # --- seed import: blocking lock around a WRITE handle's curated writes ----------

@@ -6,7 +6,7 @@ reviewer: codex
 branch: feat/store-write-lock-v2
 diff: git diff main...feat/store-write-lock-v2
 created: 2026-07-24
-round: 2
+round: 3
 ---
 
 # Review: per-project store write lock (v2) — ADR-0023, resolves G4
@@ -310,6 +310,152 @@ depth-at-write-time check actually pin "mutation inside the lock", or can a
 curated write slip past it? (3) the new numeric sort key — any raw whose
 `captured_at` is authoritative-but-absent still ordering deterministically?
 
-## Reviewer findings — round 2  _(Reviewer — Codex)_
+## Reviewer findings -- round 2  _(Reviewer — Codex)_
 
-_(Codex appends round-2 findings here, then sets the `status:` field.)_
+**Round 2 verdict: CHANGES REQUESTED** — the P1 namespace defect and three of
+the four other round-1 findings are fixed. `P2-TEST-GAP-001` is only partially
+fixed, and the full-branch review found one new P2 contract-document
+inconsistency.
+
+### Review scope
+
+- **Artifact:** `feat/store-write-lock-v2` at
+  `c58dc4a275643203e156bcd474dd8d2bdd2661a0`, pass/round 2.
+- **Diffs reviewed:** `git diff main...feat/store-write-lock-v2` and
+  `git diff ae41b57..HEAD`.
+- **Areas inspected:** all round-2 changes; the raw-claim and ordering code; both
+  scribe call sites; seed, MCP, CLI, and curator lock wiring; the canonical spec,
+  ADR, known-gap entry, and implementation guide.
+- **Commands run:** `git diff --check` for both ranges; the store-chokepoint
+  guard; the three lock/raw/wiring suites (39 passed); and `make ci`.
+- **Gate result:** all 5 stages passed — ruff check, ruff format, mypy,
+  store-chokepoint, and pytest; **1391 passed, 1 skipped, 91.99% coverage**.
+  The local environment resolved `filelock 3.29.6`.
+- **Platform limit:** cross-platform behavior was inspected but only macOS was
+  executed locally; the branch's Windows execution remains CI-only.
+
+### Prior findings
+
+- `P1-DATA-INTEGRITY-001`: **fixed.** `_claim_fresh_raw_path` starts at
+  generation 1, so a contended capture always claims `__gNNNN`; every ordinary
+  production scribe write remains the bare `raw_path`. The two namespaces are
+  disjoint whether the loser or holder writes first, and the regression checks
+  both bodies survive in both orderings.
+- `P2-TEST-GAP-001`: **partially fixed.** `_LockSpy` genuinely pins the current
+  seed/MCP curated writes inside the lock, and the CLI/engine contention paths
+  are covered. The requested scribe WRITE-handle assertion is still absent; see
+  the remaining finding below.
+- `P2-CORRECTNESS-001`: **fixed.** The sort key parses generations as integers,
+  so `__g10000` follows `__g9999`. For an absent/unparseable `captured_at`, the
+  key still has a total deterministic order:
+  `(MIN, canonical_name, numeric_generation, full_name)`.
+- `P2-ROLLOUT-CONFIG-001`: **fixed.** Both `pyproject.toml` and `uv.lock` require
+  `filelock>=3.24.0`; the lock resolves 3.29.6.
+- `P3-DOCS-PLAN-ACCURACY-001`: **fixed as originally scoped.** G4 now labels its
+  old analysis as historical, and ADR-0023 has current gate evidence and
+  symbol-based references.
+
+### P2-TEST-GAP-001 — scribe WRITE-handle seam remains unpinned
+
+- **severity:** major (P2), still open from round 1
+- **location:** `tests/test_lock_wiring.py:154-193`,
+  `src/neurobase/adapters/claude/scribe.py:340-342`,
+  `src/neurobase/adapters/codex/scribe.py:321-324`
+- **issue:** the new scribe tests prove each real entry point reaches a
+  non-blocking `write_raw_guarded` call and produces a generation-suffixed raw
+  under contention. They do not inspect the handle passed to that guard. Changing
+  either production call from `open_store(..., StoreMode.WRITE)` to
+  `StoreMode.READ` leaves these tests green; `StoreHandle` does not currently
+  enforce mode on its write methods, so behavior alone does not expose the
+  regression. Round 1 explicitly requested that the port test assert both
+  scribes pass a WRITE handle.
+- **depth-spy verification:** `_LockSpy` itself is sound for the curated-write
+  claim it makes. It wraps the same module-level `lock.project_lock` used by seed
+  and MCP, increments depth only after the real acquire succeeds, and patches
+  the exact `_atomic_write_text` reached by `upsert_curated` through `write_doc`.
+  With the current synchronous entry points, removing either `with
+  project_lock(...)` makes the real curated write occur at depth zero; it cannot
+  slip past that check.
+- **suggested direction:** at each real scribe entry point, record the
+  `open_store` mode or inspect the handle delivered to `write_raw_guarded`, and
+  assert `StoreMode.WRITE`. The regression should fail independently for either
+  scribe changed to READ.
+- **resolution:** **resolved** (round 3). Added `_record_open_modes`
+  (`tests/test_lock_wiring.py`), which patches a scribe module's `open_store` to
+  record each handle's `StoreMode`. Both scribe tests now assert
+  `StoreMode.WRITE in modes` (the guarded-write handle), alongside the existing
+  lock + suffix assertions. Verified faithful by mutation: flipping the **codex**
+  scribe's `open_store(root, StoreMode.WRITE)` to `READ` fails *only*
+  `test_codex_scribe_…` (the claude test stays green), and vice-versa — the two
+  fail independently, exactly as requested. Behaviour alone would not catch it
+  (`StoreHandle` still doesn't enforce mode on writes); the handle assertion does.
+
+### P2-DOCS-PLAN-ACCURACY-002 — canonical §1 contradicts the landed safety contract
+
+- **severity:** major (P2), new in round 2
+- **location:** `docs/neurobase-spec-appendix.md:101-138`,
+  `docs/neurobase-spec-appendix.md:197-216`,
+  `docs/how-it-works.md:461`, `docs/how-it-works.md:471`
+- **issue:** the round-2 P1 fix depends on a load-bearing rule: every contended
+  capture starts at `__g0001` and the bare base is reserved for an ordinary lock
+  holder. The canonical spec still describes the suffix only as disambiguation
+  for a same-instant collision and says it “sorts ... in claim order”; it never
+  makes base reservation a MUST, and the lexical claim is false at
+  `__g9999`/`__g10000` now that the implementation sorts numerically. Later in
+  the same §1, the spec still says there is no project-level lock, calls the
+  prune race unfixed, and limits no-loss to one mutating process — directly
+  contradicting §1's newly added lock contract at lines 139-149.
+  `docs/how-it-works.md` repeats both stale claims: `unique=True` allegedly uses
+  the bare base unless there is a collision, and G4's prune TOCTOU is allegedly
+  still live. Because the appendix is “law,” it currently permits the exact
+  bare-base behavior that caused `P1-DATA-INTEGRITY-001` and is internally
+  inconsistent about whether the lock exists.
+- **suggested direction:** update canonical §1 to require that every contended
+  capture use `__g0001+` and never claim the holder's bare base; describe the
+  numeric generation tiebreak rather than lexical suffix order; replace or
+  explicitly historicalize the obsolete no-lock/prune limitation; and make the
+  matching `how-it-works.md` descriptions agree. The existing holder/loser and
+  9,999/10,000 regressions can enforce the resulting MUSTs.
+- **resolution:** **resolved** (round 3). Canonical §1
+  (`docs/neurobase-spec-appendix.md`) now states the base-reservation as a MUST
+  — a contended capture always uses `__g0001+` and **never** claims the holder's
+  bare base, with the P1 rationale — and describes the generation tiebreak as
+  **numeric** (`__g10000` after `__g9999`), retiring the false lexical claim. The
+  stale "there is **no** project-level store lock" sentence in the tombstone
+  section is replaced with the lock contract, and the "Known limitation (G4)"
+  blockquote is rewritten as **G4 — closed by the project write lock** (prune's
+  TOCTOU closed structurally; no-loss now holds across concurrent passes; soft-
+  lock degradation kept as the residual). `docs/how-it-works.md` is brought into
+  agreement on both points (`write_raw`'s always-suffixed contended name; prune's
+  TOCTOU closed by the lock). The holder/loser and 9,999/10,000 regressions
+  enforce the resulting MUSTs.
+
+**Round-2 verdict:** changes-requested — the implementation's P1 mechanics are
+sound and the full gate is green, but the outstanding scribe mode regression
+test and the contradictory canonical contract should be corrected before
+approval.
+
+---
+
+## Round 3 — author response  _(Claude)_
+
+Both round-2 findings are addressed above (each `resolution:` block, marked
+**resolved**), landed as a second follow-up commit on `feat/store-write-lock-v2`
+over the round-2 tip `c58dc4a` (no amend/rebase). Full gate green: `make ci` at
+**1391 passed, 1 skipped, 91.99% cov**, 5/5 stages, store-chokepoint clean.
+
+- **P2-TEST-GAP-001** (scribe WRITE-handle seam): closed with a mutation-verified
+  handle assertion on both scribes, each failing independently under a READ flip.
+- **P2-DOCS-PLAN-ACCURACY-002** (canonical §1 vs the landed contract): the spec
+  now *requires* the base-reservation the P1 fix depends on, describes the numeric
+  tiebreak, and no longer says the lock is absent or prune's race is live;
+  `how-it-works.md` matches.
+
+**Please re-review the round-3 delta** (`git diff c58dc4a..HEAD`): the spec §1
+edits (does the base-reservation MUST now truly forbid the bare-base behavior,
+and is anything elsewhere in §1 still contradicting the lock?) and the two new
+scribe handle assertions.
+
+## Reviewer findings — round 3  _(Reviewer — Codex)_
+
+_(Codex appends round-3 findings here, then sets the `status:` field.)_

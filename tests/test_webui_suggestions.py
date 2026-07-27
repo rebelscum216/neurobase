@@ -138,17 +138,60 @@ def _preview_fingerprint(client: TestClient, slug: str) -> str:
 # --- list ---------------------------------------------------------------------
 
 
-def test_list_renders_all_three_statuses(client: TestClient, seed: Seed) -> None:
+def test_queue_defaults_to_pending_only(client: TestClient, seed: Seed) -> None:
+    """The queue is a *review* queue: by default it shows only pending
+    (proposed) proposals, so decided items don't clutter it — matching the rail
+    badge, which also counts only pending. The filter chips reach the rest."""
     response = client.get("/suggestions")
     assert response.status_code == 200
     assert seed.proposed_slug in response.text
-    assert seed.accepted_slug in response.text
-    assert seed.rejected_slug in response.text
-    assert "status-chip proposed" in response.text
-    assert "status-chip accepted" in response.text
-    assert "status-chip rejected" in response.text
-    # The metrics strip (metrics.compute_metrics) rendered without a crash.
-    assert "Decided" in response.text
+    assert seed.accepted_slug not in response.text  # accepted filtered out of default
+    assert seed.rejected_slug not in response.text  # rejected too
+    assert 'href="/suggestions?status=all"' in response.text  # filter chips present
+    assert 'href="/suggestions?status=rejected"' in response.text
+
+
+def test_status_filter_selects_the_asked_for_status(client: TestClient, seed: Seed) -> None:
+    all_text = client.get("/suggestions", params={"status": "all"}).text
+    assert seed.proposed_slug in all_text
+    assert seed.accepted_slug in all_text
+    assert seed.rejected_slug in all_text
+
+    rejected_text = client.get("/suggestions", params={"status": "rejected"}).text
+    assert seed.rejected_slug in rejected_text
+    assert seed.proposed_slug not in rejected_text  # only rejected shown
+
+
+def test_default_pane_shows_recommender_health(client: TestClient) -> None:
+    # With nothing selected, the right pane is the metrics overview (no crash).
+    assert "Recommender health" in client.get("/suggestions").text
+
+
+def test_clicking_a_proposal_previews_it_inline(client: TestClient, seed: Seed) -> None:
+    response = client.get(f"/suggestions/{seed.proposed_slug}")
+    assert response.status_code == 200
+    assert 'class="split"' in response.text  # two-pane, queue still on the left
+    assert "Always use uv run." in response.text  # the draft in the right pane
+    assert f"/suggestions/{seed.proposed_slug}?view=full" in response.text  # open-as-page
+    # a proposed proposal offers the inline reject form
+    assert f'action="/suggestions/{seed.proposed_slug}/reject"' in response.text
+
+
+def test_suggestion_fragment_is_pane_only_and_keeps_csrf(client: TestClient, seed: Seed) -> None:
+    """The ?fragment=1 swap must be pane-only AND still carry the CSRF token, or
+    the inline reject form it contains would be unusable after a no-reload swap."""
+    html = client.get(f"/suggestions/{seed.proposed_slug}", params={"fragment": "1"}).text
+    assert "Always use uv run." in html
+    assert "<html" not in html.lower(), "fragment must not carry the page shell"
+    assert 'class="split"' not in html, "fragment must be the pane only"
+    assert 'name="csrf_token"' in html, "fragment lost the CSRF token for its reject form"
+
+
+def test_suggestion_open_as_page_is_standalone(client: TestClient, seed: Seed) -> None:
+    html = client.get(f"/suggestions/{seed.proposed_slug}", params={"view": "full"}).text
+    assert "Always use uv run." in html
+    assert 'class="split"' not in html
+    assert "page narrow" in html
 
 
 # --- detail ---------------------------------------------------------------------

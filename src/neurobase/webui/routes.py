@@ -185,11 +185,45 @@ def _list_row(doc: store.Document) -> dict[str, Any]:
     }
 
 
-async def _list_suggestions(request: Request) -> Response:
+# The queue filter chips: label → the statuses each shows. "pending" is the
+# default so the queue is the *review* queue (decided items are one click away),
+# matching the rail badge which also counts only pending.
+_STATUS_FILTERS: dict[str, frozenset[str]] = {
+    "pending": frozenset({"proposed"}),
+    "accepted": frozenset({"accepted"}),
+    "rejected": frozenset({"rejected"}),
+    "all": frozenset({"proposed", "accepted", "rejected", "superseded"}),
+}
+
+
+def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        key: sum(1 for r in rows if str(r["status"]) in statuses)
+        for key, statuses in _STATUS_FILTERS.items()
+    }
+
+
+def _suggestions_context(request: Request, sel: dict[str, Any] | None) -> dict[str, Any]:
+    """Shared two-pane context: the (filtered) queue on the left, plus the
+    selected proposal or the metrics overview on the right."""
     root = _root(request)
-    rows = [_list_row(doc) for doc in proposals.load_all_proposals(root)]
-    result = recommend_metrics.compute_metrics(root)
-    context = {"rows": rows, "metrics": _metrics_context(result)}
+    all_rows = [_list_row(doc) for doc in proposals.load_all_proposals(root)]
+    status = request.query_params.get("status", "pending")
+    if status not in _STATUS_FILTERS:
+        status = "pending"
+    rows = [r for r in all_rows if str(r["status"]) in _STATUS_FILTERS[status]]
+    return {
+        **_base_context(request),
+        "rows": rows,
+        "counts": _status_counts(all_rows),
+        "status": status,
+        "metrics": _metrics_context(recommend_metrics.compute_metrics(root)),
+        "sel": sel,
+    }
+
+
+async def _list_suggestions(request: Request) -> Response:
+    context = _suggestions_context(request, sel=None)
     return _templates(request).TemplateResponse(request, "suggestions_list.html", context)
 
 
@@ -233,8 +267,7 @@ async def _suggestion_detail(request: Request) -> Response:
         return _error_response(request, 404, f"proposal {slug!r} not found or malformed")
 
     scores = doc.get("scores") if isinstance(doc.get("scores"), dict) else {}
-    context: dict[str, Any] = {
-        **_base_context(request),
+    sel: dict[str, Any] = {
         "slug": slug,
         "status": str(doc.get("status") or ""),
         "type": doc.get("type"),
@@ -254,7 +287,18 @@ async def _suggestion_detail(request: Request) -> Response:
         "history": proposals.ledger_history(root, slug),
         "flash": request.query_params.get("flash"),
     }
-    return _templates(request).TemplateResponse(request, "suggestion_detail.html", context)
+    # ?fragment=1 → just the right-pane HTML (swapped in without reload); the
+    # reject form inside needs the CSRF token, so pass _base_context. ?view=full →
+    # the standalone page; otherwise the proposal opens inline in the two-pane.
+    if request.query_params.get("fragment"):
+        ctx = {**_base_context(request), "sel": sel}
+        return _templates(request).TemplateResponse(request, "_suggestion_pane.html", ctx)
+    if request.query_params.get("view") == "full":
+        ctx = {**_base_context(request), "sel": sel}
+        return _templates(request).TemplateResponse(request, "suggestion_detail.html", ctx)
+    return _templates(request).TemplateResponse(
+        request, "suggestions_list.html", _suggestions_context(request, sel=sel)
+    )
 
 
 # --- GET/POST /suggestions/{slug}/accept ------------------------------------

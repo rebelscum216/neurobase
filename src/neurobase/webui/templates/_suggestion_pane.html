@@ -1,0 +1,9 @@
+{# The right-hand detail pane for one proposal: a header (slug + status + "open
+   as page") over the actions and the shared detail card. Rendered inside the
+   two-pane list and as the ?fragment=1 response the list's inline JS swaps in. #}
+<div class="pane-head">
+  <div class="who"><span class="mono">{{ sel.slug }}</span> <span class="status-chip {{ sel.status }}">{{ sel.status }}</span></div>
+  <a class="btn" href="/suggestions/{{ sel.slug }}?view=full" title="Open this proposal as its own page">⤢ Open as page</a>
+</div>
+{% include "_suggestion_actions.html" %}
+{% include "_suggestion_card.html" %}

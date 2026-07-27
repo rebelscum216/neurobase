@@ -1097,6 +1097,29 @@ def recommend_revert(
     typer.echo(f"Reverted proposal {slug} to proposed.")
 
 
+@recommend_app.command("reopen")
+def recommend_reopen(
+    slug: str,
+    root: str | None = typer.Option(None, "--root"),
+) -> None:
+    """Reconsider a rejection: return a rejected proposal to the review queue
+    (ADR-0024).
+
+    Flips `status: rejected` → `proposed` and appends a `reopened` ledger event —
+    the one sanctioned way back from `rejected`. Only a rejected proposal can be
+    reopened: an accepted one has `revert` / re-check, and a superseded one was
+    replaced by a newer proposal. The prior rejection stays in the ledger.
+    """
+    resolved_root = store.resolve_root(root)
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
+    try:
+        prior = proposals.reopen_proposal(handle.root, slug)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Reopened proposal {slug} ({prior} → proposed).")
+
+
 @recommend_app.command("accept")
 def recommend_accept(
     slug: str,

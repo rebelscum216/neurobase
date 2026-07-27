@@ -49,6 +49,7 @@ def suggestions_routes() -> list[Route]:
         Route("/suggestions/{slug}", _suggestion_detail, methods=["GET"]),
         Route("/suggestions/{slug}/accept", _accept_view, methods=["GET", "POST"]),
         Route("/suggestions/{slug}/reject", _reject_view, methods=["POST"]),
+        Route("/suggestions/{slug}/reopen", _reopen_view, methods=["POST"]),
         Route("/suggestions/{slug}/edit", _edit_view, methods=["GET", "POST"]),
     ]
 
@@ -464,6 +465,23 @@ async def _reject_view(request: Request) -> Response:
     except ValueError as exc:
         return _error_response(request, 409, str(exc))
     return _redirect_with_flash(slug, "Rejected.")
+
+
+async def _reopen_view(request: Request) -> Response:
+    """Reconsider a rejected proposal (ADR-0024). The app-wide CSRF/same-origin
+    gate has already cleared this POST; ``reopen_proposal`` re-checks the status
+    at write time and refuses anything but ``rejected`` with a named-status 409,
+    so a stale "Reconsider" link fails closed rather than mis-transitioning."""
+    root = _root(request)
+    slug = request.path_params["slug"]
+    doc = proposals.load_proposal(root, slug)
+    if doc is None:
+        return _error_response(request, 404, f"proposal {slug!r} not found or malformed")
+    try:
+        proposals.reopen_proposal(root, slug)
+    except ValueError as exc:
+        return _error_response(request, 409, str(exc))
+    return _redirect_with_flash(slug, "Reopened — back in the review queue.")
 
 
 # --- GET/POST /suggestions/{slug}/edit --------------------------------------

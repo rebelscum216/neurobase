@@ -756,6 +756,44 @@ def revert_refusal(slug: str, doc: store.Document, state: str) -> str | None:
     )
 
 
+def reopen_proposal(root: Path, slug: str, *, now: datetime | None = None) -> str:
+    """Reconsider a **rejected** proposal: flip it back to ``proposed`` and append
+    one ``reopened`` ledger event. This is the only sanctioned
+    ``rejected → proposed`` transition (ADR-0024). Returns the prior status
+    (always ``"rejected"`` on success).
+
+    §12.7 keeps a decided proposal durable so the *miner* never silently
+    re-surfaces something the user already judged — but a user may change their
+    mind. ``reopen`` is that explicit, ledgered action, and is deliberately narrow:
+
+    - **Only ``rejected`` reopens.** ``accepted`` has its own paths (re-check /
+      ``revert``, ADR-0020); a ``superseded`` proposal was replaced by a newer one,
+      so reopening it would resurrect a duplicate — both are refused with a
+      named-status error, exactly like the other blocked-status rules (§12.7).
+    - The prior rejection **stays in the ledger** (and in the per-type reject
+      feedback the miner reads): reconsidering does not rewrite the fact that it
+      was rejected once. The next ``recommend run`` sees a live ``proposed``
+      proposal and updates it in place rather than minting a duplicate."""
+    doc = load_proposal(root, slug)
+    if doc is None:
+        raise ValueError(f"proposal {slug!r} not found or malformed")
+    status = str(doc.get("status") or "proposed")
+    if status != "rejected":
+        raise ValueError(
+            f"cannot reopen proposal {slug!r}: status is {status} "
+            "(only a rejected proposal can be reopened)"
+        )
+    stamp = _iso(now if now is not None else datetime.now(UTC))
+    frontmatter = dict(doc.frontmatter)
+    frontmatter["status"] = "proposed"
+    frontmatter["updated_at"] = stamp
+    store.write_doc(doc.file_path, frontmatter, doc.body)
+    candidate_type = doc.get("candidate_type")
+    ct = candidate_type if isinstance(candidate_type, str) and candidate_type else None
+    _append_ledger(root, slug, "reopened", stamp, ct)
+    return status
+
+
 # --- body rendering + redaction ---------------------------------------------
 
 

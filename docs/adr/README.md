@@ -54,6 +54,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0021](0021-webui-surface.md) | Web UI — loopback server as a peer presentation layer (spec §14) | Accepted | Web UI Phase 1 |
 | [0022](0022-curator-fold-journal.md) | Curator fold journal + `from_raw` validation (provenance hardening, Slice B) | Proposed | provenance plan Slice B / G4 |
 | [0023](0023-project-store-write-lock.md) | Per-project store write lock — serialize mutating passes, close the prune TOCTOU | Proposed | resolves G4 |
+| [0024](0024-reopen-a-rejected-proposal.md) | `reopen` — the one sanctioned `rejected → proposed` transition (Reconsider/un-reject) | Proposed | Web UI reconsider action |
 
 ADRs 0016–0018 are the three **Phase-0** decisions promoted from the
 [hardening plan](../notes/2026-07-21-hardening-plan-draft.md) (per the

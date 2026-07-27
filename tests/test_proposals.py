@@ -528,6 +528,58 @@ def test_revert_missing_proposal_raises(tmp_path: Path) -> None:
         proposals.revert_proposal(root, "does-not-exist")
 
 
+# --- reopen (ADR-0024): the one sanctioned rejected -> proposed transition ----
+
+
+def test_reopen_flips_rejected_to_proposed_and_ledgers(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    proposals.reject_proposal(root, "prefer-uv-run", reason="not yet", now=NOW)
+
+    prior = proposals.reopen_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    assert prior == "rejected"
+    assert _read(root, "prefer-uv-run").get("status") == "proposed"
+    # the prior rejection stays in the ledger — reconsidering doesn't rewrite it
+    assert [e["event"] for e in _ledger_events(root)] == ["proposed", "rejected", "reopened"]
+
+
+def test_reopen_only_allowed_on_rejected(tmp_path: Path) -> None:
+    """rejected is the only reopenable status; proposed and accepted are hard,
+    named-status errors (a superseded one has no way back either)."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    with pytest.raises(ValueError, match="only a rejected proposal"):
+        proposals.reopen_proposal(root, "prefer-uv-run")  # still proposed
+
+    _accept_real(tmp_path, root)  # now accepted
+    with pytest.raises(ValueError, match="status is accepted"):
+        proposals.reopen_proposal(root, "prefer-uv-run")
+
+
+def test_reopen_missing_proposal_raises(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    with pytest.raises(ValueError, match="not found or malformed"):
+        proposals.reopen_proposal(root, "does-not-exist")
+
+
+def test_reopened_proposal_round_trips_and_can_be_rejected_again(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW)
+    proposals.reopen_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+    # back to proposed → a normal proposal again, re-rejectable
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=2))
+
+    assert _read(root, "prefer-uv-run").get("status") == "rejected"
+    assert [e["event"] for e in _ledger_events(root)] == [
+        "proposed",
+        "rejected",
+        "reopened",
+        "rejected",
+    ]
+
+
 def test_reverted_proposal_can_be_reaccepted(tmp_path: Path) -> None:
     """G2: a reverted proposal is a normal `proposed` one again — re-accepting it
     reinstalls the managed block and flips it back to `accepted`."""

@@ -18,5 +18,11 @@
     </form>
   {% elif sel.status == "accepted" %}
     <a class="btn" href="/suggestions/{{ sel.slug }}/accept">Re-check install</a>
+  {% elif sel.status == "rejected" %}
+    <form method="post" action="/suggestions/{{ sel.slug }}/reopen" style="margin: 0">
+      <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+      <button class="btn" type="submit" title="Return this proposal to the review queue">Reconsider</button>
+    </form>
+    <span class="hint">Reopen this rejection — it goes back to the pending queue (ADR-0024).</span>
   {% endif %}
 </div>

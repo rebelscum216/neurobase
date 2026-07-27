@@ -194,6 +194,50 @@ def test_suggestion_open_as_page_is_standalone(client: TestClient, seed: Seed) -
     assert "page narrow" in html
 
 
+# --- reconsider / reopen (ADR-0024) --------------------------------------------
+
+
+def test_rejected_proposal_offers_reconsider_and_reopen_works(
+    client: TestClient, app: Starlette, seed: Seed
+) -> None:
+    # a rejected proposal's detail shows the Reconsider form
+    detail = client.get(f"/suggestions/{seed.rejected_slug}", params={"view": "full"}).text
+    assert f'action="/suggestions/{seed.rejected_slug}/reopen"' in detail
+    # and reopening it flips it back to proposed
+    response = client.post(
+        f"/suggestions/{seed.rejected_slug}/reopen",
+        data={"csrf_token": app.state.csrf_token},
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    doc = proposals.load_proposal(seed.root, seed.rejected_slug)
+    assert doc is not None
+    assert doc.get("status") == "proposed"
+
+
+def test_reopen_on_a_non_rejected_proposal_is_409(
+    client: TestClient, app: Starlette, seed: Seed
+) -> None:
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/reopen",
+        data={"csrf_token": app.state.csrf_token},
+        headers={"origin": str(client.base_url)},
+    )
+    assert response.status_code == 409
+    doc = proposals.load_proposal(seed.root, seed.proposed_slug)
+    assert doc is not None
+    assert doc.get("status") == "proposed"  # untouched
+
+
+def test_reopen_without_csrf_is_rejected_and_writes_nothing(client: TestClient, seed: Seed) -> None:
+    response = client.post(f"/suggestions/{seed.rejected_slug}/reopen", data={})
+    assert response.status_code == 403
+    doc = proposals.load_proposal(seed.root, seed.rejected_slug)
+    assert doc is not None
+    assert doc.get("status") == "rejected"  # CSRF-less POST mutated nothing
+
+
 # --- detail ---------------------------------------------------------------------
 
 

@@ -166,9 +166,15 @@
       .hint { font-size: 11px; color: var(--muted); }
       .hd-date, .hd-time { display: block; white-space: nowrap; }
       .hd-time { color: var(--muted); }
-      .split { display: flex; gap: 16px; align-items: flex-start; }
-      .split-list { flex: 1 1 56%; min-width: 0; }
-      .split-detail { flex: 1 1 44%; min-width: 0; position: sticky; top: 0; }
+      .split { display: flex; gap: 16px; align-items: stretch; }
+      /* Each pane scrolls on its own — hover over one and only it scrolls. Capped
+         to the viewport below the chrome + topbar + hero so the page itself
+         barely scrolls; the outer .scroll absorbs any small remainder. */
+      .split-list, .split-detail {
+        flex: 1 1 50%; min-width: 0; max-height: calc(100vh - 210px); overflow-y: auto;
+      }
+      .split-list { flex-basis: 56%; }
+      .split-detail { flex-basis: 44%; }
       .split-list tr.on { background: var(--panel-2); }
       .split-list tbody tr { cursor: pointer; }
       .pane-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }

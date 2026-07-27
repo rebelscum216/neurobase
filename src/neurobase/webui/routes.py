@@ -539,8 +539,11 @@ async def _session_detail(request: Request) -> Response:
         "consumed": bool(doc.get("consumed")),
         "body": _redact_display(doc.body),
     }
-    # ?view=full → the standalone page (linked as "Open as page"); otherwise the
-    # capture opens inline in the Sessions two-pane, list still on the left.
+    # ?fragment=1 → just the right-pane HTML, fetched by the list's inline JS so a
+    # click swaps the pane without a full-page reload (no flicker). ?view=full →
+    # the standalone page (the "Open as page" link). Otherwise the full two-pane.
+    if request.query_params.get("fragment"):
+        return _templates(request).TemplateResponse(request, "_session_pane.html", {"sel": sel})
     if request.query_params.get("view") == "full":
         return _templates(request).TemplateResponse(request, "session_detail.html", {"sel": sel})
     rows = _session_rows(handle)

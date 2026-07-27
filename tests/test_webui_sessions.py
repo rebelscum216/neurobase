@@ -160,6 +160,17 @@ def test_selected_row_is_highlighted(client: TestClient, store_root: Path) -> No
     assert 'class="on"' not in client.get("/sessions").text
 
 
+def test_fragment_returns_just_the_pane(client: TestClient, store_root: Path) -> None:
+    """The ?fragment=1 response (what the inline JS fetches to swap the pane
+    without a reload) is the pane content only — no page shell, no list."""
+    file = _first_file(store_root)
+    html = client.get(f"/sessions/{PROJECT}/{file}", params={"fragment": "1"}).text
+    assert "Capture metadata" in html  # the pane's detail
+    assert f"/sessions/{PROJECT}/{file}?view=full" in html  # the open-as-page link
+    assert "<html" not in html.lower(), "fragment must not carry the full page shell"
+    assert 'class="split"' not in html, "fragment must be the pane only, not the list"
+
+
 def test_open_as_page_is_the_standalone_view(client: TestClient, store_root: Path) -> None:
     file = _first_file(store_root)
     html = client.get(f"/sessions/{PROJECT}/{file}", params={"view": "full"}).text

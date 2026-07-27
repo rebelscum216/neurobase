@@ -26,7 +26,7 @@ from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
-from neurobase.core import redact, store
+from neurobase.core import redact, search, store
 from neurobase.core.config import load_config
 from neurobase.core.store_handle import StoreMode, open_store
 from neurobase.recommender import corpus as recommend_corpus
@@ -61,9 +61,19 @@ def sessions_routes() -> list[Route]:
     ]
 
 
+def memory_routes() -> list[Route]:
+    """The Memory + Search surface (app-shell plan, Phase 2c): a read-only browser
+    over curated facts + synthesized nodes, plus keyword search."""
+    return [
+        Route("/memory", _list_memory, methods=["GET"]),
+        Route("/memory/{project}/{slug}", _memory_detail, methods=["GET"]),
+        Route("/search", _search, methods=["GET"]),
+    ]
+
+
 def all_routes() -> list[Route]:
     """Every surface's routes, in one table for the Starlette app (``app.py``)."""
-    return [*suggestions_routes(), *sessions_routes()]
+    return [*suggestions_routes(), *sessions_routes(), *memory_routes()]
 
 
 # --- small shared helpers ---------------------------------------------------
@@ -517,4 +527,125 @@ async def _session_detail(request: Request) -> Response:
     return _templates(request).TemplateResponse(request, "session_detail.html", context)
 
 
-__all__ = ["all_routes", "sessions_routes", "suggestions_routes"]
+# --- Memory + Search (Phase 2c) ---------------------------------------------
+
+
+def _fact_row(project: str, doc: store.Document) -> dict[str, Any]:
+    provenance = doc.get("provenance") if isinstance(doc.get("provenance"), list) else []
+    supersedes = doc.get("supersedes") if isinstance(doc.get("supersedes"), list) else []
+    return {
+        "project": project,
+        "slug": str(doc.get("name") or doc.file_path.stem),
+        "updated_at": doc.get("updated_at"),
+        "provenance": len(provenance),
+        "supersedes": len(supersedes),
+        "agent_last": str(doc.get("agent_last") or "—"),
+    }
+
+
+def _read_nodes(handle: Any, project: str) -> list[dict[str, Any]]:
+    """The project's synthesized node(s) — the curator's regenerated summary of
+    active memory. Fail-soft: an unreadable node is skipped, never fatal."""
+    nodes_dir = handle.memory_dir(project) / "nodes"
+    out: list[dict[str, Any]] = []
+    if not nodes_dir.is_dir():
+        return out
+    for path in sorted(nodes_dir.glob("*.md")):
+        try:
+            doc = store.read_doc(path)
+        except (ValueError, OSError):
+            continue
+        out.append(
+            {
+                "name": str(doc.get("name") or path.stem),
+                "generated_at": doc.get("generated_at"),
+                "body": _redact_display(doc.body),
+            }
+        )
+    return out
+
+
+async def _list_memory(request: Request) -> Response:
+    root = _root(request)
+    handle = open_store(root, StoreMode.READ)
+    groups: list[dict[str, Any]] = []
+    for project in sorted(handle.load_registry()):
+        try:
+            facts = [_fact_row(project, d) for d in handle.list_curated(project, active_only=True)]
+        except (OSError, ValueError):
+            continue  # one unreadable project must not blank the whole surface
+        facts.sort(key=lambda f: str(f["updated_at"] or ""), reverse=True)
+        groups.append({"project": project, "nodes": _read_nodes(handle, project), "facts": facts})
+    total = sum(len(g["facts"]) for g in groups)
+    context = {"groups": groups, "total": total}
+    return _templates(request).TemplateResponse(request, "memory_list.html", context)
+
+
+async def _memory_detail(request: Request) -> Response:
+    root = _root(request)
+    project = request.path_params["project"]
+    slug = request.path_params["slug"]
+    handle = open_store(root, StoreMode.READ)
+    try:
+        curated_dir = handle.memory_dir(project) / "curated"
+    except store.InvalidSlugError:
+        return _error_response(request, 404, "Unknown project.")
+    # A curated slug is `^[a-z0-9-]+$` (store.SLUG_RE) — validating it both rejects
+    # a bad request and structurally forecloses traversal (no `.`/`/` can appear).
+    if not store.SLUG_RE.match(slug):
+        return _error_response(request, 404, "No such fact.")
+    path = curated_dir / f"{slug}.md"
+    if not path.is_file():
+        return _error_response(request, 404, "No such fact.")
+    try:
+        doc = store.read_doc(path)
+    except (ValueError, OSError):
+        return _error_response(request, 404, "This fact is unreadable.")
+    provenance = doc.get("provenance") if isinstance(doc.get("provenance"), list) else []
+    supersedes = doc.get("supersedes") if isinstance(doc.get("supersedes"), list) else []
+    context = {
+        "project": project,
+        "slug": str(doc.get("name") or slug),
+        "status": str(doc.get("status") or "active"),
+        "agent_last": str(doc.get("agent_last") or "—"),
+        "updated_at": doc.get("updated_at"),
+        "provenance": [_prov_link(project, p) for p in provenance],
+        "supersedes": [str(s) for s in supersedes],
+        "body": _redact_display(doc.body),
+    }
+    return _templates(request).TemplateResponse(request, "memory_detail.html", context)
+
+
+def _prov_link(project: str, entry: object) -> dict[str, Any]:
+    """Shape one provenance entry for display, linking it back to its source
+    capture when it names a raw (``raw/<file>``) — the Memory→Sessions half of
+    the provenance chain. Anything else renders as plain text."""
+    label = str(entry)
+    href = f"/sessions/{project}/{label[len('raw/') :]}" if label.startswith("raw/") else None
+    return {"label": label, "href": href}
+
+
+def _hit_row(hit: search.SearchHit) -> dict[str, Any]:
+    href = f"/memory/{hit.project}/{hit.name}" if hit.kind == "curated" else "/memory"
+    return {
+        "project": hit.project,
+        "name": hit.name,
+        "kind": hit.kind,
+        "score": hit.score,
+        "snippet": _redact_display(hit.snippet),
+        "href": href,
+    }
+
+
+async def _search(request: Request) -> Response:
+    root = _root(request)
+    query = (request.query_params.get("q") or "").strip()
+    hits: list[dict[str, Any]] = []
+    if query:
+        handle = open_store(root, StoreMode.READ)
+        hits = [_hit_row(h) for h in search.search(handle, query)]
+    context = {"q": query, "hits": hits}
+    return _templates(request).TemplateResponse(request, "search_results.html", context)
+
+
+__all__ = ["all_routes", "memory_routes", "sessions_routes", "suggestions_routes"]

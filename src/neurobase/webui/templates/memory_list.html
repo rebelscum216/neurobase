@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Memory{% endblock %}
+{% block crumb %}Memory{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1>Memory</h1>
+    <p class="hero-sub">Curated facts and the synthesized node the curator keeps in sync with them.</p>
+  </div>
+  <div class="hero-pills">
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ total }} active facts</span>
+    <span class="hero-pill">{{ groups | length }} project{{ '' if groups | length == 1 else 's' }}</span>
+  </div>
+</div>
+
+{% if not groups %}
+<section class="card">
+  <p>No curated memory yet. Run <code class="mono">neurobase curate</code> to fold sessions into facts.</p>
+</section>
+{% endif %}
+
+{% for g in groups %}
+<div class="dash-lower">
+  {% for node in g.nodes %}
+  <section class="card">
+    <div class="card-head">
+      <div><h2>{{ g.project }} · {{ node.name }}</h2><p>Synthesized node — regenerated after every curate</p></div>
+      <div class="right"><span class="tiny-pill">{{ node.generated_at[:10] if node.generated_at else "" }}</span></div>
+    </div>
+    <pre class="rawbody">{{ node.body }}</pre>
+  </section>
+  {% endfor %}
+
+  <section class="card">
+    <div class="card-head">
+      <div><h2>{{ g.project }} — facts</h2><p>Every active curated fact, newest first</p></div>
+      <div class="right"><span class="tiny-pill">{{ g.facts | length }} facts</span></div>
+    </div>
+    {% if g.facts %}
+    <table>
+      <thead>
+        <tr><th>Fact</th><th>Provenance</th><th>Supersedes</th><th>Last by</th><th>Updated</th></tr>
+      </thead>
+      <tbody>
+        {% for f in g.facts %}
+        <tr>
+          <td><a class="mono" href="/memory/{{ f.project }}/{{ f.slug }}">{{ f.slug }}</a></td>
+          <td class="mono">{{ f.provenance }}</td>
+          <td class="mono">{{ f.supersedes }}</td>
+          <td>{{ f.agent_last }}</td>
+          <td class="mono">{{ f.updated_at[:10] if f.updated_at else "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No active facts for this project.</p>
+    {% endif %}
+  </section>
+</div>
+{% endfor %}
+{% endblock %}

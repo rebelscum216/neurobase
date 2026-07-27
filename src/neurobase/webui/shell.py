@@ -27,7 +27,7 @@ from neurobase.recommender import proposals
 _NAV: list[tuple[str, str, str, str, bool]] = [
     ("graph", "Graph", "◉", "/graph", False),
     ("sessions", "Sessions", "◵", "/sessions", True),
-    ("memory", "Memory", "◈", "/memory", False),
+    ("memory", "Memory", "◈", "/memory", True),
     ("suggestions", "Suggestions", "△", "/suggestions", True),
     ("skills", "Skills", "✦", "/skills", False),
     ("status", "Status", "◷", "/status", False),
@@ -95,4 +95,6 @@ def shell_context(request: Request) -> dict[str, Any]:
                 "count": counts.get(key),
             }
         )
-    return {"nav": nav, "active_label": active_label}
+    # The topbar search box echoes the active query (empty off the search page).
+    search_q = request.query_params.get("q", "") if path == "/search" else ""
+    return {"nav": nav, "active_label": active_label, "search_q": search_q}

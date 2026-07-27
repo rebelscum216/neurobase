@@ -84,6 +84,14 @@ def _write_raw(
     return path
 
 
+def _read_log(root: Path, project: str) -> list[dict[str, Any]]:
+    """Parse the curator journal (`.curator-log.jsonl`) into records."""
+    path = store.memory_dir(project, root) / engine.CURATOR_LOG
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
 # --- step 1: idempotence / noop ------------------------------------------
 
 
@@ -576,3 +584,396 @@ def test_non_pinned_fact_can_still_be_tombstoned(root: Path) -> None:
     engine.curate(root, "proj", FakeBrain(plan))
     slugs = {d.get("name") for d in store.list_curated(root, "proj")}
     assert "temp-fact" not in slugs  # the guard is specific to pinned facts
+
+
+# --- provenance hardening: from_raw validation + fold journal (ADR-0022) --
+
+
+def test_hallucinated_from_raw_dropped_and_counted(root: Path) -> None:
+    """B1: a `from_raw` filename not shown to the model this batch is dropped
+    before it reaches the permanent provenance record, and counted."""
+    _write_raw(root, "proj", "r1.md")
+    plan = {
+        "upserts": [
+            {
+                "slug": "fact-a",
+                "body": "durable",
+                # r1.md is real (in the batch); the others are hallucinations —
+                # e.g. echoes of old raw basenames in a fact-body lineage block.
+                "from_raw": ["r1.md", "ghost-1.md", "ghost-2.md"],
+            }
+        ],
+        "tombstones": [],
+    }
+    summary = engine.curate(root, "proj", FakeBrain(plan))
+    doc = store.read_doc(store.memory_dir("proj", root) / "curated" / "fact-a.md")
+    assert doc["provenance"] == ["raw/r1.md"]  # only the validated name survived
+    assert summary["dropped_from_raw"] == 2
+
+    # Codex P2-TEST-GAP-001: the journal is a SECOND permanent consumer of the
+    # same validation, and the assertions above do not protect it. Validating
+    # only for `provenance` while accumulating the raw `from_raw` into
+    # `_ApplyResult.edges` would keep every assertion above green and still put
+    # ghost filenames into the map Slice A reads back after raw retention
+    # expires. The fold-edge test elsewhere cannot catch it either — it only
+    # ever passes a valid filename, so validated and unvalidated agree there.
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["edges"] == {"fact-a": ["r1.md"]}
+    # Belt-and-braces: no ghost anywhere in the edge map, under any slug.
+    all_edge_names = {name for names in record["fold"]["edges"].values() for name in names}
+    assert all_edge_names == {"r1.md"}
+
+
+def test_summary_key_set_is_exact_and_carries_no_fold(root: Path) -> None:
+    """B2: `fold` must never join the returned/printed summary (it carries raw
+    session ids). The summary shape is pinned so any drift fails loudly."""
+    _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [{"slug": "f", "body": "b", "from_raw": ["r1.md"]}], "tombstones": []}
+    summary = engine.curate(root, "proj", FakeBrain(plan))
+    assert summary["status"] == "ok"
+    assert set(summary) == {
+        "status",
+        "raw",
+        "batches",
+        "distilled",
+        "fallback",
+        "upserts",
+        "superseded",
+        "tombstones",
+        "dropped_from_raw",
+        "pruned_tombstones",
+        "active_facts",
+        # upstream's pass budget (P0, 2026-07-17 runaway) adds these three to
+        # every summary; pinned here too so drift in either feature fails loudly.
+        "backlog",
+        "budget_calls",
+        "budget_deferred_raws",
+    }
+    assert "fold" not in summary
+
+
+def test_fold_records_consumed_edges_and_session_identity(root: Path) -> None:
+    _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [{"slug": "fact-a", "body": "b", "from_raw": ["r1.md"]}], "tombstones": []}
+    engine.curate(root, "proj", FakeBrain(plan))
+    (record,) = _read_log(root, "proj")
+    assert "fold" in record  # rides the journal record, not the summary
+    fold = record["fold"]
+    assert fold["v"] == 1
+    assert fold["edges"] == {"fact-a": ["r1.md"]}
+    assert len(fold["consumed"]) == 1
+    entry = fold["consumed"][0]
+    assert entry["file"] == "r1.md"
+    assert entry["session_id"] == "s1"  # session identity captured at consumption
+    assert entry["agent"] == "claude"
+    assert entry["captured_at"] == "2026-07-07T12:00:00Z"
+
+
+def test_fold_absent_on_noop(root: Path) -> None:
+    store.ensure_tree("proj", root)
+    engine.curate(root, "proj", FakeBrain())
+    (record,) = _read_log(root, "proj")
+    assert record["status"] == "noop"
+    assert "fold" not in record  # nothing committed
+
+
+def test_fold_absent_on_first_batch_abort(root: Path) -> None:
+    _write_raw(root, "proj", "r1.md")
+    engine.curate(root, "proj", FakeBrain(BrainError("unparseable")))
+    (record,) = _read_log(root, "proj")
+    assert record["status"] == "error"
+    assert "fold" not in record  # first-batch abort committed nothing
+
+
+def test_fold_present_on_empty_plan_with_empty_edges(root: Path) -> None:
+    """A valid-but-empty plan consumes the raw but attributes it to no fact —
+    the fold records the consumed session with an empty edge set (an orphan)."""
+    _write_raw(root, "proj", "r1.md")
+    engine.curate(root, "proj", FakeBrain({"upserts": [], "tombstones": []}))
+    (record,) = _read_log(root, "proj")
+    assert record["status"] == "ok"
+    fold = record["fold"]
+    assert fold["edges"] == {}
+    assert [c["file"] for c in fold["consumed"]] == ["r1.md"]
+
+
+def test_fold_superseded_records_only_applied_soft_deletes(root: Path) -> None:
+    """Adversarial: a superseded slug that is re-upserted this pass is NOT
+    tombstoned, so it must NOT appear in the fold's `superseded` list."""
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "old-fact", "old")
+    store.upsert_curated(root, "proj", "fact-x", "v1")
+    _write_raw(root, "proj", "r1.md")
+    plan = {
+        "upserts": [
+            # fact-x is re-upserted this pass AND superseded by fact-y → survives.
+            {"slug": "fact-x", "body": "v2", "from_raw": ["r1.md"]},
+            {
+                "slug": "fact-y",
+                "body": "y",
+                "supersedes": ["fact-x", "old-fact"],
+                "from_raw": ["r1.md"],
+            },
+        ],
+        "tombstones": [],
+    }
+    engine.curate(root, "proj", FakeBrain(plan))
+    (record,) = _read_log(root, "proj")
+    # Only old-fact's soft-delete actually applied.
+    assert record["fold"]["superseded"] == [{"slug": "old-fact", "by": "fact-y"}]
+    assert (store.memory_dir("proj", root) / "curated" / "fact-x.md").exists()
+
+
+def test_fold_tombstoned_records_explicit_removals(root: Path) -> None:
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "stale", "old")
+    _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [], "tombstones": [{"slug": "stale", "reason": "gone"}]}
+    engine.curate(root, "proj", FakeBrain(plan))
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["tombstoned"] == ["stale"]
+
+
+# Codex P2-TEST-GAP-002: the two tests above prove the SKIP guards (re-upserted /
+# pinned), which return before `_safe_soft_delete` is ever called. Neither
+# reaches the case where the call is made and FAILS. That leaves the false
+# branches of both `if _safe_soft_delete(...)` uncovered, so moving the fold
+# append and the counter increment outside the successful branch would journal —
+# and count — a removal that never happened, with every existing test still
+# green. A model naming a slug that does not exist is a routine fail-soft path,
+# not a hostile-tree hypothetical: the plan is LLM output.
+
+
+def test_fold_superseded_omits_a_target_that_does_not_exist(root: Path) -> None:
+    """`supersedes` names a slug with no curated file — the soft-delete fails,
+    so nothing may be journalled or counted."""
+    store.ensure_tree("proj", root)
+    _write_raw(root, "proj", "r1.md")
+    plan = {
+        "upserts": [
+            {
+                "slug": "fact-y",
+                "body": "y",
+                "supersedes": ["never-existed"],
+                "from_raw": ["r1.md"],
+            }
+        ],
+        "tombstones": [],
+    }
+    summary = engine.curate(root, "proj", FakeBrain(plan))
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["superseded"] == []
+    assert summary["superseded"] == 0
+    assert summary["upserts"] == 1  # the upsert itself still landed
+
+
+def test_fold_tombstoned_omits_a_target_that_does_not_exist(root: Path) -> None:
+    """Same probe on the explicit-tombstone path (spec §2 step 5)."""
+    store.ensure_tree("proj", root)
+    _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [], "tombstones": [{"slug": "never-existed", "reason": "gone"}]}
+    summary = engine.curate(root, "proj", FakeBrain(plan))
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["tombstoned"] == []
+    assert summary["tombstones"] == 0
+
+
+def test_fold_tombstoned_omits_an_invalid_slug(root: Path) -> None:
+    """A malformed slug cannot resolve to a path at all — same contract: the
+    pass fails soft and journals nothing."""
+    store.ensure_tree("proj", root)
+    _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [], "tombstones": [{"slug": "Not A Slug!", "reason": "gone"}]}
+    summary = engine.curate(root, "proj", FakeBrain(plan))
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["tombstoned"] == []
+    assert summary["tombstones"] == 0
+
+
+def test_fold_rides_after_commit_error_and_records_only_committed(root: Path) -> None:
+    """A later batch failing (status `error`) must not erase the durable
+    identity of raws already consumed this pass — the fold is still written and
+    reflects only the committed batch."""
+    _write_raw(root, "proj", "r1.md", "a" * 80)
+    _write_raw(root, "proj", "r2.md", "b" * 80)
+    budget = _request_size_for(root, ["r1.md"])
+    brain = SequencedBrain(
+        [
+            {
+                "upserts": [{"slug": "landed", "body": "durable", "from_raw": ["r1.md"]}],
+                "tombstones": [],
+            },
+            BrainError("second batch fails"),
+        ]
+    )
+    summary = engine.curate(root, "proj", brain, plan_payload_max_bytes=budget)
+    assert summary["status"] == "error"
+    (record,) = _read_log(root, "proj")
+    fold = record["fold"]  # present despite the error status
+    assert fold["edges"] == {"landed": ["r1.md"]}
+    assert [c["file"] for c in fold["consumed"]] == ["r1.md"]  # only the committed batch
+    assert store.read_doc(store.memory_dir("proj", root) / "raw" / "r2.md")["consumed"] is False
+
+
+def _two_batch_brain(batch1: dict[str, Any], batch2: dict[str, Any]) -> SequencedBrain:
+    return SequencedBrain([batch1, batch2])
+
+
+def test_fold_superseded_reconciled_when_a_later_batch_reupserts_the_slug(root: Path) -> None:
+    """P1-DATA-INTEGRITY-001 (cross-batch, D22): batch 1 supersedes `old-fact`;
+    a later batch re-upserts it. At pass end `old-fact` is active, so it must not
+    be journaled as removed and must not be counted as superseded. Its batch-1
+    tombstone deliberately REMAINS on disk — §1 forbids unowned deletion of
+    `.tombstones/<slug>` — and readers resolve the pair toward `curated/`."""
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "old-fact", "v1")
+    _write_raw(root, "proj", "r1.md", "a" * 80)
+    _write_raw(root, "proj", "r2.md", "b" * 80)
+    budget = _request_size_for(root, ["r1.md"])  # one raw per batch
+    brain = _two_batch_brain(
+        {
+            "upserts": [
+                {
+                    "slug": "new-fact",
+                    "body": "n",
+                    "supersedes": ["old-fact"],
+                    "from_raw": ["r1.md"],
+                }
+            ],
+            "tombstones": [],
+        },
+        {"upserts": [{"slug": "old-fact", "body": "resurrected", "from_raw": ["r2.md"]}]},
+    )
+    summary = engine.curate(root, "proj", brain, plan_payload_max_bytes=budget)
+    assert summary["batches"] == 2
+    mem = store.memory_dir("proj", root)
+    assert (mem / "curated" / "old-fact.md").exists()  # active again
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["superseded"] == []  # not journaled as removed
+    assert summary["superseded"] == 0  # count stays consistent with the fold list
+    # The batch-1 tombstone stays on disk as documented residue (deleting it is
+    # not concurrency-safe, §1); readers resolve it toward curated/.
+    assert [d["name"] for d in store.list_curated(root, "proj")] == ["new-fact", "old-fact"]
+
+
+def test_fold_tombstoned_reconciled_when_a_later_batch_reupserts_the_slug(root: Path) -> None:
+    """Same class as P1-DATA-INTEGRITY-001 for explicit tombstones: batch 1
+    tombstones `stale`; a later batch re-upserts it. Found while fixing the
+    superseded case — the two fold-removal lists share the reconciliation."""
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "stale", "v1")
+    _write_raw(root, "proj", "r1.md", "a" * 80)
+    _write_raw(root, "proj", "r2.md", "b" * 80)
+    budget = _request_size_for(root, ["r1.md"])
+    brain = _two_batch_brain(
+        {"upserts": [], "tombstones": [{"slug": "stale", "reason": "gone"}]},
+        {"upserts": [{"slug": "stale", "body": "back", "from_raw": ["r2.md"]}]},
+    )
+    summary = engine.curate(root, "proj", brain, plan_payload_max_bytes=budget)
+    assert summary["batches"] == 2
+    mem = store.memory_dir("proj", root)
+    assert (mem / "curated" / "stale.md").exists()
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["tombstoned"] == []
+    assert summary["tombstones"] == 0
+
+
+def test_fold_superseded_kept_when_slug_stays_removed_across_batches(root: Path) -> None:
+    """Guard the reconciliation's other direction: a slug upserted in batch 1 and
+    genuinely superseded in batch 2 is NOT active at pass end, so it MUST remain
+    journaled as removed (the active-set oracle must not over-drop)."""
+    _write_raw(root, "proj", "r1.md", "a" * 80)
+    _write_raw(root, "proj", "r2.md", "b" * 80)
+    budget = _request_size_for(root, ["r1.md"])
+    brain = _two_batch_brain(
+        {"upserts": [{"slug": "doomed", "body": "v1", "from_raw": ["r1.md"]}], "tombstones": []},
+        {
+            "upserts": [
+                {"slug": "winner", "body": "v2", "supersedes": ["doomed"], "from_raw": ["r2.md"]}
+            ],
+            "tombstones": [],
+        },
+    )
+    summary = engine.curate(root, "proj", brain, plan_payload_max_bytes=budget)
+    assert summary["batches"] == 2
+    mem = store.memory_dir("proj", root)
+    assert not (mem / "curated" / "doomed.md").exists()  # genuinely removed
+    (record,) = _read_log(root, "proj")
+    assert record["fold"]["superseded"] == [{"slug": "doomed", "by": "winner"}]
+    assert summary["superseded"] == 1
+
+
+def test_cross_pass_resurrection_leaves_residue_that_readers_resolve(root: Path) -> None:
+    """A slug tombstoned in one pass and re-derived under its stable slug in a
+    later pass leaves the old tombstone on disk — the curator deliberately does
+    NOT delete it (that cannot be made concurrency-safe, §1 / G4). What must hold
+    is that no reader is misled and the pass's fold is honest."""
+    store.ensure_tree("proj", root)
+    mem = store.memory_dir("proj", root)
+    store.upsert_curated(root, "proj", "topic-x", "v1")
+
+    # Pass 1: tombstone topic-x.
+    _write_raw(root, "proj", "r1.md")
+    engine.curate(
+        root,
+        "proj",
+        FakeBrain({"upserts": [], "tombstones": [{"slug": "topic-x", "reason": "stale"}]}),
+    )
+    assert (mem / ".tombstones" / "topic-x.md").exists()
+    assert not (mem / "curated" / "topic-x.md").exists()
+
+    # Pass 2 (a separate curate pass): the model re-derives the same stable slug.
+    _write_raw(root, "proj", "r2.md")
+    engine.curate(
+        root,
+        "proj",
+        FakeBrain({"upserts": [{"slug": "topic-x", "body": "reborn", "from_raw": ["r2.md"]}]}),
+    )
+
+    assert (mem / "curated" / "topic-x.md").exists()
+    assert (mem / ".tombstones" / "topic-x.md").exists()  # documented residue
+    # Resolution rule: curated/ is authoritative, so the fact reads as active once.
+    assert [d["name"] for d in store.list_curated(root, "proj")] == ["topic-x"]
+    body = store.read_doc(mem / "curated" / "topic-x.md").body
+    assert body.split("\n")[0].startswith("reborn")  # linkify appends a lineage footer
+    # Pass 2's fold is honest: it removed nothing, so both removal lists are empty.
+    pass1, pass2 = _read_log(root, "proj")
+    assert pass1["fold"]["tombstoned"] == ["topic-x"]
+    assert pass2["fold"]["tombstoned"] == []
+    assert pass2["fold"]["superseded"] == []
+    assert pass2["fold"]["edges"] == {"topic-x": ["r2.md"]}
+
+
+def test_curate_never_deletes_a_tombstone_beside_an_active_fact(root: Path) -> None:
+    """Regression for P1-DATA-INTEGRITY-003: an active+tombstoned pair is
+    indistinguishable from the midpoint of an in-flight soft_delete_curated, so
+    NO curate path may delete it. A pass must leave such a pair alone."""
+    store.ensure_tree("proj", root)
+    mem = store.memory_dir("proj", root)
+    store.upsert_curated(root, "proj", "topic-x", "active body")
+    tomb = mem / ".tombstones" / "topic-x.md"
+    # Fresh timestamp: this is the shape of an IN-FLIGHT soft-delete, which is
+    # exactly what no curate path may delete. (Prune skips it here because it is
+    # inside the grace window — but prune's own TOCTOU is a separate, recorded
+    # gap, see known-gaps G4; it is not what makes this safe.)
+    fresh = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    store.write_doc(
+        tomb,
+        {"name": "topic-x", "status": "tombstoned", "tombstoned_at": fresh},
+        "in-flight or stale copy",
+    )
+
+    # A normal pass, a noop pass, and a dry run must all leave the pair intact.
+    _write_raw(root, "proj", "r1.md")
+    engine.curate(root, "proj", FakeBrain({"upserts": [], "tombstones": []}))
+    assert tomb.exists() and (mem / "curated" / "topic-x.md").exists()
+
+    assert engine.curate(root, "proj", FakeBrain())["status"] == "noop"
+    assert tomb.exists() and (mem / "curated" / "topic-x.md").exists()
+
+    _write_raw(root, "proj", "r2.md")
+    engine.curate(root, "proj", FakeBrain({"upserts": [], "tombstones": []}), dry_run=True)
+    assert tomb.exists() and (mem / "curated" / "topic-x.md").exists()
+
+    # And the reader is never misled while the pair persists.
+    assert [d["name"] for d in store.list_curated(root, "proj")] == ["topic-x"]

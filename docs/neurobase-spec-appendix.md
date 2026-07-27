@@ -113,10 +113,58 @@ updated_at: <ISO8601>
 - If the file exists, **merge provenance** (prior list + new, order-preserving
   dedupe). `supersedes`: new value if given, else keep prior.
 - Overwrites body wholesale (the curator owns curated content).
+- Does **not** touch `.tombstones/`. A resurrection is a *fresh* fact — prior
+  provenance/supersedes in `.tombstones/` are intentionally not carried forward.
 
 `soft_delete_curated`: set `status: tombstoned`, add `tombstoned_at`, **move**
 the file to `.tombstones/<slug>.md`, delete the original. Recoverable until
 `prune_tombstones(older_than_days=14)` hard-deletes past the grace period.
+
+**Store placement rule — `curated/` is authoritative.** Either or **both** of
+`curated/<slug>.md` and `.tombstones/<slug>.md` may exist. When both do, the slug
+is **active**: `curated/` is canonical and the tombstone is reader-invisible
+residue. This is a steady state, not merely an in-flight one — a resurrection
+(a slug removed, then re-upserted under its stable slug) deliberately leaves both
+in place, and nothing reclaims the residue until a `prune_tombstones` call finds
+it past the grace period. Each transition moves between two files and is
+therefore **not atomic**; each writes the new location before removing the old,
+so a *single-process* interruption strands a tombstone beside an active fact
+rather than losing the fact:
+
+- `upsert_curated` writes `curated/<slug>` and stops there.
+- `soft_delete_curated` writes `.tombstones/<slug>`, then unlinks the active
+  file. `FileNotFoundError` on that unlink means a racing soft-delete already
+  completed the move and is treated as success. Any other unlink error
+  propagates **and the tombstone is left in place** — this function never
+  deletes the tombstone path, not even to undo its own failed move (see below).
+
+**Resolution rule.** If both exist, the slug is **active** and the tombstone is
+residue. `list_curated` reads only `curated/`, so every current reader resolves
+this by construction; any reader of `.tombstones/` (e.g. a lineage/graph reader)
+**MUST** exclude slugs present in `curated/`.
+
+**No unowned deletion of `.tombstones/<slug>`.** An active+tombstoned pair is
+*indistinguishable on disk* from the midpoint of an in-flight
+`soft_delete_curated`. `.tombstones/<slug>.md` is a shared path that a racing
+soft-delete can atomically replace, so without cross-process ownership no caller
+can prove the file there is the one it inspected. Code that deletes a "stale"
+tombstone can therefore delete an in-flight one, after which the racing delete
+removes the active file and the fact is **lost**. This is reachable today:
+`SessionStart` launches detached `curate --if-stale` processes and there is **no
+project-level store lock** — see `known-gaps.md` **G4**. File age does not help:
+it describes the contents *inspected*, not the file version eventually unlinked.
+
+Accordingly no write path reclaims residue; it is invisible to readers under the
+resolution rule and left for `prune_tombstones`.
+
+> **Known limitation (G4).** `prune_tombstones` reads `tombstoned_at` and then
+> unlinks the *path*, so a soft-delete that replaces that path in between can
+> have its fresh tombstone pruned — losing the fact if it then unlinks the
+> active file. This race **predates** this contract and is not fixed here;
+> closing it needs the G4 ownership boundary. Until then the store's no-loss
+> property holds for a single mutating process, not for concurrent ones.
+
+See ADR-0022.
 
 ### nodes/ — pure function of curated/
 
@@ -158,7 +206,12 @@ _<N> active curated facts._
    failure from a valid-but-empty plan (an empty plan IS consumed). Tolerate
    ```json fences.
 4. Apply this batch's upserts: skip empty slug/body; `supersedes` filtered of self;
-   `provenance = ["raw/"+name for name in from_raw]`; bad slug ⇒ skip + warn.
+   `provenance = ["raw/"+name for name in from_raw if name in this batch's raw filenames]`;
+   bad slug ⇒ skip + warn. **`from_raw` is validated against the batch** (ADR-0022):
+   a filename the model cites that was not shown to it this batch is an
+   hallucination (commonly an echo of an old raw basename from a fact body's
+   lineage block) and MUST be dropped before it reaches the permanent
+   `provenance` record; the count of dropped names is surfaced (`dropped_from_raw`).
    For each superseded slug: tombstone it **unless that slug was itself
    re-upserted this batch, or is pinned**.
 5. Apply explicit tombstones (skip any slug upserted this batch **or pinned**).
@@ -172,7 +225,9 @@ _<N> active curated facts._
    runs whenever at least one batch committed, **even if the pass is about to
    return an error** — see the derived-state rule below.
 9. Return summary: `{status, raw, batches, upserts, superseded, tombstones,
-   pruned_tombstones, active_facts}`.
+   dropped_from_raw, pruned_tombstones, active_facts}`. (`dropped_from_raw`
+   counts hallucinated `from_raw` names dropped in step 4; it appears on any
+   committed-batch summary. The distill counts are additionally merged in.)
 
 **Pinned facts (user-directed, decision D-b):** a curated fact whose
 `provenance` includes `user-directed` — written by the MCP `memory_remember`
@@ -211,7 +266,54 @@ plan failure.
 
 **Pass log:** append each pass's summary dict as one line to
 `<memory>/.curator-log.jsonl` — this is what `status` reads to show the
-active-fact-count trend (the bloat alarm).
+active-fact-count trend (the bloat alarm). The filename is a **core-owned**
+constant (`core.store.CURATOR_LOG`), so a core reader may consume the record
+without a cross-layer format dependency.
+
+**Fold record (ADR-0022).** Whenever a pass commits at least one batch, its
+journal line carries a `fold` object alongside the summary keys — a per-pass,
+raw→fact audit trail. This gate is **stricter than steps 7–8's**, deliberately:
+a bounded zero-commit stop (budget exhaustion on the first plan call) still
+prunes and synthesizes — both are idempotent over state already on disk — but
+writes no fold, because an empty fold would assert a pass that consumed nothing
+where silence is the honest record. See ADR-0022.
+
+```json
+"fold": {
+  "v": 1,
+  "consumed": [{"file": "<raw filename>", "session_id": "…", "agent": "…", "captured_at": "…"}],
+  "edges": {"<fact-slug>": ["<validated raw filename>", …]},
+  "superseded": [{"slug": "<old fact>", "by": "<new fact>"}],
+  "tombstoned": ["<explicitly tombstoned fact>"]
+}
+```
+
+- `fold` is **not** a summary key — the CLI prints the summary as JSON and
+  `consumed` embeds raw `session_id`s (loopback-only sensitivity, §2). It rides
+  the journal record only.
+- `consumed` embeds session identity **at consumption time**, so a journal edge
+  outlives any future raw-retention policy or a fresh clone with a gitignored
+  `raw/`.
+- `edges` is the validated `from_raw` map (step 4); an entry with an empty list
+  means "upserted this pass, unattributed" (rendered as an orphan). A raw in
+  `consumed` that appears in no `edges` list fed no fact this pass.
+- `superseded`/`tombstoned` record **only where the soft-delete actually
+  applied and the slug is still removed at pass end** — a pinned target is never
+  removed, and a slug removed by one batch but **re-upserted by a later batch of
+  the same pass** is active at pass end (the active set is the oracle). Such a
+  resurrected slug is not journaled as removed and is not counted; each count
+  (`superseded`/`tombstones`) equals the length of its fold list. This is the
+  only record that survives multi-generation supersession and tombstone pruning.
+  (This repairs the **journal** only. The resurrected slug's old tombstone stays
+  on disk: §1 forbids unowned deletion of `.tombstones/<slug>`. Readers are
+  unaffected — `curated/` is authoritative.)
+- The record rides the after-commit **error** path too: a later batch failing
+  must not erase the durable identity of raws already consumed this pass. It is
+  absent only when nothing committed (first-batch abort, noop) and on dry runs.
+- **The journal may have gaps** (a crash between `mark_consumed` and the log
+  append). The **frontmatter ∪ journal union is the contract**: frontmatter
+  (`provenance`, `supersedes`) backstops exactly the fact-granular edges of a
+  lost pass. Additive JSONL fields need no schema bump (D11) — see ADR-0022.
 
 Both brain calls MUST be injectable (module-level indirection) so the whole
 apply pipeline is testable with fakes, no network. **The distill brain call

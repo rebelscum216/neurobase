@@ -52,6 +52,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0019](0019-folder-scoped-auto-enable.md) | Folder-scoped auto-enable — consent once at a directory, not per repo (D39–D42) | Proposed | per-repo `enable` friction / spec §3–§5/§10 |
 | [0020](0020-revert-drift-repair-only.md) | `recommend revert` is drift repair only, not an un-accept (D43–D44; revises ADR-0007 lifecycle) | Proposed | G2 / review F1–F4 |
 | [0021](0021-webui-surface.md) | Web UI — loopback server as a peer presentation layer (spec §14) | Accepted | Web UI Phase 1 |
+| [0022](0022-curator-fold-journal.md) | Curator fold journal + `from_raw` validation (provenance hardening, Slice B) | Proposed | provenance plan Slice B / G4 |
 
 ADRs 0016–0018 are the three **Phase-0** decisions promoted from the
 [hardening plan](../notes/2026-07-21-hardening-plan-draft.md) (per the

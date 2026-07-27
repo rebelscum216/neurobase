@@ -484,6 +484,156 @@ def test_prune_tombstones_respects_grace_period(root: Path) -> None:
     assert (mem / ".tombstones" / "recent-fact.md").exists()
 
 
+# --- §1 placement rule: non-atomic transitions, residue, resolution ------
+
+
+def _unlink_failing_under(monkeypatch: pytest.MonkeyPatch, marker: str) -> None:
+    """Make ``Path.unlink`` raise for any path containing ``marker``."""
+    real_unlink = Path.unlink
+
+    def guarded(self: Path, *args: object, **kwargs: object) -> None:
+        if marker in str(self):
+            raise PermissionError(f"unlink refused: {self}")
+        real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", guarded)
+
+
+def test_resurrecting_a_tombstoned_slug_leaves_residue_readers_resolve(root: Path) -> None:
+    """Re-upserting a tombstoned slug does NOT delete the tombstone — deleting it
+    cannot be made concurrency-safe (§1). The residue is documented and readers
+    resolve it toward curated/. A resurrection is still a fresh fact."""
+    store.ensure_tree("proj", root)
+    mem = store.memory_dir("proj", root)
+    store.upsert_curated(root, "proj", "topic-x", "v1", provenance=["raw/old.md"])
+    store.soft_delete_curated(root, "proj", "topic-x")
+
+    # Re-derive the same stable slug later (e.g. a recurring topic).
+    store.upsert_curated(root, "proj", "topic-x", "reborn", provenance=["raw/new.md"])
+
+    assert (mem / "curated" / "topic-x.md").exists()
+    assert (mem / ".tombstones" / "topic-x.md").exists()  # documented residue
+    # Resolution rule: curated/ is authoritative, so every reader sees it active.
+    assert [d["name"] for d in store.list_curated(root, "proj")] == ["topic-x"]
+    doc = store.read_doc(mem / "curated" / "topic-x.md")
+    assert doc["status"] == "active"
+    assert doc.body == "reborn"
+    assert doc["provenance"] == ["raw/new.md"]  # fresh fact, prior lineage not carried
+
+
+def test_prune_collects_residue_once_its_grace_expires(root: Path) -> None:
+    """Residue beside an active fact is reclaimed only by prune, once past the
+    grace period. NOTE: prune's age check is not an ownership claim — it has a
+    known TOCTOU against a concurrent soft-delete (known-gaps G4); this test
+    pins the sequential behaviour only."""
+    store.ensure_tree("proj", root)
+    mem = store.memory_dir("proj", root)
+    store.upsert_curated(root, "proj", "topic-x", "active body")
+    old = (datetime.now(UTC) - timedelta(days=20)).isoformat().replace("+00:00", "Z")
+    store.write_doc(
+        mem / ".tombstones" / "topic-x.md",
+        {"name": "topic-x", "status": "tombstoned", "tombstoned_at": old},
+        "stale copy",
+    )
+
+    assert store.prune_tombstones(root, "proj", older_than_days=14) == ["topic-x"]
+    assert not (mem / ".tombstones" / "topic-x.md").exists()
+    assert (mem / "curated" / "topic-x.md").exists()  # the active fact is untouched
+
+
+def test_soft_delete_failure_leaves_the_tombstone_rather_than_unlinking_it(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed soft-delete must NOT undo itself by unlinking the tombstone: it
+    does not own that shared path. The error propagates and the tombstone stays
+    as reader-invisible residue."""
+    store.ensure_tree("proj", root)
+    mem = store.memory_dir("proj", root)
+    store.upsert_curated(root, "proj", "topic-x", "v1")
+
+    _unlink_failing_under(monkeypatch, "curated")
+    with pytest.raises(OSError):
+        store.soft_delete_curated(root, "proj", "topic-x")
+
+    assert (mem / "curated" / "topic-x.md").exists()  # the fact is safe
+    assert (mem / ".tombstones" / "topic-x.md").exists()  # residue, not rolled back
+    # Reader resolution is unaffected: curated/ wins while both exist.
+    assert [d["name"] for d in store.list_curated(root, "proj")] == ["topic-x"]
+
+
+def test_failed_soft_delete_never_deletes_a_racing_deletes_tombstone(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for P1-DATA-INTEGRITY-003 (rollback race): two soft-deletes
+    share `.tombstones/<slug>.md`. If A's active unlink fails with a non-
+    FileNotFoundError *after* B has replaced that path with its own in-flight
+    tombstone, A must not unlink it — otherwise B goes on to remove the active
+    file and neither copy survives."""
+    store.ensure_tree("proj", root)
+    mem = store.memory_dir("proj", root)
+    active = mem / "curated" / "topic-x.md"
+    tomb = mem / ".tombstones" / "topic-x.md"
+    store.upsert_curated(root, "proj", "topic-x", "v1")
+
+    real_unlink = Path.unlink
+
+    def a_fails_after_b_replaces(self: Path, *args: object, **kwargs: object) -> None:
+        if self.parent.name == "curated":
+            # Interleave B: it writes its own in-flight tombstone at the shared
+            # path, then A's active unlink fails transiently.
+            store.write_doc(
+                tomb,
+                {
+                    "name": "topic-x",
+                    "status": "tombstoned",
+                    "tombstoned_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                },
+                "B's in-flight copy",
+            )
+            raise PermissionError("transient unlink failure in A")
+        real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", a_fails_after_b_replaces)
+    with pytest.raises(OSError):
+        store.soft_delete_curated(root, "proj", "topic-x")
+    monkeypatch.undo()
+
+    # B's tombstone survived A's failure, so B can still complete its move.
+    assert tomb.exists()
+    real_unlink(active)  # B unlinks the active file, completing its delete
+    # The core no-loss assertion: at least one canonical copy always remains.
+    assert active.exists() or tomb.exists()
+    assert store.read_doc(tomb).body == "B's in-flight copy"
+
+
+def test_soft_delete_succeeds_when_a_racing_delete_already_moved_the_fact(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If a racing soft-delete already unlinked the active file, the move is
+    effectively complete — that is success, not failure, and the tombstone (the
+    only surviving copy) is left intact."""
+    store.ensure_tree("proj", root)
+    mem = store.memory_dir("proj", root)
+    store.upsert_curated(root, "proj", "topic-x", "v1")
+
+    real_unlink = Path.unlink
+
+    def racing(self: Path, *args: object, **kwargs: object) -> None:
+        if self.parent.name == "curated":
+            # Simulate the other process completing the move first.
+            real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+            raise FileNotFoundError(f"already gone: {self}")
+        real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", racing)
+    dest = store.soft_delete_curated(root, "proj", "topic-x")  # must not raise
+
+    assert dest == mem / ".tombstones" / "topic-x.md"
+    assert dest.exists()  # the surviving copy was NOT rolled back
+    assert not (mem / "curated" / "topic-x.md").exists()
+    assert store.read_doc(dest)["status"] == "tombstoned"
+
+
 # --- nodes/ + index.md ---------------------------------------------------
 
 

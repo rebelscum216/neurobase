@@ -28,7 +28,7 @@ from neurobase.curator import engine
 
 # Flat cross-test import, as `test_redact_audit` does: ruff's `src` includes
 # `tests`, so this is first-party and sorts with the neurobase imports.
-from test_curator import FakeBrain, SequencedBrain, _write_raw
+from test_curator import FakeBrain, SequencedBrain, _read_log, _write_raw
 
 
 @pytest.fixture
@@ -94,11 +94,20 @@ def test_deferred_raws_are_left_unconsumed_on_disk(root: Path) -> None:
 # Capping the plan payload splits the backlog one raw per batch, making N raws
 # cost exactly N plan calls.
 #
-# Measured for these fixtures: one raw serializes to 1260 bytes and two to 1323,
-# so 1300 admits exactly one. Not a magic constant to copy elsewhere — if the
-# payload shape changes, the exact call-count assertions below fail loudly
-# rather than silently testing nothing.
-ONE_RAW_PER_BATCH = 1300
+# Measured for these fixtures, the constant is bounded on both sides: it must
+# admit one raw *even once a curated fact joins the payload* (1364 bytes) yet
+# still refuse two raws with no facts (1393). 1380 sits in that window. Not a
+# magic constant to copy elsewhere — if the payload shape changes, the exact
+# call-count assertions below fail loudly rather than silently testing nothing.
+#
+# Recalibrated from 1300 when provenance Slice B added the `from_raw`
+# "only filenames present in this request" line to PLAN_SYSTEM. That pushed the
+# no-facts one-raw floor from 1260 to 1327 (every budget test stopped short with
+# a payload-too-small error) and the with-a-fact floor to 1364 — which is why
+# the upper bound alone is not enough: a value in 1327..1363 passes the tests
+# that never commit a fact, then silently truncates the pass to one batch in
+# the one test that does.
+ONE_RAW_PER_BATCH = 1380
 
 
 def test_max_brain_calls_stops_the_pass(root: Path) -> None:
@@ -380,7 +389,7 @@ def test_synthesis_exhaustion_after_committed_batches_reports_partial(
         root,
         "proj",
         SequencedBrain(plans),
-        plan_payload_max_bytes=1300,
+        plan_payload_max_bytes=ONE_RAW_PER_BATCH,
         pass_budget=pass_budget,
     )
 
@@ -476,3 +485,62 @@ def test_distill_budget_exhaustion_stops_the_loop_immediately(root: Path, tmp_pa
     # 1 (PassBudget.__post_init__) + 1 (raw 1's successful debit) + 1 (raw 2's
     # failing debit). Raw 3 must never be reached: no 4th clock read.
     assert len(clock_calls) == 3
+
+
+def test_no_fold_when_the_budget_stops_the_pass_before_any_batch_commits(root: Path) -> None:
+    """The fold journal's `batch_count` gate, on the ONE path that reaches the
+    pass-end `_log_pass` with nothing committed.
+
+    `noop` and the first-batch abort both return through their own earlier
+    `_log_pass` calls, which never take a fold at all — so neither exercises the
+    gate (both still pass with it removed). Budget exhaustion on the *first*
+    plan call is different: it breaks out of the loop with `plan_error` unset,
+    so `batch_count == 0` falls all the way through to the pass-end log. Without
+    the gate an empty fold is written for a pass that consumed nothing, which a
+    graph reader would count as a real pass that attributed no facts.
+    """
+    _seed(root, "proj", 3)
+    # A tombstone to prune, so step 7 running is OBSERVABLE rather than a
+    # no-op that would pass either way (see the P2-DOCS-PLAN-ACCURACY-001 block
+    # at the end of this test). `tombstone_grace_days=0` puts it past grace.
+    store.upsert_curated(root, "proj", "doomed", "body")
+    store.soft_delete_curated(root, "proj", "doomed")
+    tomb = store.memory_dir("proj", root) / ".tombstones" / "doomed.md"
+    assert tomb.exists()  # precondition
+
+    # Past the deadline on the very first debit: __post_init__ reads 0.0, the
+    # first plan call reads 999.0 > max_seconds.
+    ticks = iter([0.0] + [999.0] * 500)
+    pass_budget = budget_mod.PassBudget(
+        max_raws=1000,
+        max_brain_calls=1000,
+        max_brain_attempts=10_000,
+        max_distill_chunks=1000,
+        max_seconds=60,
+        clock=lambda: next(ticks),
+    )
+    brain = FakeBrain()
+
+    summary = engine.curate(root, "proj", brain, pass_budget=pass_budget, tombstone_grace_days=0)
+
+    assert brain.plan_calls == 0  # nothing ever planned
+    assert summary["batches"] == 0
+    assert summary["status"] != "error"  # a bounded stop, not a failure
+    assert len(store.list_raw(root, "proj", unconsumed_only=True)) == 3
+
+    (record,) = _read_log(root, "proj")
+    assert "fold" not in record  # no committed batch ⇒ no fold record
+
+    # Codex P2-DOCS-PLAN-ACCURACY-001: this same path is ALSO the one place the
+    # fold gate and the steps 7/8 gate visibly diverge, so pin both halves here
+    # rather than leaving the asymmetry to prose. Prune and synthesis are NOT
+    # `batch_count`-gated — they are idempotent housekeeping over `curated/` and
+    # deliberately still run on a bounded zero-commit stop. If someone "fixes"
+    # the asymmetry by commit-gating them, this fails and sends them to ADR-0022.
+    assert summary["pruned_tombstones"] == 1  # step 7 ran
+    assert not tomb.exists()  # ...and actually hard-deleted the expired tombstone
+    # Step 8 ran too. `brain.text` is NOT the probe here — with zero active facts
+    # `_synthesize` short-circuits to the placeholder body without calling the
+    # model — so assert on the artifact synthesis always writes.
+    node = store.memory_dir("proj", root) / "nodes" / f"{engine.node_name('proj')}.md"
+    assert node.exists()

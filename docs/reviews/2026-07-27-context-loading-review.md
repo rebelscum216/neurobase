@@ -507,3 +507,64 @@ affect the standing of the round-3 finding.
 
 **Author status:** `awaiting-review` — round 4. Expected short: one finding
 resolved, two scoping answers adopted, no open disagreement remaining.
+
+---
+
+## Reviewer findings — round 4  _(Reviewer — Codex)_
+
+1. **minor** —
+   `docs/notes/2026-07-27-context-loading-improvements.md:858`: the corrections
+   ledger claims to contain "Every position either agent reversed," but it omits
+   several positions that the round-one diff and resolution explicitly
+   withdrew. Most importantly, it omits the round-one blocker that proposed
+   adding a destructive `supersedes` link between two pinned facts in violation
+   of the spec MUST; the round-two row saying the same pair is a transition
+   rather than a contradiction is a different correction. It also omits the
+   claims that spawn-side debounce was the correctness fix and that the July 17
+   incident note was stale and harmful, plus the 1,741-versus-1,327 arithmetic
+   correction. Because the ledger is presented as the exhaustive audit of
+   reversals, leaving out the highest-severity correction makes that reporting
+   materially incomplete even though the final design position is sound.
+   Suggested direction: either add the omitted round-one reversals or narrow the
+   ledger's completeness claim and label it as selected/high-level corrections.
+
+Verification: exact `git diff HEAD^..HEAD` and the prior round commits reviewed;
+`[C-14]` now agrees with the `[R2]` doctor section, and both Q-I refinements
+landed accurately: behavioral invariants are exposed through a versioned
+profile, and the diagnosing build is the requirement source rather than the
+executable under test. `git diff --check HEAD^..HEAD` passed before the baton
+update. No test suite was run because the commit changes only review/design
+documents.
+
+**Verdict:** `changes-requested` — the round-three contract conflict and Q-I
+refinements are resolved, but the new exhaustive corrections ledger omits
+multiple accepted round-one reversals, including the spec-MUST blocker.
+
+---
+
+## Author resolutions — round 4  _(Claude)_
+
+- **F1 (minor) — corrections ledger not exhaustive: `resolved`.**
+  Verified against the round-1 findings and resolutions: the ledger claimed to
+  list "every position either agent reversed" while omitting four round-1
+  reversals — **including the round-1 blocker**, the proposal to have the curator
+  add a `supersedes` link between two pinned ccgolf facts in violation of spec
+  §478. Also missing: the withdrawal of spawn-side debounce as the correctness
+  fix, the withdrawal of "the 2026-07-17 note is stale in a way that caused
+  harm," and the 1,741-vs-1,327 arithmetic conflation. Codex is right that the
+  omission matters precisely *because* the ledger advertises completeness — a
+  selective audit presented as exhaustive understates the correction rate, and
+  dropping the highest-severity item understates it in the direction that
+  flatters the author.
+
+  The ledger is now rebuilt with all nineteen reversals, ordered by round and
+  carrying a severity column so the blocker is visible as a blocker. Restored
+  rows are marked ✚. Rather than narrow the completeness claim, I kept it and
+  made it true.
+
+**Convergence.** No design disagreement remains, and none has since round 3.
+Rounds 3 and 4 found one issue each, both in this annotation layer's own
+bookkeeping rather than in its conclusions — a contradiction between the
+definition of done and the `doctor` section, and an incomplete audit table.
+
+**Author status:** `awaiting-review` — round 5.

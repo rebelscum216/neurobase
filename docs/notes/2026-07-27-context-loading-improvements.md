@@ -354,10 +354,20 @@ change because it affects architecture, deployment, testing, and pending work.
 
 > **[C-9] [R1] Rewritten — the original fixture proposal violated a spec MUST.**
 >
-> The store contains a worked example of the *contradiction* this phase targets:
+> The store contains a worked example of a *transition* spanning two facts:
 > `cc-golf-lab-mobile-finding-2026-07-27...` describes the in-app scheduler's
 > booking page as an open concern while noting "Square's widget replaces that UI."
 > Two active facts, one transition, no `supersedes` link.
+>
+> **[R2] This pair is not an unresolved contradiction, and an earlier revision
+> labelled it as one.** The two facts *agree*: the mobile finding says the issue
+> is low priority because Square replaces that UI and matters only if the pivot is
+> reversed, and the pivot fact says the scheduler is deliberately kept as a
+> fallback. So it is a valid fixture for **transition display** — showing two
+> pinned facts together without modifying either — but it **cannot** demonstrate
+> that an unresolved-contradiction diagnostic fires. That acceptance criterion
+> needs a genuinely inconsistent, unpinned pair, which this store does not
+> currently contain.
 >
 > An earlier revision proposed making the curator add that link. **That is a spec
 > violation:** both facts carry `provenance: [user-directed]`, and spec §478
@@ -585,9 +595,19 @@ of the more subjective intent router.
 > and assumed to be running. None of them were. That is why 125 curators spawned
 > concurrently — exactly the pre-hardening failure mode of 2026-07-17.
 >
-> Consequently: **current source has never been exercised by a live hook on this
-> machine.** No conclusion about the sufficiency of the current design can be
-> drawn from this incident, in either direction.
+> **[R2]** An earlier revision drew the conclusion "current source has never been
+> exercised by a live hook on this machine." **That overstates it** — the
+> 2026-07-17 note records live marker spikes on 2026-07-20 using project-scoped
+> hooks installed from the development checkout, including a Codex spike and an
+> `--ignore-user-config` follow-up. The correct, narrower boundary:
+>
+> - The 2026-07-27 **user-scoped** hooks ran the stale 2026-07-09 artifact.
+> - **The current installed shim under concurrent startup has never been
+>   exercised.** That specific combination — which is the one that failed — is
+>   what item 0b must cover.
+>
+> No conclusion about the sufficiency of the current design under concurrency can
+> be drawn from this incident, in either direction.
 >
 > Two further corrections:
 >
@@ -608,42 +628,89 @@ of the more subjective intent router.
 > - **Arithmetic.** An earlier revision juxtaposed "1,996 → 3,323 entries" with
 >   "1,741 passes in one day." Those are two different measurements taken at
 >   different times (1,741 was the day's total at first sampling; 1,327 is the
->   growth between the two samples) and reading them together implies a
->   contradiction. Stated correctly: the neurobase log grew by **1,327 entries
->   between two samples minutes apart**, against a pre-2026-07-27 baseline of
->   1–11 passes per day.
+>   growth between the two samples; the day closed at 2,028). Stated correctly:
+>   the neurobase log grew by **1,327 entries between two samples minutes apart**.
+>
+> - **[R2] The "1–11 per day baseline" was wrong, and the error was
+>   methodological.** It came from a per-day histogram truncated to the last eight
+>   days, which began on 07-17 — so the window silently excluded everything
+>   before it, and a generalization was drawn from the truncated view. The full
+>   log:
+>
+>   | Date | Passes | |
+>   |---|---|---|
+>   | 07-09 → 07-14 | 1, 9, 13, 37, 42 | ramp-up |
+>   | **07-15** | **198** | |
+>   | **07-16** | **967** | ← the original runaway |
+>   | 07-17 → 07-20 | 1, 1, 1, 1 | post-containment |
+>   | 07-21 → 07-23 | 7, 6, 11 | post-containment |
+>   | **07-27** | **2,028** | ← this recurrence |
+>
+>   1–11 is the **post-containment 07-17 → 07-23 baseline specifically**, not a
+>   general one. Note also that `neurobase`'s last successful synthesis
+>   (`2026-07-16T17:20:22Z`) falls *inside* the 07-16 runaway — so the node this
+>   whole document is about was produced during the first incident, and nothing
+>   has succeeded since. The two runaway populations must be kept separate when
+>   reasoning about the quiet interval.
+>
 > - **ccgolf shows no pre-burst failure.** Its log has exactly one `ok` pass on
 >   2026-07-20 and then nothing until the 2026-07-27 burst. Its 36 failures are
 >   all inside the burst, so ccgolf's staleness is *seven days of no curation*,
->   not seven days of failing curation. The claim of a pre-existing synthesis
->   defect survives **only for `neurobase`**, which logged errors on 07-17, 07-18,
->   07-19, 07-21 (7), 07-22 (6) and 07-23 (11) — all, note, also under the July-9
->   shim.
+>   not seven days of failing curation.
+>
+> - **[R2] The claim of an independent synthesis defect is withdrawn entirely.**
+>   The 07-17 → 07-23 error series is valid *curate-health* evidence — the
+>   deployed pipeline kept failing after containment — but every one of those
+>   passes also ran the 2026-07-09 artifact, and the log does not separate
+>   implementation, provider, input, and concurrency causes. It establishes no
+>   defect in current synthesis. Diagnose with controlled quiet passes on a
+>   current build instead.
+>
 > - **The `claude -p` timeouts remain substantially a contention symptom.** 125
->   concurrent curators against one subscription will time out. Diagnose on a
->   quiet machine, on a current build, before treating the timeout as an
->   independent defect.
+>   concurrent curators against one subscription will time out.
 >
 > ### [R1] Proposed resequencing
 >
 > | # | Work | Why first |
 > |---|---|---|
-> | 0 | **Resolve the installed-artifact skew** — upgrade `neurobase-cli`, assert `core.locks` + `core.process_guard` are present in the *installed* package, pin the shim version in `doctor` | The hooks have never run the hardened code; nothing else is measurable until they do |
-> | 0b | **Live regression on the current shim** in one disposable repo before re-enabling `SessionStart` anywhere | Proves the single-flight lock under real concurrency |
+> | 0 | **Resolve the installed-artifact skew** — upgrade `neurobase-cli` and verify the *installed* package, not the source tree | The hooks have never run the hardened code under concurrency; nothing else is measurable until they do |
+> | 0b | **Concurrent-startup regression on the current shim** in one disposable repo before re-enabling `SessionStart` anywhere | The specific combination that failed; the 07-20 marker spikes did not cover it |
 > | 0c | **Append** recurrence + version-skew evidence to the 2026-07-17 note | It is the control that failed; keep one record, don't fork it |
-> | 1 | **`doctor` gains a curate-health check** and an installed-vs-source version check | ~10 lines; would have caught both the stale nodes *and* the skew |
-> | 2 | "Search beneath the summary" clause in the inject `HEADER` | Most of Phase 5, one string |
-> | 3 | One clean curate pass on a current build, then diagnose supersession | Prerequisite for any Phase 3 scoping ([C-8]) |
+> | 1 | **`doctor` gains a curate-health check + a build-capability check** (see below) | Would have caught the stale nodes *and* the skew |
+> | 2 | "Search beneath the summary" clause in the inject `HEADER` | Most of Phase 5, one string, independent of pipeline health |
+> | 3 | One clean curate pass on a current build **with a deliberately unpinned obsolescence case**, then diagnose supersession | Prerequisite for any Phase 3 scoping ([C-8]) |
 > | 4 | Stale detection + material-fact supplement (Phase 2, minus pre-injection regeneration) | Degrades gracefully while synthesis is down |
 > | 5 | Injection-point ADR, agent-capability-specific (Phase 1) | Genuine architectural fork; needs its own decision record ([C-3]) |
 >
 > Items 0–0c and 1 are not ADR material — they are a build/packaging defect, a
 > test, a doc append, and a diagnostic. Item 5 is the real ADR-0025.
 >
-> **A note on `doctor`.** It reported all-green immediately before this incident.
-> It verifies that the hook command *string* matches the shim path, but never that
-> the shim is current or contains the safety code it depends on. That gap is what
-> allowed a three-week-old binary to look correctly installed.
+> ### [R2] `doctor` needs a capability check, not a version check
+>
+> `doctor` reported all-green immediately before this incident. It verifies that
+> the hook command *string* matches the shim path, but never that the shim
+> contains the safety code it depends on.
+>
+> An earlier revision proposed fixing this with a version/module comparison.
+> **That is insufficient:** this repo holds `version = "0.1.0"` constant across
+> many source changes (two version bumps in the entire history), so two materially
+> different builds report the same version. Asserting `core.locks` and
+> `core.process_guard` merely proves a build is newer than one 2026-07-09
+> snapshot — not that its guards, budgets, or Codex hook suppression match current
+> source. And an installed `doctor` run outside a checkout has no source tree to
+> compare against at all. The observed `0.1.0.dev0` skew would be caught; the next
+> same-version stale build would sail through.
+>
+> **What is needed instead:** a durable build identity — an embedded revision plus
+> an explicit **safety-capability set** — compared against the exact executable
+> named by each *enabled* hook. Then split the diagnostic (Q-F):
+>
+> - **Error, `doctor` non-green:** an enabled `SessionStart` hook whose executable
+>   lacks a required safety capability (reentrancy guard, single-flight,
+>   pass budget, Codex hook suppression). Reporting this does not wedge the hook;
+>   it prevents another unsafe all-green.
+> - **Warning only:** benign source-tree / build-version divergence, which is
+>   normal and intentional during development.
 
 ## Definition of done
 
@@ -713,18 +780,34 @@ The work is complete when:
 > whether spawn-side debounce is worth building at all once the single-flight lock
 > is actually running. Both agents agree it is not the correctness boundary.
 >
-> ### Open questions for round 2
+> ### Round 2 outcome
 >
-> - **Q-E:** With version skew identified as the root cause, does anything in
->   items 1–5 of the resequencing change order? Specifically, should item 3 (clean
->   curate pass) precede item 2 (the `HEADER` clause), since item 2 is independent
->   of the pipeline?
-> - **Q-F:** Should `doctor` fail hard, or warn, when the installed package is
->   older than the source tree? Hard failure risks wedging a working install
->   during development, where the two legitimately diverge.
-> - **Q-G:** Is "contradiction display vs. destructive supersession" ([C-9]) the
->   right seam, or does surfacing a contradiction between two pinned facts still
->   constitute a modification the spec means to forbid?
-> - **Q-H:** Does the neurobase-only pre-burst error series (07-17 through 07-23,
->   all under the July-9 shim) support *any* claim of a synthesis defect
->   independent of the missing hardening, or should that claim be dropped too?
+> Codex returned `changes-requested` again — 1 major, 3 minor, all narrower than
+> round 1 and all confined to this annotation layer. **All four verified and
+> accepted; no pushback.** Resolutions marked `[R2]` inline.
+>
+> | Q | Round-2 answer | Status |
+> |---|---|---|
+> | **Q-E** | Keep item 2 before item 3 — the `HEADER` clause is independent of curation health. A clean pass proves nothing about supersession unless its input contains an unpinned obsolescence case | **Agreed.** Item 3 now specifies that input |
+> | **Q-F** | Split it: warn on source/build divergence (often intentional), error on an *enabled* `SessionStart` hook missing a required safety capability | **Agreed.** Folded into the `doctor` section |
+> | **Q-G** | Yes, display vs. destructive mutation is the right seam — provided the display preserves both facts verbatim, marks the conclusion derived, and doesn't silently declare one current | **Agreed.** Constraints adopted |
+> | **Q-H** | Drop the independent-defect claim; the series is valid curate-health evidence but isolates no cause | **Agreed.** Claim withdrawn |
+>
+> Round-2 findings also corrected three of this layer's own errors: a
+> version-based `doctor` check that cannot detect a same-version stale build; an
+> over-absolute "never exercised by a live hook" claim that erased the 2026-07-20
+> marker spikes; and a "1–11 per day baseline" drawn from a histogram truncated to
+> the last eight days, which hid an earlier 967-pass runaway on 07-16.
+>
+> The two agents now agree on: the root cause (version skew), the containment
+> ordering, the display/destructive seam, the `doctor` error/warn split, and that
+> no synthesis defect is established. No open disagreement remains.
+>
+> ### Open questions for round 3
+>
+> - **Q-I:** Is the safety-capability set enumerable as a stable contract
+>   (reentrancy guard, single-flight, pass budget, Codex hook suppression), or does
+>   pinning it in `doctor` create a list that silently rots as new guards land?
+> - **Q-J:** Does this annotated document now stand on its own, or should the
+>   `[C-13]` incident material be extracted into its own note and cross-linked,
+>   leaving this file as pure design commentary?

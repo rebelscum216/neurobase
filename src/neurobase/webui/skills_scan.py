@@ -71,19 +71,22 @@ def _frontmatter(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else {}
 
 
-def _managed_slug(fm: dict[str, Any]) -> str | None:
+def _managed_slug(fm: dict[str, Any], expected_slug: str) -> str | None:
     """The canonical Neurobase slug this ``SKILL.md`` legitimately claims, or
-    ``None`` when it is external. Mirrors the emitter's **strict** ownership
-    predicate (``recommender/emitters.py``): only ``neurobase_managed`` being the
-    boolean ``True`` (not a truthy string like ``"false"``) *and* a valid
-    canonical ``neurobase_slug`` counts as managed. This is what stops a foreign or
-    type-confused frontmatter from spoofing "Neurobase-managed" or suppressing a
-    genuine drift card merely by carrying a matching ``neurobase_slug`` (Codex
-    P2-CORRECTNESS-005)."""
+    ``None`` when it is external. Mirrors the emitter's **full** ownership
+    predicate (``recommender/emitters.py:_is_managed``), which requires all of:
+    ``neurobase_managed`` being the boolean ``True`` (not a truthy string like
+    ``"false"``), a valid canonical ``neurobase_slug``, **and** that slug equalling
+    the expected one — for a genuine install that is the skill's own directory name
+    (``<scope>/.claude/skills/<slug>/SKILL.md``, which the emitter stamps as
+    ``neurobase_slug: <slug>``). The equality is what stops a foreign
+    ``sneaky/SKILL.md`` that carries ``neurobase_slug: gone-skill`` from being read
+    as ``gone-skill``'s managed install and suppressing that proposal's real drift
+    card (Codex P2-CORRECTNESS-005, round 2)."""
     if fm.get("neurobase_managed") is not True:
         return None
     slug = fm.get("neurobase_slug")
-    if isinstance(slug, str) and store.SLUG_RE.match(slug):
+    if isinstance(slug, str) and store.SLUG_RE.match(slug) and slug == expected_slug:
         return slug
     return None
 
@@ -101,11 +104,11 @@ def _scan(skills_dir: Path, scope: str, project: str | None) -> list[InstalledSk
         fm = _frontmatter(skill_md)
         if fm is None:
             continue  # unreadable/undecodable SKILL.md — skip, never fatal (P2-CORRECTNESS-004)
-        # Ownership is the strict emitter predicate, and `nb_slug` is retained ONLY
-        # when it is genuinely managed — so a foreign skill carrying a stray
-        # `neurobase_slug` neither shows as managed nor pollutes `present_nb`
-        # (Codex P2-CORRECTNESS-005).
-        nb_slug = _managed_slug(fm)
+        # Ownership is the full emitter predicate keyed on THIS directory's slug,
+        # and `nb_slug` is retained ONLY when it genuinely matches — so a foreign
+        # skill carrying a stray or mismatched `neurobase_slug` neither shows as
+        # managed nor pollutes `present_nb` (Codex P2-CORRECTNESS-005).
+        nb_slug = _managed_slug(fm, sub.name)
         out.append(
             InstalledSkill(
                 slug=sub.name,

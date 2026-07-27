@@ -34,11 +34,11 @@ from neurobase.recommender import install, proposals
 from neurobase.recommender import metrics as recommend_metrics
 from neurobase.webui import skills_scan
 
-# Statuses `edit`/`accept` must never operate on (mirrors `recommend edit`'s
-# and `install.prepare_install`'s own guards — re-checked here so a stale
-# link never reaches those functions with a decided proposal for `edit`,
-# which has no typed-exception guard of its own).
-_EDIT_BLOCKED_STATUSES = frozenset({"rejected", "superseded"})
+# Statuses `edit`/`accept` must never operate on — re-checked here so a stale link
+# gives a clean 409 at the request boundary. The authoritative guard now lives
+# inside the locked `proposals.save_edited_draft` (Codex P1-DATA-INTEGRITY-001 r2);
+# this route-level check is the friendly early message, single-sourced from there.
+_EDIT_BLOCKED_STATUSES = proposals.EDIT_BLOCKED_STATUSES
 
 
 def suggestions_routes() -> list[Route]:
@@ -237,10 +237,16 @@ def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
-def _suggestions_context(request: Request, sel: dict[str, Any] | None) -> dict[str, Any]:
+def _suggestions_context(
+    request: Request, sel: dict[str, Any] | None, root: Path | None = None
+) -> dict[str, Any]:
     """Shared two-pane context: the (filtered) queue on the left, plus the
-    selected proposal or the metrics overview on the right."""
-    root = _read_root(request)
+    selected proposal or the metrics overview on the right. ``root`` lets a caller
+    that already opened a request-local READ handle (e.g. ``_suggestion_detail``)
+    reuse its validated root, so one request opens one handle and reads one store
+    snapshot rather than two (Codex round-2 non-blocking note)."""
+    if root is None:
+        root = _read_root(request)
     all_rows = [_list_row(doc) for doc in proposals.load_all_proposals(root)]
     status = request.query_params.get("status", "pending")
     if status not in _STATUS_FILTERS:
@@ -331,7 +337,7 @@ async def _suggestion_detail(request: Request) -> Response:
         ctx = {**_base_context(request), "sel": sel}
         return _templates(request).TemplateResponse(request, "suggestion_detail.html", ctx)
     return _templates(request).TemplateResponse(
-        request, "suggestions_list.html", _suggestions_context(request, sel=sel)
+        request, "suggestions_list.html", _suggestions_context(request, sel=sel, root=root)
     )
 
 
@@ -615,6 +621,11 @@ def _session_rows(handle: Any) -> list[dict[str, Any]]:
     for project in handle.load_registry():
         try:
             for doc in handle.list_raw(project, unconsumed_only=False):
+                # Skip a capture that resolves outside the store — a symlinked
+                # `raw/` dir (or entry) must not surface external metadata on the
+                # list, just as the detail read refuses it (Codex P2-SAFETY-SECURITY-003).
+                if not handle.contains(doc.file_path):
+                    continue
                 rows.append(_session_row(project, doc))
         except (OSError, ValueError):
             continue
@@ -720,7 +731,13 @@ def _memory_facts(handle: Any) -> list[dict[str, Any]]:
     facts: list[dict[str, Any]] = []
     for project in sorted(handle.load_registry()):
         try:
-            facts.extend(_fact_row(project, d) for d in handle.list_curated(project, True))
+            facts.extend(
+                _fact_row(project, d)
+                for d in handle.list_curated(project, True)
+                # A symlinked `curated/` dir (or entry) resolves outside the store;
+                # don't list an external fact (Codex P2-SAFETY-SECURITY-003).
+                if handle.contains(d.file_path)
+            )
         except (OSError, ValueError):
             continue
     facts.sort(key=lambda f: str(f["updated_at"] or ""), reverse=True)

@@ -168,13 +168,21 @@ class StoreHandle:
         self._require_within_store(path)
         return store.mark_consumed(path, expect_digest=expect_digest)
 
-    def _require_within_store(self, path: Path) -> None:
-        """Reject a path that does not resolve to somewhere under ``self.root``.
-        Both sides are resolved so ``..`` and symlinks cannot smuggle a target
-        outside the store tree."""
+    def contains(self, path: Path) -> bool:
+        """True when ``path`` resolves to somewhere at or beneath this handle's
+        validated root. Both sides are resolved, so ``..``, an absolute path, or a
+        **symlink** cannot smuggle a target outside the store tree — and a store
+        whose own root is reached through a symlink (e.g. macOS ``/var`` →
+        ``/private/var``) still matches, because the root is resolved too. The
+        predicate form of :meth:`_require_within_store`, for read paths that filter
+        entries rather than raise (Codex P2-SAFETY-SECURITY-003)."""
         root = self.root.resolve()
         target = path.resolve()
-        if target != root and not target.is_relative_to(root):
+        return target == root or target.is_relative_to(root)
+
+    def _require_within_store(self, path: Path) -> None:
+        """Reject a path that does not resolve to somewhere under ``self.root``."""
+        if not self.contains(path):
             raise ValueError(
                 f"{path} is outside this handle's store ({self.root}); a handle may "
                 "only operate on files within its own validated root"

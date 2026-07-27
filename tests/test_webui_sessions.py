@@ -164,6 +164,28 @@ def test_symlinked_raw_dir_is_404_over_http(tmp_path: Path, store_root: Path) ->
     assert "external loot" not in r.text
 
 
+def test_symlinked_raw_dir_not_in_sessions_list(tmp_path: Path, store_root: Path) -> None:
+    """P2-SAFETY-SECURITY-003 (round 2): the LIST read must also refuse a symlinked
+    `raw/` — a well-formed external capture would otherwise render its metadata on
+    /sessions even though the detail read refuses it."""
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "2026-07-09T00-00-00.000000Z_claude_extsess1.md").write_text(
+        "---\nsession_id: EXTERNALSESS\nagent: claude\nbranch: leak\n"
+        "captured_at: 2026-07-09T00:00:00Z\n---\n\nexternal capture body",
+        encoding="utf-8",
+    )
+    real_raw = store.memory_dir(PROJECT, store_root) / "raw"
+    for f in real_raw.iterdir():
+        f.unlink()
+    real_raw.rmdir()
+    real_raw.symlink_to(external, target_is_directory=True)
+
+    client = TestClient(build_app(store_root), base_url="http://127.0.0.1:8765")
+    html = client.get("/sessions").text
+    assert "EXTERNALSESS" not in html, "a symlinked raw/ dir surfaced on the sessions list"
+
+
 def test_traversal_url_is_404_over_http(client: TestClient) -> None:
     r = client.get(f"/sessions/{PROJECT}/..%2f..%2f..%2fstore.toml")
     assert r.status_code == 404

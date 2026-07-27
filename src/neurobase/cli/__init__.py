@@ -997,7 +997,9 @@ def recommend_edit(slug: str, root: str | None = typer.Option(None, "--root")) -
         typer.secho(f"proposal {slug!r} not found or malformed", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     status = str(doc.get("status") or "proposed")
-    if status in {"rejected", "superseded"}:
+    if status in proposals.EDIT_BLOCKED_STATUSES:
+        # Friendly early message; save_edited_draft re-checks authoritatively under
+        # the lifecycle lock (Codex P1-DATA-INTEGRITY-001 r2).
         typer.secho(f"cannot edit proposal {slug!r}: status is {status}", err=True)
         raise typer.Exit(code=1)
     draft = proposals.extract_draft(doc.body)

@@ -166,6 +166,39 @@ def test_symlinked_nodes_dir_is_skipped(tmp_path: Path, store_root: Path) -> Non
     assert "EXTERNAL NODE BODY" not in html, "a symlinked nodes/ dir must not be rendered"
 
 
+def _symlink_curated_to_external(tmp_path: Path, store_root: Path) -> None:
+    external = tmp_path / "external-curated"
+    external.mkdir(exist_ok=True)
+    (external / "leaky-external.md").write_text(
+        "---\nname: leaky-external\nstatus: active\n---\n\nEXTERNAL CURATED BODY about widgets",
+        encoding="utf-8",
+    )
+    curated = store.memory_dir(PROJECT, store_root) / "curated"
+    for f in curated.iterdir():
+        f.unlink()
+    curated.rmdir()
+    curated.symlink_to(external, target_is_directory=True)
+
+
+def test_symlinked_curated_dir_not_in_memory_list(tmp_path: Path, store_root: Path) -> None:
+    """P2-SAFETY-SECURITY-003 (round 2): the Memory LIST must also refuse a
+    symlinked `curated/` — an external fact must not be listed."""
+    _symlink_curated_to_external(tmp_path, store_root)
+    client = TestClient(build_app(store_root), base_url="http://127.0.0.1:8765")
+    html = client.get("/memory").text
+    assert "leaky-external" not in html, "a symlinked curated/ dir surfaced on the memory list"
+
+
+def test_symlinked_curated_dir_not_indexed_by_search(tmp_path: Path, store_root: Path) -> None:
+    """P2-SAFETY-SECURITY-003 (round 2): search must not index/snippet a fact that
+    resolves outside the store through a symlinked `curated/`."""
+    _symlink_curated_to_external(tmp_path, store_root)
+    client = TestClient(build_app(store_root), base_url="http://127.0.0.1:8765")
+    r = client.get("/search", params={"q": "widgets"})
+    assert r.status_code == 200
+    assert "EXTERNAL CURATED BODY" not in r.text and "leaky-external" not in r.text
+
+
 def test_search_finds_a_fact_and_links_to_it(client: TestClient) -> None:
     r = client.get("/search", params={"q": "uv"})
     assert r.status_code == 200

@@ -62,6 +62,13 @@ DRAFT_END = "<!-- neurobase:draft:end -->"
 # Statuses that a fresh `proposed` render must never overwrite (§12.6 Invariant).
 _DECIDED_STATUSES = frozenset({"accepted", "rejected", "superseded"})
 
+# Statuses `recommend edit` must refuse: a rejected or superseded proposal is a
+# decided one whose draft must not change (§12.7). Authoritative — enforced inside
+# the locked `save_edited_draft` so a stale route/CLI pre-check that passed before a
+# concurrent reject cannot let an edit through (Codex P1-DATA-INTEGRITY-001, r2).
+# `accepted` is intentionally editable (a re-accept re-installs the revised draft).
+EDIT_BLOCKED_STATUSES = frozenset({"rejected", "superseded"})
+
 # The §12.1 proposal schema, enforced structurally on every load so a
 # malformed-but-parseable file is skipped rather than crashing a consumer or —
 # worse — handing a traversal-shaped `name` to a path-building emitter.
@@ -224,46 +231,56 @@ def _write_one(
 ) -> None:
     slug = candidate.slug
     body = redact_body(render_body(candidate))
-    existing = load_proposal(root, slug)
-    path = proposal_path(root, slug)
+    # Take the store-wide lifecycle lock for the whole load → decided-status check
+    # → write → supersede → append. Without it, a miner refresh that loaded a
+    # `proposed` proposal could resume *after* a concurrent `reject` committed and
+    # re-write it back to `proposed` — silently undoing the decision (Codex
+    # P1-DATA-INTEGRITY-001, round 2). The lock is re-acquired per candidate so a
+    # long batch never starves an interactive accept/reject. `_apply_supersedes`
+    # writes other slugs directly (never via the public locked functions), so this
+    # does not re-enter the lock. Non-mutating branches (malformed/declined) hold
+    # it only briefly.
+    with _lifecycle_lock(root):
+        existing = load_proposal(root, slug)
+        path = proposal_path(root, slug)
 
-    if existing is None:
-        # Missing and malformed are deliberately distinct on the write path.
-        # A malformed existing proposal is user state we cannot safely interpret,
-        # so fail closed instead of silently replacing it (§12 Invariants).
-        if path.exists():
-            logger.warning("skipping %r: existing proposal is malformed", slug)
-            outcome.skipped_malformed.append(slug)
+        if existing is None:
+            # Missing and malformed are deliberately distinct on the write path.
+            # A malformed existing proposal is user state we cannot safely interpret,
+            # so fail closed instead of silently replacing it (§12 Invariants).
+            if path.exists():
+                logger.warning("skipping %r: existing proposal is malformed", slug)
+                outcome.skipped_malformed.append(slug)
+                return
+            # A brand-new proposal: decline if it merely re-states a still-rejected
+            # one (belt-and-suspenders on the miner prompt, §12.6/D18).
+            if _is_rejected_near_duplicate(body, rejected_bodies, cfg.near_duplicate_threshold):
+                logger.info("declining %r: near-duplicate of a rejected proposal", slug)
+                outcome.declined.append(slug)
+                return
+            _write_proposal(root, candidate, body, created_at=at_iso, updated_at=at_iso)
+            outcome.superseded.extend(_apply_supersedes(root, candidate, at_iso))
+            _append_ledger(root, slug, "proposed", at_iso, candidate.candidate_type)
+            outcome.created.append(slug)
             return
-        # A brand-new proposal: decline if it merely re-states a still-rejected
-        # one (belt-and-suspenders on the miner prompt, §12.6/D18).
-        if _is_rejected_near_duplicate(body, rejected_bodies, cfg.near_duplicate_threshold):
-            logger.info("declining %r: near-duplicate of a rejected proposal", slug)
-            outcome.declined.append(slug)
+
+        status = str(existing.get("status") or "proposed")
+        if status in _DECIDED_STATUSES:
+            # Never silently reset a decided proposal back to proposed (Invariant).
+            outcome.skipped_decided.append(slug)
             return
-        _write_proposal(root, candidate, body, created_at=at_iso, updated_at=at_iso)
+
+        # An existing `proposed` proposal. Preserve a user's hand edit rather than
+        # clobbering it with the miner's fresh draft (§12.6).
+        if _edited_since_last_write(root, slug):
+            outcome.preserved_edits.append(slug)
+            return
+
+        created_at = str(existing.get("created_at") or at_iso)
+        _write_proposal(root, candidate, body, created_at=created_at, updated_at=at_iso)
         outcome.superseded.extend(_apply_supersedes(root, candidate, at_iso))
         _append_ledger(root, slug, "proposed", at_iso, candidate.candidate_type)
-        outcome.created.append(slug)
-        return
-
-    status = str(existing.get("status") or "proposed")
-    if status in _DECIDED_STATUSES:
-        # Never silently reset a decided proposal back to proposed (Invariant).
-        outcome.skipped_decided.append(slug)
-        return
-
-    # An existing `proposed` proposal. Preserve a user's hand edit rather than
-    # clobbering it with the miner's fresh draft (§12.6).
-    if _edited_since_last_write(root, slug):
-        outcome.preserved_edits.append(slug)
-        return
-
-    created_at = str(existing.get("created_at") or at_iso)
-    _write_proposal(root, candidate, body, created_at=created_at, updated_at=at_iso)
-    outcome.superseded.extend(_apply_supersedes(root, candidate, at_iso))
-    _append_ledger(root, slug, "proposed", at_iso, candidate.candidate_type)
-    outcome.refreshed.append(slug)
+        outcome.refreshed.append(slug)
 
 
 # --- supersede transition (§12.6) ------------------------------------------
@@ -484,10 +501,19 @@ def replace_draft(body: str, draft: str) -> str | None:
 
 
 def save_edited_draft(root: Path, slug: str, draft: str, *, now: datetime | None = None) -> bool:
-    """Redact and persist one user edit, appending exactly one ledger event."""
+    """Redact and persist one user edit, appending exactly one ledger event.
+
+    The rejected/superseded guard is enforced HERE, inside the lock, on the status
+    re-read at write time — not only in the route/CLI before the call. Otherwise a
+    caller that checked `proposed` and then raced a concurrent `reject` would still
+    save, mutating a now-rejected draft and appending `edited` (Codex
+    P1-DATA-INTEGRITY-001, round 2). Returns False on a blocked status so the
+    existing "could not save" path fail-closes."""
     with _lifecycle_lock(root):
         doc = load_proposal(root, slug)
         if doc is None:
+            return False
+        if str(doc.get("status") or "proposed") in EDIT_BLOCKED_STATUSES:
             return False
         updated = replace_draft(doc.body, redact_body(draft))
         if updated is None:

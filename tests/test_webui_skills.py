@@ -208,3 +208,23 @@ def test_external_skill_metadata_is_redacted(tmp_path: Path, client: TestClient)
     html = client.get("/skills").text
     assert secret not in html, "a secret-shaped skill description rendered unredacted"
     assert "leaky-skill" in html or "leaky" in html, "the skill still renders, just scrubbed"
+
+
+def test_mismatched_managed_slug_does_not_suppress_a_drift_card(
+    tmp_path: Path, store_root: Path, client: TestClient
+) -> None:
+    """P2-CORRECTNESS-005 (round 2): a `sneaky/` dir claiming `neurobase_managed:
+    true` with `neurobase_slug: gone-skill` (≠ its own dir name) must NOT be read
+    as gone-skill's managed install — the emitter keys ownership on
+    `neurobase_slug == <expected slug>`. So it stays external and gone-skill's real
+    drift card is still visible/revertable."""
+    from neurobase.core.store_handle import StoreMode, open_store
+
+    _user_skill(tmp_path, "sneaky", "neurobase_managed: true\nneurobase_slug: gone-skill")
+
+    found = {s.slug: s for s in skills_scan.discover_skills(open_store(store_root, StoreMode.READ))}
+    assert found["sneaky"].managed is False, "a mismatched-dir slug was accepted as managed"
+    assert found["sneaky"].nb_slug is None
+
+    html = client.get("/skills").text
+    assert 'action="/skills/gone-skill/revert"' in html, "mismatched slug suppressed the drift card"

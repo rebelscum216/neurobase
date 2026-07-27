@@ -17,6 +17,7 @@ re-check (§12.6) — added here for real coverage rather than left untested."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -614,6 +615,89 @@ def test_concurrent_reopen_appends_exactly_one_event(tmp_path: Path) -> None:
     assert len(errors) == 1 and "only a rejected proposal" in errors[0]
     assert _read(root, "prefer-uv-run").get("status") == "proposed"
     assert [e["event"] for e in _ledger_events(root)] == ["proposed", "rejected", "reopened"]
+
+
+def test_concurrent_refresh_and_reject_never_undoes_the_reject(tmp_path: Path) -> None:
+    """P1-DATA-INTEGRITY-001 (round 2): a miner refresh (`write_ranked`) racing a
+    `reject` must not resurrect the proposal. With `write_ranked` under the same
+    lifecycle lock, whichever wins, the reject is final — the ledger never ends
+    `…rejected, proposed`."""
+    import threading
+
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)  # initial proposed
+
+    barrier = threading.Barrier(2)
+    errors: list[str] = []
+
+    def do_refresh() -> None:
+        barrier.wait()
+        try:
+            proposals.write_ranked(root, [_ranked()])  # miner refresh of the same slug
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append(repr(exc))
+
+    def do_reject() -> None:
+        barrier.wait()
+        # If reject wins, it rejects; if the refresh committed first the status is
+        # still proposed, so this still succeeds — a ValueError only if a decided
+        # state raced in, which this two-actor test never produces.
+        with contextlib.suppress(ValueError):
+            proposals.reject_proposal(root, "prefer-uv-run")
+
+    threads = [threading.Thread(target=do_refresh), threading.Thread(target=do_reject)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert _read(root, "prefer-uv-run").get("status") == "rejected", "the reject was undone"
+    assert [e["event"] for e in _ledger_events(root)][-1] == "rejected", "a proposed trailed reject"
+
+
+def test_concurrent_edit_and_reject_never_edits_a_rejected_draft(tmp_path: Path) -> None:
+    """P1-DATA-INTEGRITY-001 (round 2): `save_edited_draft` re-checks the
+    rejected/superseded guard inside the lock, so an edit racing a reject cannot
+    land on a rejected draft — the ledger never ends `…rejected, edited`."""
+    import threading
+
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+
+    barrier = threading.Barrier(2)
+
+    def do_edit() -> None:
+        barrier.wait()
+        proposals.save_edited_draft(root, "prefer-uv-run", "revised draft body")
+
+    def do_reject() -> None:
+        barrier.wait()
+        with contextlib.suppress(ValueError):
+            proposals.reject_proposal(root, "prefer-uv-run")
+
+    threads = [threading.Thread(target=do_edit), threading.Thread(target=do_reject)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert _read(root, "prefer-uv-run").get("status") == "rejected"
+    events = [e["event"] for e in _ledger_events(root)]
+    assert events[-1] == "rejected", f"an edit landed on a rejected proposal: {events}"
+
+
+def test_save_edited_draft_refuses_a_rejected_proposal(tmp_path: Path) -> None:
+    """The authoritative in-lock guard directly: even called straight on a rejected
+    proposal (bypassing the route/CLI pre-check), the save refuses and writes
+    nothing (Codex P1-DATA-INTEGRITY-001, round 2)."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW)
+    ledger_before = _ledger_events(root)
+
+    assert proposals.save_edited_draft(root, "prefer-uv-run", "sneaky revision") is False
+    assert _ledger_events(root) == ledger_before, "a blocked edit appended a ledger line"
 
 
 def test_reopened_proposal_round_trips_and_can_be_rejected_again(tmp_path: Path) -> None:

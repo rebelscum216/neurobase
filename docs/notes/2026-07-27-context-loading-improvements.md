@@ -706,11 +706,27 @@ of the more subjective intent router.
 > named by each *enabled* hook. Then split the diagnostic (Q-F):
 >
 > - **Error, `doctor` non-green:** an enabled `SessionStart` hook whose executable
->   lacks a required safety capability (reentrancy guard, single-flight,
->   pass budget, Codex hook suppression). Reporting this does not wedge the hook;
->   it prevents another unsafe all-green.
+>   lacks a required safety capability (reentrancy suppression, curate
+>   single-flight, automatic pass bounds, Codex config suppression). Reporting this
+>   does not wedge the hook; it prevents another unsafe all-green.
 > - **Warning only:** benign source-tree / build-version divergence, which is
 >   normal and intentional during development.
+>
+> **[R3] Two refinements from round 3 (Q-I), both load-bearing:**
+>
+> 1. **Name behavioral invariants, not modules, and version the set as a
+>    profile.** "Contains `core/locks.py`" rots the moment a guard moves file;
+>    `automatic-curation-safety-v1` does not. When a new guard becomes necessary
+>    to satisfy the minimum safe contract, bump the profile and its tests. This is
+>    the answer to whether the capability list silently decays: it decays only if
+>    it enumerates implementation.
+> 2. **The requirement source must be the *diagnosing* build, never the executable
+>    under test.** A stale binary asked to confirm its own capability baseline will
+>    happily report itself compliant — it does not know what it is missing. So
+>    `doctor` must compare each hook executable against the current diagnosing
+>    build/install manifest. **Self-attestation by a stale binary is not proof of
+>    currency**, and this is precisely how a 2026-07-09 shim passed every check on
+>    2026-07-27.
 
 ## Definition of done
 
@@ -725,12 +741,23 @@ The work is complete when:
   summary.
 - The CC Golf/Square incident passes as an automated regression test.
 
-> **[C-14]** Add three, the third **[R1]** from review round 1:
+> **[C-14]** Add three, the third **[R1]** from round 1 and **[R3]** rewritten in
+> round 3:
 >
 > - Automatic curation cannot spawn unbounded concurrent processes.
 > - A synthesis failure is visible in `doctor` within one pass.
-> - **The shim the hooks invoke is verified current, and `doctor` fails when the
->   installed package is older than the source it was built from.**
+> - **[R3]** The exact executable named by each *enabled* startup hook satisfies
+>   the **diagnosing build's versioned safety-capability profile**, and `doctor`
+>   is non-green when it does not.
+>
+> **[R3] Correction:** the round-1 wording of the third item required `doctor` to
+> fail "when the installed package is older than the source it was built from" —
+> the very version-ordering criterion `[R2]` rejects in the `doctor` section
+> above. That left two conflicting specifications in one document, in the
+> completion gate no less, which would have sent implementation straight back to
+> the check round 2 found insufficient. Source/build divergence is
+> **warning-level provenance evidence only**; the capability profile is the
+> safety gate.
 >
 > Without these, everything above can be true while the system is on fire.
 
@@ -803,11 +830,49 @@ The work is complete when:
 > ordering, the display/destructive seam, the `doctor` error/warn split, and that
 > no synthesis defect is established. No open disagreement remains.
 >
-> ### Open questions for round 3
+> ### Round 3 outcome — converged
 >
-> - **Q-I:** Is the safety-capability set enumerable as a stable contract
->   (reentrancy guard, single-flight, pass budget, Codex hook suppression), or does
->   pinning it in `doctor` create a list that silently rots as new guards land?
-> - **Q-J:** Does this annotated document now stand on its own, or should the
->   `[C-13]` incident material be extracted into its own note and cross-linked,
->   leaving this file as pure design commentary?
+> Codex returned one `major` finding: `[C-14]`'s definition of done still carried
+> the round-1 version-ordering criterion that `[R2]` had already rejected two
+> sections earlier — two conflicting specifications for the same control, in the
+> document's completion gate. Verified and accepted; fixed above as `[R3]`.
+>
+> | Q | Round-3 answer | Status |
+> |---|---|---|
+> | **Q-I** | The set is stable if it names behavioral invariants rather than modules and is exposed as a versioned profile; and the requirement source must be the diagnosing build, never the executable under test | **Agreed.** Both folded into the `doctor` section |
+> | **Q-J** | Move the detailed recurrence evidence into the existing 2026-07-17 incident note — don't create a third record; keep a cross-link, the design consequences, and the resequencing table here | **Agreed.** This *is* resequencing item 0c; executing it is implementation work, not a change to this document's position |
+>
+> **No open disagreement remains.** Across three rounds the two agents converged
+> on: the root cause (version skew in the installed shim); that containment and
+> proof-of-currency outrank every phase in the original document; the
+> display-vs-destructive seam for pinned facts; a versioned safety-capability
+> profile checked against the diagnosing build as the recurrence control; and the
+> withdrawal of any claim of an independent synthesis defect.
+>
+> Three of the original document's phases survive largely intact (2 minus
+> pre-injection regeneration, 4, 5). Phase 1 is re-scoped as an
+> agent-capability-specific ADR. Phase 3 blocks on a controlled diagnostic pass.
+>
+> ### Corrections ledger
+>
+> Every position either agent reversed, in order — the point of keeping `[Rn]`
+> markers inline rather than editing silently:
+>
+> | Round | Claim withdrawn | By |
+> |---|---|---|
+> | R1 | "Timestamps are byte-identical" | Claude |
+> | R1 | "ADR-0022 shipped the lifecycle schema" | Claude |
+> | R1 | "The curator never writes `supersedes`" | Claude |
+> | R1 | "Phase 1 moves to `UserPromptSubmit`" (not cross-agent) | Claude |
+> | R1 | "A router necessarily puts an LLM on every prompt path" | Claude |
+> | R1 | "The hardening was in place and failed" → version skew | Claude |
+> | R1 | ccgolf pre-burst synthesis defect | Claude |
+> | R2 | "Current source never exercised by a live hook" (too absolute) | Claude |
+> | R2 | "1–11 passes/day baseline" (histogram truncated to 8 days) | Claude |
+> | R2 | Independent synthesis defect, entirely | Claude |
+> | R2 | ccgolf pair as a *contradiction* fixture (it is a transition) | Claude |
+> | R2 | Version/module check as the recurrence control | Claude |
+> | R3 | Version-ordering criterion surviving in the definition of done | Claude |
+>
+> The original Codex draft's Phase 2 regeneration-before-injection and Phase 3
+> schema framing were also withdrawn, in round 1, by agreement.

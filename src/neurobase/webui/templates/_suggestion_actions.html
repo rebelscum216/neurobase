@@ -3,12 +3,19 @@
    is a multi-step diff-preview → fingerprint-confirm flow); Reject is an inline
    POST (CSRF-gated). `sel` holds the proposal. #}
 {% if sel.flash %}<div class="flash">{{ sel.flash }}</div>{% endif %}
+{% if sel.status == "proposed" and sel.type == "rule" and not sel.project %}
+<div class="notice" style="margin-bottom: 16px">
+  Seen across <b>multiple projects</b>, so this rule names no single project — a rule installs into
+  one project's <code class="mono">{{ sel.target }}</code>, so it can't be accepted as-is. Reject it,
+  or (for now) install it by hand into whichever project you want it in.
+</div>
+{% endif %}
 <div class="skill-actions" style="margin-bottom: 16px">
   {% if sel.status == "proposed" %}
     {% if sel.type == "skill" %}
     <a class="btn primary" href="/suggestions/{{ sel.slug }}/accept?target=user">Accept — user skill</a>
     <a class="btn" href="/suggestions/{{ sel.slug }}/accept?target=project">Accept — project skill</a>
-    {% else %}
+    {% elif sel.project %}
     <a class="btn primary" href="/suggestions/{{ sel.slug }}/accept">Preview accept</a>
     {% endif %}
     <a class="btn" href="/suggestions/{{ sel.slug }}/edit">Edit draft</a>

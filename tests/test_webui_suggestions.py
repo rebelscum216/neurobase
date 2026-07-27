@@ -15,7 +15,7 @@ inside the tmp repo.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -254,6 +254,27 @@ def test_detail_renders_evidence_and_draft(client: TestClient, seed: Seed) -> No
 def test_detail_not_found_returns_404(client: TestClient) -> None:
     response = client.get("/suggestions/does-not-exist")
     assert response.status_code == 404
+
+
+def test_multi_project_rule_explains_instead_of_offering_accept(tmp_path: Path) -> None:
+    """A rule mined across multiple projects has no single project to install
+    into, so `prepare_install` 400s. The detail must EXPLAIN that rather than
+    offer an accept button that dead-ends on the error — while still offering
+    reject/edit. (Own store, no rejected proposal, so the near-duplicate decline
+    in write_ranked doesn't drop the fixture.)"""
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    projects.register_project(root, repo, slug="neurobase")
+    proposals.write_ranked(root, [replace(_rule_candidate("global-rule"), project=None)])
+    client = TestClient(build_app(root), base_url="http://127.0.0.1:8765")
+
+    html = client.get("/suggestions/global-rule", params={"view": "full"}).text
+    assert "multiple projects" in html  # the explanation is shown
+    assert "/suggestions/global-rule/accept" not in html  # no dead-end accept link
+    # reject + edit remain available
+    assert "/suggestions/global-rule/reject" in html
+    assert "/suggestions/global-rule/edit" in html
 
 
 # --- accept preview (GET) ------------------------------------------------------

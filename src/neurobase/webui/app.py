@@ -12,6 +12,7 @@ from pathlib import Path
 from starlette.applications import Starlette
 from starlette.templating import Jinja2Templates
 
+from neurobase.webui.filters import human_datetime
 from neurobase.webui.routes import all_routes
 from neurobase.webui.security import CSRF_FORM_FIELD, CSRFMiddleware, new_csrf_token
 from neurobase.webui.shell import shell_context
@@ -48,6 +49,8 @@ def build_app(root: Path) -> Starlette:
     # The rail brand badge shows the real store path (base.html) — a Jinja
     # global for the same reason as CSRF_FORM_FIELD above.
     templates.env.globals["store_root_label"] = _store_root_label(root)
+    # Display filter for ISO timestamps → "July 15, 2026 | 1:20pm" across surfaces.
+    templates.env.filters["humandate"] = human_datetime
 
     app = Starlette(routes=all_routes())
     app.state.root = root

@@ -31,7 +31,7 @@
           <td>{{ row.agent }}</td>
           <td>{{ row.project }}</td>
           <td class="mono">{{ row.branch }}</td>
-          <td class="mono">{{ row.captured_at[:19] if row.captured_at else "" }}</td>
+          <td>{{ row.captured_at | humandate }}</td>
           <td><span class="status-chip {{ 'accepted' if row.consumed else 'proposed' }}">{{ 'consumed' if row.consumed else 'unconsumed' }}</span></td>
         </tr>
         {% endfor %}

@@ -19,7 +19,7 @@
   <div class="signal-grid">
     <div class="signal-tile"><div class="signal-label">Agent</div><div class="signal-value small">{{ agent }}</div></div>
     <div class="signal-tile"><div class="signal-label">Branch</div><div class="signal-value small mono">{{ branch }}</div></div>
-    <div class="signal-tile"><div class="signal-label">Captured</div><div class="signal-value small mono">{{ captured_at[:19] if captured_at else "—" }}</div></div>
+    <div class="signal-tile"><div class="signal-label">Captured</div><div class="signal-value small">{{ captured_at | humandate }}</div></div>
     <div class="signal-tile wide"><div class="signal-label">Session id</div><div class="signal-value small mono">{{ session_full }}</div></div>
     <div class="signal-tile wide"><div class="signal-label">Working directory</div><div class="signal-value small mono">{{ cwd }}</div></div>
   </div>

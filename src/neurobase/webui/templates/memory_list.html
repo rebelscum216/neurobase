@@ -25,7 +25,7 @@
   <section class="card">
     <div class="card-head">
       <div><h2>{{ g.project }} · {{ node.name }}</h2><p>Synthesized node — regenerated after every curate</p></div>
-      <div class="right"><span class="tiny-pill">{{ node.generated_at[:10] if node.generated_at else "" }}</span></div>
+      <div class="right"><span class="tiny-pill">{{ node.generated_at | humandate }}</span></div>
     </div>
     <pre class="rawbody">{{ node.body }}</pre>
   </section>
@@ -48,7 +48,7 @@
           <td class="mono">{{ f.provenance }}</td>
           <td class="mono">{{ f.supersedes }}</td>
           <td>{{ f.agent_last }}</td>
-          <td class="mono">{{ f.updated_at[:10] if f.updated_at else "" }}</td>
+          <td>{{ f.updated_at | humandate }}</td>
         </tr>
         {% endfor %}
       </tbody>

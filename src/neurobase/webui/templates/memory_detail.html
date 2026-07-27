@@ -10,7 +10,7 @@
   </div>
   <div class="hero-pills">
     <a class="hero-pill" href="/memory">← all memory</a>
-    {% if updated_at %}<span class="hero-pill">updated {{ updated_at[:10] }}</span>{% endif %}
+    {% if updated_at %}<span class="hero-pill">updated {{ updated_at | humandate }}</span>{% endif %}
   </div>
 </div>
 

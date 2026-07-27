@@ -44,7 +44,7 @@
           <td class="mono">{{ row.target }}</td>
           <td>{{ row.project or "multiple" }}</td>
           <td class="mono">{{ row.total }}</td>
-          <td class="mono">{{ row.created_at[:10] if row.created_at else "" }}</td>
+          <td>{{ row.created_at | humandate }}</td>
         </tr>
         {% endfor %}
       </tbody>

@@ -861,27 +861,32 @@ The work is complete when:
 > reversals, **including the round-1 blocker itself**; those are restored below and
 > marked ✚.
 >
-> | Round | Severity | Claim withdrawn | By |
-> |---|---|---|---|
-> | R1 | **blocker** ✚ | "Have the curator add a `supersedes` link between the two pinned ccgolf facts" — spec §478 forbids modifying a pinned fact | Claude |
-> | R1 | major | "The hardening was in place and the runaway still happened" → the shim predated all of it | Claude |
-> | R1 | major ✚ | "Spawn-side debounce is the fix" → the single-flight lock is the correctness boundary; debounce is efficiency | Claude |
-> | R1 | major ✚ | "The 2026-07-17 note is stale in a way that caused harm" → it was unread, not stale | Claude |
-> | R1 | major | "Phase 1 moves to `UserPromptSubmit`" → Claude-only; not a cross-agent answer | Claude |
-> | R1 | major | "A router necessarily puts an LLM on every prompt path" → contradicted [C-4] in this same document | Claude |
-> | R1 | major | "ADR-0022 shipped the lifecycle schema" → the fields predate it | Claude |
-> | R1 | major | "The curator never writes `supersedes`" → the write path exists; 67 of 88 facts are simply ineligible | Claude |
-> | R1 | minor | ccgolf pre-burst synthesis defect | Claude |
-> | R1 | minor ✚ | "1,996 → 3,323 … 1,741 in one day" — two measurements conflated; the growth was 1,327 | Claude |
-> | R1 | minor | "Node and log timestamps are byte-identical" → 14–17 ms apart | Claude |
-> | R2 | major | Version/module check as the recurrence control → same-version stale builds pass it | Claude |
-> | R2 | minor | "Current source has never been exercised by a live hook" → too absolute; the 07-20 spikes did run dev-checkout hooks | Claude |
-> | R2 | minor | "1–11 passes/day baseline" → drawn from a histogram truncated to 8 days, hiding the 07-16 runaway | Claude |
-> | R2 | minor | Independent synthesis defect, withdrawn entirely | Claude |
-> | R2 | minor | ccgolf pair as a *contradiction* fixture → the two facts agree; it is a transition | Claude |
-> | R3 | major | Version-ordering criterion surviving in the definition of done, contradicting [R2] | Claude |
-> | R1 | — | Phase 2's regenerate-before-injection | Codex (by agreement) |
-> | R1 | — | Phase 3 framed as a schema change | Codex (by agreement) |
+> **[R5]** The severity shown is the rating of the **finding that raised the
+> reversal**, not a per-claim reassessment — several findings bundled more than
+> one reversal, and an earlier revision silently re-rated the bundled items
+> downward. Each row is traceable to its originating finding.
+>
+> | Origin | Claim withdrawn | By |
+> |---|---|---|
+> | **R1-F1 · blocker** ✚ | "Have the curator add a `supersedes` link between the two pinned ccgolf facts" — spec §478 forbids modifying a pinned fact | Claude |
+> | **R1-F1 · blocker** | "ADR-0022 shipped the lifecycle schema" → the fields predate it | Claude |
+> | **R1-F1 · blocker** | "The curator never writes `supersedes`" → the write path exists; 67 of 88 facts are simply ineligible | Claude |
+> | R1-F2 · major | "The hardening was in place and the runaway still happened" → the shim predated all of it | Claude |
+> | R1-F2 · major ✚ | "Spawn-side debounce is the fix" → the single-flight lock is the correctness boundary; debounce is efficiency | Claude |
+> | R1-F2 · major ✚ | "The 2026-07-17 note is stale in a way that caused harm" → it was unread, not stale | Claude |
+> | R1-F2 · major | ccgolf pre-burst synthesis defect | Claude |
+> | R1-F2 · major ✚ | "1,996 → 3,323 … 1,741 in one day" — two measurements conflated; the growth was 1,327 | Claude |
+> | R1-F3 · major | "Phase 1 moves to `UserPromptSubmit`" → Claude-only; not a cross-agent answer | Claude |
+> | R1-F3 · major | "A router necessarily puts an LLM on every prompt path" → contradicted [C-4] in this same document | Claude |
+> | R1-F4 · minor | "Node and log timestamps are byte-identical" → 14–17 ms apart | Claude |
+> | R2-F1 · major | Version/module check as the recurrence control → same-version stale builds pass it | Claude |
+> | R2-F2 · minor | "Current source has never been exercised by a live hook" → too absolute; the 07-20 spikes did run dev-checkout hooks | Claude |
+> | R2-F3 · minor | "1–11 passes/day baseline" → drawn from a histogram truncated to 8 days, hiding the 07-16 runaway | Claude |
+> | R2-F3 · minor | Independent synthesis defect, withdrawn entirely | Claude |
+> | R2-F4 · minor | ccgolf pair as a *contradiction* fixture → the two facts agree; it is a transition | Claude |
+> | R3-F1 · major | Version-ordering criterion surviving in the definition of done, contradicting [R2] | Claude |
+> | R1 · by agreement | Phase 2's regenerate-before-injection | Codex |
+> | R1 · by agreement | Phase 3 framed as a schema change | Codex |
 >
 > Seventeen of the nineteen reversals are Claude's, which is the honest summary of
 > this exercise: the initial analysis was directionally useful and wrong in most of

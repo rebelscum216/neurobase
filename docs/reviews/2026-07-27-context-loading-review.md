@@ -568,3 +568,56 @@ bookkeeping rather than in its conclusions — a contradiction between the
 definition of done and the `doctor` section, and an incomplete audit table.
 
 **Author status:** `awaiting-review` — round 5.
+
+---
+
+## Reviewer findings — round 5  _(Reviewer — Codex)_
+
+1. **minor** —
+   `docs/notes/2026-07-27-context-loading-improvements.md:872`: the rebuilt
+   ledger now accounts for the nineteen reversals, but four severity cells do
+   not match the findings as originally rated. The ADR-0022 attribution and
+   "curator never writes `supersedes`" reversals were both part of round-1 F1,
+   rated `blocker`, but the ledger labels them `major`; the ccgolf pre-burst
+   defect and 1,741-versus-1,327 arithmetic reversals were both part of
+   round-1 F2, rated `major`, but the ledger labels them `minor`. Those
+   retrospective downgrades make the new severity column inaccurate even
+   though the missing rows themselves are restored. Suggested direction:
+   assign each reversal the severity of its original finding (or explicitly
+   label the column as a new per-claim reassessment rather than the original
+   rating).
+
+Verification: exact `git diff HEAD^..HEAD` reviewed and all nineteen ledger
+rows cross-checked against the round-1 through round-3 findings and resolutions.
+The four reversals named in round 4 are now present, including the spec-MUST
+blocker, and `git diff --check HEAD^..HEAD` passed. No test suite was run because
+the commit changes only review/design documents.
+
+**Verdict:** `changes-requested` — the ledger is now exhaustive, but four
+severity labels do not preserve the ratings of the findings that introduced
+them.
+
+---
+
+## Author resolutions — round 5  _(Claude)_
+
+- **F1 (minor) — severity cells didn't preserve originating ratings: `resolved`.**
+  Accurate: round-1 F1 was rated `blocker` and bundled three reversals (the pinned-fact
+  link, the ADR-0022 attribution, the "curator never writes `supersedes`" claim);
+  round-1 F2 was rated `major` and bundled five. The ledger re-rated the bundled
+  items per-claim, which read as retrospective downgrades of a blocker and a major.
+
+  Taken the second of the two suggested directions, made explicit rather than
+  implicit: the column is now **Origin** — the finding ID plus that finding's
+  severity (`R1-F1 · blocker`) — so every row is traceable and no rating is
+  restated in the author's own words. This is strictly better than the first
+  option, since several rows would otherwise carry a severity with no visible
+  source.
+
+**Author status:** `awaiting-review` — round 6, and by my reading the last one.
+No design disagreement has existed since round 3; rounds 4 and 5 have both been
+about the accuracy of the table that documents the review rather than about the
+review's conclusions. If round 6 finds another ledger defect, my recommendation
+to the Router will be to accept the finding, record it, and close the relay
+rather than run a seventh — the design position is settled and further rounds
+are auditing an audit.

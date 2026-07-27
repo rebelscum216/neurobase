@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Skills{% endblock %}
+{% block crumb %}Skills{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1>Skills</h1>
+    <p class="hero-sub">Accepted proposals, installed as managed skills and rules on disk.</p>
+  </div>
+  <div class="hero-pills">
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ skills | length }} installed</span>
+    <span class="hero-pill">{{ live }} live</span>
+  </div>
+</div>
+
+{% if not skills %}
+<section class="card">
+  <p>No skills installed yet. Accept a <a href="/suggestions">suggestion</a> to install one.</p>
+</section>
+{% else %}
+<div class="gallery">
+  {% for s in skills %}
+  <section class="card skill">
+    <div class="card-head">
+      <div>
+        <h2><a class="mono" href="/suggestions/{{ s.slug }}">{{ s.slug }}</a></h2>
+        <p>{{ s.type or "skill" }}{% if s.project %} · {{ s.project }}{% endif %}</p>
+      </div>
+      <div class="right"><span class="status-chip {{ s.chip }}">{{ s.state }}</span></div>
+    </div>
+    <div class="skill-meta">
+      <div><span class="k">Target</span><span class="v mono" title="{{ s.target }}">{{ s.target or "—" }}</span></div>
+      <div><span class="k">Installed at</span><span class="v mono" title="{{ s.installed_path }}">{{ s.installed_path or "—" }}</span></div>
+      <div><span class="k">Accepted</span><span class="v mono">{{ s.accepted_at[:10] if s.accepted_at else "—" }}</span></div>
+      <div><span class="k">Score</span><span class="v mono">{{ s.score }}</span></div>
+    </div>
+    <div class="skill-actions">
+      {% if s.revertable %}
+      <form method="post" action="/skills/{{ s.slug }}/revert"
+            onsubmit="return confirm('Revert {{ s.slug }} to proposed? Its managed artifact is already {{ s.state }} on disk — this repairs the record, it does not delete anything.');">
+        <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}">
+        <button type="submit" class="btn danger">Revert drift</button>
+      </form>
+      <span class="hint">{{ s.state }} on disk — the record can be repaired</span>
+      {% elif s.state == "live" %}
+      <span class="hint">Live on disk — remove the managed block by hand first to retire it</span>
+      {% else %}
+      <span class="hint">Target unresolvable — revert refused (fail-closed)</span>
+      {% endif %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

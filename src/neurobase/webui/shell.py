@@ -29,7 +29,7 @@ _NAV: list[tuple[str, str, str, str, bool]] = [
     ("sessions", "Sessions", "◵", "/sessions", True),
     ("memory", "Memory", "◈", "/memory", True),
     ("suggestions", "Suggestions", "△", "/suggestions", True),
-    ("skills", "Skills", "✦", "/skills", False),
+    ("skills", "Skills", "✦", "/skills", True),
     ("status", "Status", "◷", "/status", False),
 ]
 

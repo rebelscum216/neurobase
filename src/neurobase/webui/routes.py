@@ -71,9 +71,18 @@ def memory_routes() -> list[Route]:
     ]
 
 
+def skills_routes() -> list[Route]:
+    """The Skills gallery (app-shell plan, Phase S): accepted proposals shown as
+    installed skills/rules, with the drift-repair revert action (ADR-0020)."""
+    return [
+        Route("/skills", _skills_gallery, methods=["GET"]),
+        Route("/skills/{slug}/revert", _revert_view, methods=["POST"]),
+    ]
+
+
 def all_routes() -> list[Route]:
     """Every surface's routes, in one table for the Starlette app (``app.py``)."""
-    return [*suggestions_routes(), *sessions_routes(), *memory_routes()]
+    return [*suggestions_routes(), *sessions_routes(), *memory_routes(), *skills_routes()]
 
 
 # --- small shared helpers ---------------------------------------------------
@@ -648,4 +657,74 @@ async def _search(request: Request) -> Response:
     return _templates(request).TemplateResponse(request, "search_results.html", context)
 
 
-__all__ = ["all_routes", "memory_routes", "sessions_routes", "suggestions_routes"]
+# --- Skills gallery + revert (Phase S) --------------------------------------
+
+# artifact_state → the status-chip class the design system already ships.
+_STATE_CHIP = {
+    proposals.ARTIFACT_LIVE: "accepted",
+    proposals.ARTIFACT_MISSING: "superseded",
+    proposals.ARTIFACT_ORPHANED: "proposed",
+    proposals.ARTIFACT_UNRESOLVABLE: "rejected",
+}
+
+
+def _skill_row(root: Path, doc: store.Document) -> dict[str, Any]:
+    slug = str(doc.get("name") or doc.file_path.stem)
+    state = proposals.artifact_state(root, doc, slug)
+    accepted = proposals.latest_accepted_event(root, slug)
+    scores = doc.get("scores") if isinstance(doc.get("scores"), dict) else {}
+    return {
+        "slug": slug,
+        "type": doc.get("type"),
+        "target": doc.get("target"),
+        "installed_path": doc.get("installed_path"),
+        "project": doc.get("project"),
+        "state": state,
+        "chip": _STATE_CHIP.get(state, "superseded"),
+        # Offer revert only when the liveness guard would allow it (missing/orphaned)
+        # — the same check `revert_proposal` re-runs at write time (ADR-0020).
+        "revertable": proposals.revert_refusal(slug, doc, state) is None,
+        "accepted_at": accepted.get("at") if accepted else None,
+        "score": scores.get("total", 0),
+    }
+
+
+async def _skills_gallery(request: Request) -> Response:
+    root = _root(request)
+    skills = [
+        _skill_row(root, doc)
+        for doc in proposals.load_all_proposals(root)
+        if str(doc.get("status") or "") == "accepted"
+    ]
+    skills.sort(key=lambda s: str(s["accepted_at"] or ""), reverse=True)
+    live = sum(1 for s in skills if s["state"] == proposals.ARTIFACT_LIVE)
+    # _base_context supplies the CSRF token the revert form needs.
+    context = {**_base_context(request), "skills": skills, "live": live}
+    return _templates(request).TemplateResponse(request, "skills_list.html", context)
+
+
+async def _revert_view(request: Request) -> Response:
+    """Drift-repair revert (§12.7, G2, ADR-0020). The app-wide CSRF/same-origin
+    gate has already cleared this POST; ``revert_proposal`` re-checks liveness at
+    write time and refuses a still-live artifact, so a stale "Revert" link (the
+    artifact came back, or another tab already reverted) fails closed with 409
+    rather than orphaning it."""
+    root = _root(request)
+    slug = request.path_params["slug"]
+    doc = proposals.load_proposal(root, slug)
+    if doc is None:
+        return _error_response(request, 404, f"proposal {slug!r} not found or malformed")
+    try:
+        proposals.revert_proposal(root, slug)
+    except ValueError as exc:
+        return _error_response(request, 409, str(exc))
+    return _redirect_with_flash(slug, "Reverted to proposed — drift repaired.")
+
+
+__all__ = [
+    "all_routes",
+    "memory_routes",
+    "sessions_routes",
+    "skills_routes",
+    "suggestions_routes",
+]

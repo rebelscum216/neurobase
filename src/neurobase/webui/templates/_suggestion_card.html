@@ -1,0 +1,48 @@
+{# Shared proposal detail: metadata, redacted draft, evidence, ledger history.
+   Used by the two-pane detail pane and the standalone page; both use `sel`. #}
+<section class="card">
+  <div class="card-head">
+    <div><h2>Proposal</h2><p>{{ sel.candidate_type }}</p></div>
+    <div class="right"><span class="status-chip {{ sel.status }}">{{ sel.status }}</span></div>
+  </div>
+  <div class="signal-grid">
+    <div class="signal-tile"><div class="signal-label">Type</div><div class="signal-value small">{{ sel.type }} → {{ sel.target }}</div></div>
+    <div class="signal-tile"><div class="signal-label">Project</div><div class="signal-value small">{{ sel.project or "multiple" }}</div></div>
+    <div class="signal-tile"><div class="signal-label">Score</div><div class="signal-value small mono">{{ sel.scores.get("total") }}</div></div>
+    <div class="signal-tile"><div class="signal-label">Created</div><div class="signal-value small">{{ sel.created_at | humandate }}</div></div>
+    <div class="signal-tile wide"><div class="signal-label">Scores</div><div class="signal-value small mono">recurrence {{ sel.scores.get("recurrence") }} · breadth {{ sel.scores.get("breadth") }} · recency {{ sel.scores.get("recency") }}</div></div>
+    {% if sel.supersedes %}<div class="signal-tile wide"><div class="signal-label">Supersedes</div><div class="signal-value small mono">{{ sel.supersedes | join(", ") }}</div></div>{% endif %}
+    {% if sel.installed_path %}<div class="signal-tile wide"><div class="signal-label">Installed at</div><div class="signal-value small mono">{{ sel.installed_path }}</div></div>{% endif %}
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-head"><div><h2>Draft</h2><p>Redacted at display</p></div></div>
+  <pre class="rawbody">{{ sel.body }}</pre>
+</section>
+
+<section class="card">
+  <div class="card-head"><div><h2>Evidence</h2><p>What the recommender mined this from</p></div></div>
+  {% if sel.evidence %}
+  <ul class="prov">
+    {% for e in sel.evidence %}
+    <li class="mono">{% if e.kind %}{{ e.kind }}{% if e.project %} · {{ e.project }}{% endif %}{% if e.slug %} · {{ e.slug }}{% endif %}{% if e.file %} · {{ e.file }}{% endif %}{% else %}{{ e.raw }}{% endif %} — {{ e.status }}{% if e.tombstoned %}, tombstoned{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No evidence recorded.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><div><h2>History</h2><p>The proposal's ledger</p></div></div>
+  {% if sel.history %}
+  <ul class="prov">
+    {% for event in sel.history %}
+    <li class="mono">{{ event.at }} — {{ event.event }}{%- for key, value in event.items() %}{% if key not in ["at", "slug", "event"] %} {{ key }}={{ value }}{% endif %}{% endfor -%}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No history yet.</p>
+  {% endif %}
+</section>

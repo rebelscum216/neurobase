@@ -168,13 +168,32 @@ class StoreHandle:
         self._require_within_store(path)
         return store.mark_consumed(path, expect_digest=expect_digest)
 
+    def contains(self, path: Path) -> bool:
+        """True when ``path`` resolves to somewhere at or beneath this handle's
+        validated root. Both sides are resolved, so ``..``, an absolute path, or a
+        **symlink** cannot smuggle a target outside the store tree — and a store
+        whose own root is reached through a symlink (e.g. macOS ``/var`` →
+        ``/private/var``) still matches, because the root is resolved too. The
+        predicate form of :meth:`_require_within_store`, for read paths that filter
+        entries rather than raise (Codex P2-SAFETY-SECURITY-003).
+
+        Fails **closed**: a ``Path.resolve()`` that raises — a self-referential
+        symlink loop (``RuntimeError``) or an unreadable parent (``OSError``) — is
+        a hostile/unreadable entry, so it is treated as *not* contained rather than
+        letting the error escape. That keeps every filtering consumer fail-soft
+        (spec §13): before this predicate existed, ``store.read_doc`` swallowed the
+        loop's ``OSError`` and Search skipped it; the predicate must not regress
+        that into a 500 / MCP ``ToolError`` (Codex P2-REGRESSION-009)."""
+        try:
+            root = self.root.resolve()
+            target = path.resolve()
+        except (OSError, RuntimeError):
+            return False
+        return target == root or target.is_relative_to(root)
+
     def _require_within_store(self, path: Path) -> None:
-        """Reject a path that does not resolve to somewhere under ``self.root``.
-        Both sides are resolved so ``..`` and symlinks cannot smuggle a target
-        outside the store tree."""
-        root = self.root.resolve()
-        target = path.resolve()
-        if target != root and not target.is_relative_to(root):
+        """Reject a path that does not resolve to somewhere under ``self.root``."""
+        if not self.contains(path):
             raise ValueError(
                 f"{path} is outside this handle's store ({self.root}); a handle may "
                 "only operate on files within its own validated root"

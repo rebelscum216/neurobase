@@ -1,0 +1,141 @@
+"""Discover ``SKILL.md`` skills across the machine — user scope
+(``~/.claude/skills``) and each registered project's ``<root>/.claude/skills`` —
+so the Skills gallery can show *every* skill on the machine, not only the ones
+Neurobase installed.
+
+Neurobase-owned skills carry ``neurobase_managed`` / ``neurobase_slug``
+frontmatter (``recommender/emitters.py``); everything else is **external** —
+hand-authored, or installed by some other tool. This module only reads; it never
+touches the store, so it sits outside the ADR-0015 chokepoint by construction.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from neurobase.core import store
+
+# Leading YAML frontmatter, tolerant of a BOM and whitespace around the fences,
+# and not requiring the blank line the store's stricter _DOC_RE wants.
+_FM_RE = re.compile(r"\A﻿?---[ \t]*\n(.*?)\n---[ \t]*(?:\n|$)", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class InstalledSkill:
+    slug: str  # the skill directory name
+    name: str  # frontmatter name (falls back to slug)
+    description: str
+    scope: str  # "user" | "project"
+    project: str | None  # the registered project slug, for project scope
+    path: str  # ~-collapsed SKILL.md path
+    managed: bool  # carries neurobase_managed: true
+    nb_slug: str | None  # neurobase_slug — links back to the proposal
+
+
+def user_skills_root() -> Path:
+    """The user-scope skills directory. A seam so tests can point it at a tmp
+    home instead of scanning the real ``~/.claude/skills``."""
+    return Path.home() / ".claude" / "skills"
+
+
+def _tilde(path: Path) -> str:
+    try:
+        return f"~/{path.resolve().relative_to(Path.home())}"
+    except (ValueError, OSError):
+        return str(path)
+
+
+def _frontmatter(path: Path) -> dict[str, Any] | None:
+    """Parsed leading YAML frontmatter as a dict; ``{}`` when the file is readable
+    but carries no usable frontmatter (no fences / non-dict / bad YAML — a
+    legitimate hand-authored external skill); ``None`` when the file itself cannot
+    be read or decoded as UTF-8, so the caller **skips that skill** rather than
+    crashing the whole gallery on it (Codex P2-CORRECTNESS-004). ``UnicodeError``
+    is a ``ValueError``, not an ``OSError``, so it needs its own arm here."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    match = _FM_RE.match(text)
+    if not match:
+        return {}
+    try:
+        data = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _managed_slug(fm: dict[str, Any], expected_slug: str) -> str | None:
+    """The canonical Neurobase slug this ``SKILL.md`` legitimately claims, or
+    ``None`` when it is external. Mirrors the emitter's **full** ownership
+    predicate (``recommender/emitters.py:_is_managed``), which requires all of:
+    ``neurobase_managed`` being the boolean ``True`` (not a truthy string like
+    ``"false"``), a valid canonical ``neurobase_slug``, **and** that slug equalling
+    the expected one — for a genuine install that is the skill's own directory name
+    (``<scope>/.claude/skills/<slug>/SKILL.md``, which the emitter stamps as
+    ``neurobase_slug: <slug>``). The equality is what stops a foreign
+    ``sneaky/SKILL.md`` that carries ``neurobase_slug: gone-skill`` from being read
+    as ``gone-skill``'s managed install and suppressing that proposal's real drift
+    card (Codex P2-CORRECTNESS-005, round 2)."""
+    if fm.get("neurobase_managed") is not True:
+        return None
+    slug = fm.get("neurobase_slug")
+    if isinstance(slug, str) and store.SLUG_RE.match(slug) and slug == expected_slug:
+        return slug
+    return None
+
+
+def _scan(skills_dir: Path, scope: str, project: str | None) -> list[InstalledSkill]:
+    out: list[InstalledSkill] = []
+    try:
+        entries = sorted(skills_dir.iterdir())
+    except OSError:
+        return out  # missing/unreadable dir — no skills here, never fatal
+    for sub in entries:
+        skill_md = sub / "SKILL.md"
+        if not skill_md.is_file():
+            continue
+        fm = _frontmatter(skill_md)
+        if fm is None:
+            continue  # unreadable/undecodable SKILL.md — skip, never fatal (P2-CORRECTNESS-004)
+        # Ownership is the full emitter predicate keyed on THIS directory's slug,
+        # and `nb_slug` is retained ONLY when it genuinely matches — so a foreign
+        # skill carrying a stray or mismatched `neurobase_slug` neither shows as
+        # managed nor pollutes `present_nb` (Codex P2-CORRECTNESS-005).
+        nb_slug = _managed_slug(fm, sub.name)
+        out.append(
+            InstalledSkill(
+                slug=sub.name,
+                name=str(fm.get("name") or sub.name),
+                description=str(fm.get("description") or ""),
+                scope=scope,
+                project=project,
+                path=_tilde(skill_md),
+                managed=nb_slug is not None,
+                nb_slug=nb_slug,
+            )
+        )
+    return out
+
+
+def discover_skills(handle: Any) -> list[InstalledSkill]:
+    """Every ``SKILL.md`` under the user skills dir and each registered project's
+    ``.claude/skills``. Fail-soft: an unreadable dir or file is skipped, never
+    fatal. Ordered user-first, then by name."""
+    skills = _scan(user_skills_root(), "user", None)
+    seen: set[Path] = set()
+    for project, roots in handle.load_registry().items():
+        for raw in roots:
+            root_path = Path(raw)
+            if root_path in seen:
+                continue  # a project may list a root more than once
+            seen.add(root_path)
+            skills.extend(_scan(root_path / ".claude" / "skills", "project", project))
+    skills.sort(key=lambda s: (s.scope != "user", s.name.lower()))
+    return skills

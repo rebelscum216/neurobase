@@ -1383,10 +1383,10 @@ append-only pass log (`curator/engine.py:_log_pass`).
 |---|---|---|
 | `at` | ISO8601 | Event time |
 | `slug` | str | Proposal slug |
-| `event` | `proposed \| accepted \| rejected \| edited` | One line per event; a proposal accumulates multiple lines over its life |
-| `candidate_type` | str, optional | Carried for the miner's ledger-summary input (§12.5) |
+| `event` | `proposed \| accepted \| rejected \| edited \| reverted \| reopened` | One line per event; a proposal accumulates multiple lines over its life. `reverted` (ADR-0020, G2) records a drift-repair `accepted → proposed`; `reopened` (ADR-0024) records the one sanctioned `rejected → proposed`. The log is append-only: a transition adds exactly one line and never rewrites a prior one |
+| `candidate_type` | str, optional | Carried for the miner's ledger-summary input (§12.5); also on a `reopened` line |
 | `target` | str, optional | Resolved target, present from `accepted` onward |
-| `reason` | str, optional | `reject --reason TEXT` |
+| `reason` | str, optional | The `reject --reason TEXT` on a `rejected` line; the artifact-liveness state (`missing`/`orphaned`/…) that justified a `reverted` line (ADR-0020) |
 | `installed_hash` | str, optional | `accepted` only (ADR-0011): sha256 of the artifact's exact bytes at accept time, for §12.9's survival check. Absent on an `accepted` line written before this field existed — survival falls back to existence-only for those, never treated as a parse error |
 
 ```jsonl
@@ -1399,7 +1399,9 @@ append-only pass log (`curator/engine.py:_log_pass`).
 persist the user's revised body/draft on the proposal file itself, not just in
 the ledger (workstream F: "edit updates the proposal body/draft and appends an
 edited ledger event"). `accept`/`reject` MUST each append exactly one line
-(workstream F: "reject updates proposal + ledger").
+(workstream F: "reject updates proposal + ledger"). `revert` (ADR-0020) and
+`reopen` (ADR-0024) likewise MUST each append exactly one line and leave every
+prior line untouched.
 
 A malformed line anywhere in the ledger (partial append, corrupt JSON — the
 ledger accumulates across many independent CLI invocations, so this is a
@@ -1726,6 +1728,7 @@ accumulates.
 | `recommend accept <slug>` | `[--target user\|project]` `[--yes]` | Renders the artifact (§12.8), diffs against the current target, asks consent (`--yes` skips the prompt, never the diff), backs up touched files, writes, flips `status: accepted`, sets `installed_path` (and, for `type: skill`, resolves `target` to the scope actually used), appends `accepted` | Writes artifact(s) + proposal + ledger; backup first (workstream F: "accept requires consent unless `--yes`") |
 | `recommend reject <slug>` | `[--reason TEXT]` | Flips `status: rejected`, records `reason`, appends `rejected` | Writes proposal + ledger only (workstream F: "reject updates proposal + ledger") |
 | `recommend revert <slug>` | `[--yes]` | **Drift repair only** (ADR-0020): on an `accepted` proposal whose managed artifact is no longer live on disk (*missing* file, or *orphaned* — the block/skill removed from a file that remains), flips `status: accepted` → `proposed`, clears `installed_path`, appends `reverted` (carrying the liveness `reason`). A *live* managed artifact (the slug's rule sentinel, or *any* SKILL.md at the canonical path — whatever else changed around it) or an *unresolvable* target is refused. The installed artifact is **never deleted** — revert corrects the store record, it does not uninstall (G2) | Writes proposal + ledger only; consent-gated (`--yes` skips the prompt) |
+| `recommend reopen <slug>` | — | **Reconsider a rejection** (ADR-0024): flips a `rejected` proposal back to `proposed` and appends `reopened`, putting it back in the review queue. The *only* sanctioned `rejected → proposed` transition. `accepted`/`superseded`/already-`proposed` are hard, named-status errors (an `accepted` proposal has `revert`/re-check; a `superseded` one was replaced by a newer proposal). The prior `rejected` event stays in the ledger — reconsidering does not rewrite history | Writes proposal + ledger only |
 | `status --recommender` | — | Prints precision, edited rate, survival, recurrence-reduction, or "insufficient data" per §12.9 | Read-only; may opportunistically refresh a survival check |
 
 `--target` is meaningful only for `type: skill` proposals (it selects
@@ -1741,7 +1744,9 @@ named-status CLI error" to workstream F's test list before this ships):**
 
 - `accept`/`edit` on a proposal whose `status` is already `rejected` or
   `superseded` is a hard CLI error naming the blocking status — a rejected or
-  retired proposal is never silently reopened.
+  retired proposal is never *silently* reopened. The one sanctioned way back from
+  `rejected` is an explicit `recommend reopen` (ADR-0024), which is ledgered; a
+  `superseded` proposal has no way back (a newer proposal replaced it).
 - `reject` on a proposal whose `status` is already `accepted`, `rejected`, or
   `superseded` is *also* a hard CLI error naming the blocking status. The
   `accepted` case is deliberate and load-bearing, not an oversight: v1 has no

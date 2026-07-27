@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Sessions{% endblock %}
+{% block crumb %}Sessions{% endblock %}
+{% block page_class %}wide{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1>Sessions</h1>
+    <p class="hero-sub">Every captured agent session — raw, before the curator folds it into memory.</p>
+  </div>
+  <div class="hero-pills">
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ rows | length }} captures</span>
+    <span class="hero-pill">{{ unconsumed }} unconsumed</span>
+  </div>
+</div>
+
+<div class="split">
+  <section class="card split-list">
+    <div class="card-head">
+      <div><h2>Captures</h2><p>Newest first — click a row to preview it here</p></div>
+      <div class="right"><span class="tiny-pill">{{ rows | length }} total</span></div>
+    </div>
+    {% if rows %}
+    <table>
+      <thead>
+        <tr><th>Session</th><th>Agent</th><th>Branch</th><th>Captured</th><th>State</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="{{ 'on' if sel and row.project == sel.project and row.file == sel.file else '' }}"
+            data-href="/sessions/{{ row.project }}/{{ row.file }}">
+          <td><a class="mono" href="/sessions/{{ row.project }}/{{ row.file }}">{{ row.session }}</a></td>
+          <td>{{ row.agent }}</td>
+          <td class="mono">{{ row.branch }}</td>
+          <td>{{ row.captured_at | humandate }}</td>
+          <td><span class="status-chip {{ 'accepted' if row.consumed else 'proposed' }}">{{ 'consumed' if row.consumed else 'unconsumed' }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No sessions captured yet. They appear here as agents run with Neurobase hooks installed.</p>
+    {% endif %}
+  </section>
+
+  <aside class="split-detail" id="detail-pane">
+    {% if sel %}
+    {% include "_session_pane.html" %}
+    {% else %}
+    <div class="pane-empty">Select a capture on the left to preview its transcript here.</div>
+    {% endif %}
+  </aside>
+</div>
+
+{% include "_two_pane_script.html" %}
+{% endblock %}

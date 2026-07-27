@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Session {{ sel.session }}{% endblock %}
+{% block crumb %}Sessions / {{ sel.session }}{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1 class="mono">{{ sel.session }}</h1>
+    <p class="hero-sub">{{ sel.agent }} · {{ sel.project }}</p>
+  </div>
+  <div class="hero-pills">
+    <a class="hero-pill" href="/sessions/{{ sel.project }}/{{ sel.file }}">← back to Sessions</a>
+    <span class="hero-pill">{{ 'consumed' if sel.consumed else 'unconsumed' }}</span>
+  </div>
+</div>
+
+{% include "_session_card.html" %}
+{% endblock %}

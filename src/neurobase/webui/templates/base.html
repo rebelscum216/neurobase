@@ -127,6 +127,103 @@
         color: var(--muted); border: 1px dashed var(--line-2); border-radius: 4px; padding: 1px 5px;
         text-transform: uppercase;
       }
+      .navitem .count {
+        margin-left: auto; font-family: var(--mono); font-size: 9px; font-weight: 600;
+        color: var(--muted); background: var(--panel-2); border-radius: 5px; padding: 1px 6px;
+        min-width: 14px; text-align: center; flex: none;
+      }
+      a.navitem.on .count { color: var(--ink); background: var(--panel); }
+      .navitem .count + .soon { margin-left: 6px; }
+
+      .rawbody {
+        white-space: pre-wrap; word-break: break-word; font-family: var(--mono);
+        font-size: 12px; line-height: 1.55; color: var(--mid); background: var(--panel-2);
+        border: 1px solid var(--line); border-radius: 10px; padding: 15px 17px;
+        overflow-x: auto; margin: 0;
+      }
+      .search { flex: 0 1 250px; margin-left: auto; margin-right: 12px; }
+      .search input {
+        width: 100%; height: 30px; padding: 0 12px; font-size: 12px; font-family: inherit;
+        color: var(--ink); background: var(--panel-2); border: 1px solid var(--line);
+        border-radius: 8px; outline: none; transition: border-color 0.15s ease, background 0.15s ease;
+      }
+      .search input::placeholder { color: var(--muted); }
+      .search input:focus { border-color: var(--line-2); background: var(--panel); }
+      .prov { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+      .prov li {
+        font-size: 12px; color: var(--mid); background: var(--panel-2);
+        border-radius: 6px; padding: 6px 10px; word-break: break-all;
+      }
+      .prov li a { color: var(--mid); }
+      .prov li a:hover { color: var(--ink); }
+      .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+      .skill-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; margin: 4px 0 14px; }
+      .skill-meta > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .skill-meta .wide2 { grid-column: 1 / -1; }
+      .skill-meta .k { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+      .skill-meta .v { font-size: 12px; color: var(--mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .skill-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+      .skill-actions form { margin: 0; }
+      .hint { font-size: 11px; color: var(--muted); }
+      .hd-date, .hd-time { display: block; white-space: nowrap; }
+      .hd-time { color: var(--muted); }
+      .split { display: flex; gap: 16px; align-items: stretch; }
+      /* Each pane scrolls on its own — hover over one and only it scrolls. Capped
+         to the viewport below the chrome + topbar + hero so the page itself
+         barely scrolls; the outer .scroll absorbs any small remainder. */
+      .split-list, .split-detail {
+        flex: 1 1 50%; min-width: 0; max-height: calc(100vh - 210px); overflow-y: auto;
+      }
+      .split-list { flex-basis: 56%; }
+      .split-detail { flex-basis: 44%; }
+      .split-list tr.on { background: var(--panel-2); }
+      .split-list tbody tr { cursor: pointer; }
+      .pane-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+      .pane-head .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .pane-empty {
+        color: var(--muted); text-align: center; padding: 56px 20px;
+        border: 1px dashed var(--line-2); border-radius: 14px; font-size: 13px;
+      }
+      .chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 14px; }
+      .chip {
+        display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 11px;
+        border-radius: 999px; border: 1px solid var(--line); background: var(--panel-2);
+        color: var(--mid); font-size: 12px; font-weight: 500;
+      }
+      .chip:hover { border-color: var(--line-2); color: var(--ink); text-decoration: none; }
+      .chip.on { background: var(--ink); border-color: var(--ink); color: var(--paper, #fff); }
+      .chip .chip-n { font-family: var(--mono); font-size: 10.5px; opacity: 0.8; }
+      .empty-row { color: var(--muted); padding: 20px 4px; }
+      .notice {
+        font-size: 12.5px; color: var(--mid); background: var(--amber-soft);
+        border: 1px solid var(--line); border-left: 3px solid var(--amber-2);
+        border-radius: 8px; padding: 10px 13px; line-height: 1.5;
+      }
+
+      /* Liquid-glass scrollbars — a floating translucent pill that frosts over
+         content, with a soft highlight edge; thumb firms up on hover. Applied
+         everywhere that scrolls (the page, both Session panes, transcript blocks). */
+      * { scrollbar-width: thin; scrollbar-color: rgba(41, 41, 41, 0.22) transparent; }
+      ::-webkit-scrollbar { width: 12px; height: 12px; background: transparent; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb {
+        border: 3px solid transparent;            /* inset the pill so it floats with a gutter */
+        border-radius: 999px;
+        background: rgba(41, 41, 41, 0.16);
+        background-clip: padding-box;
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45),  /* glass highlight edge */
+                    inset 0 1px 2px rgba(255, 255, 255, 0.6);   /* top sheen */
+        -webkit-backdrop-filter: blur(6px);
+        backdrop-filter: blur(6px);
+        transition: background 0.18s ease;
+      }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(41, 41, 41, 0.32); background-clip: padding-box; }
+      ::-webkit-scrollbar-thumb:active { background: rgba(41, 41, 41, 0.42); background-clip: padding-box; }
+      ::-webkit-scrollbar-corner { background: transparent; }
+      @media (max-width: 1040px) {
+        .split { flex-direction: column; }
+        .split-list, .split-detail { flex: 1 1 auto; width: 100%; position: static; }
+      }
 
       .rail-foot {
         margin-top: auto; border-top: 1px solid var(--line); padding: 11px 16px;
@@ -177,6 +274,7 @@
       .scroll { flex: 1; min-height: 0; overflow-y: auto; position: relative; z-index: 1; }
       .page { max-width: 1120px; margin: 0 auto; padding: 1.6rem 1.75rem 4rem; width: 100%; }
       .page.narrow { max-width: 760px; }
+      .page.wide { max-width: 1440px; }
       .page > * { animation: rise 0.6s cubic-bezier(0.22, 0.9, 0.27, 1) backwards; }
       .page > *:nth-child(2) { animation-delay: 0.06s; }
       .page > *:nth-child(3) { animation-delay: 0.12s; }
@@ -341,7 +439,7 @@
         <div class="traffic" aria-hidden="true">
           <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
         </div>
-        <div class="chrome-center"><span class="lock" aria-hidden="true"></span> local.neurobase / suggestions</div>
+        <div class="chrome-center"><span class="lock" aria-hidden="true"></span> local.neurobase / {{ active_label | lower }}</div>
       </div>
       <div class="app">
         <aside class="rail">
@@ -351,19 +449,23 @@
           </div>
           <span class="store mono">{{ store_root_label }}</span>
           <nav aria-label="Primary">
-            <a class="navitem on" href="/suggestions"><span class="glyph">△</span> Suggestions</a>
-            <span class="navitem"><span class="glyph">◉</span> Graph <span class="soon">soon</span></span>
-            <span class="navitem"><span class="glyph">◵</span> Sessions <span class="soon">soon</span></span>
-            <span class="navitem"><span class="glyph">◈</span> Memory <span class="soon">soon</span></span>
-            <span class="navitem"><span class="glyph">✦</span> Skills <span class="soon">soon</span></span>
-            <span class="navitem"><span class="glyph">◷</span> Status <span class="soon">soon</span></span>
+            {% for item in nav %}
+            {% if item.enabled %}
+            <a class="navitem{% if item.active %} on{% endif %}" href="{{ item.href }}"><span class="glyph">{{ item.glyph }}</span> {{ item.label }}{% if item.count is not none %} <span class="count">{{ item.count }}</span>{% endif %}</a>
+            {% else %}
+            <span class="navitem"><span class="glyph">{{ item.glyph }}</span> {{ item.label }}{% if item.count is not none %} <span class="count">{{ item.count }}</span>{% endif %} <span class="soon">soon</span></span>
+            {% endif %}
+            {% endfor %}
           </nav>
           <div class="rail-foot"><span class="pulse-dot" aria-hidden="true"></span> server running</div>
         </aside>
         <div class="main">
           <div class="aurora" aria-hidden="true"></div>
           <div class="topbar">
-            <span class="crumb">neurobase / <b>Suggestions</b></span>
+            <span class="crumb">neurobase / <b>{% block crumb %}{{ active_label }}{% endblock %}</b></span>
+            <form class="search" action="/search" method="get" role="search">
+              <input type="search" name="q" placeholder="Search memory…" value="{{ search_q }}" aria-label="Search memory" autocomplete="off" />
+            </form>
             <span class="local-pill"><span class="pulse-dot" aria-hidden="true"></span>127.0.0.1 only</span>
           </div>
           <div class="scroll">

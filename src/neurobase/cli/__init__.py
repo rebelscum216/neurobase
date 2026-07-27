@@ -997,7 +997,9 @@ def recommend_edit(slug: str, root: str | None = typer.Option(None, "--root")) -
         typer.secho(f"proposal {slug!r} not found or malformed", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     status = str(doc.get("status") or "proposed")
-    if status in {"rejected", "superseded"}:
+    if status in proposals.EDIT_BLOCKED_STATUSES:
+        # Friendly early message; save_edited_draft re-checks authoritatively under
+        # the lifecycle lock (Codex P1-DATA-INTEGRITY-001 r2).
         typer.secho(f"cannot edit proposal {slug!r}: status is {status}", err=True)
         raise typer.Exit(code=1)
     draft = proposals.extract_draft(doc.body)
@@ -1008,7 +1010,15 @@ def recommend_edit(slug: str, root: str | None = typer.Option(None, "--root")) -
     if edited is None:
         typer.echo(draft)
         return
-    if not proposals.save_edited_draft(handle.root, slug, edited):
+    try:
+        saved = proposals.save_edited_draft(handle.root, slug, edited)
+    except proposals.EditBlockedError as exc:
+        # Decided-status conflict raced in after the pre-check — keep the named
+        # blocked-status error rather than the generic "could not save"
+        # (Codex P2-UX-API-CONTRACT-010).
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    if not saved:
         typer.secho("could not save edited draft", err=True)
         raise typer.Exit(code=1)
     typer.echo(f"Edited proposal {slug}.")
@@ -1095,6 +1105,29 @@ def recommend_revert(
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"Reverted proposal {slug} to proposed.")
+
+
+@recommend_app.command("reopen")
+def recommend_reopen(
+    slug: str,
+    root: str | None = typer.Option(None, "--root"),
+) -> None:
+    """Reconsider a rejection: return a rejected proposal to the review queue
+    (ADR-0024).
+
+    Flips `status: rejected` → `proposed` and appends a `reopened` ledger event —
+    the one sanctioned way back from `rejected`. Only a rejected proposal can be
+    reopened: an accepted one has `revert` / re-check, and a superseded one was
+    replaced by a newer proposal. The prior rejection stays in the ledger.
+    """
+    resolved_root = store.resolve_root(root)
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
+    try:
+        prior = proposals.reopen_proposal(handle.root, slug)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Reopened proposal {slug} ({prior} → proposed).")
 
 
 @recommend_app.command("accept")

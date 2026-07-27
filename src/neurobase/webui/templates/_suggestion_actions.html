@@ -1,0 +1,35 @@
+{# Flash + action affordances for one proposal, shared by the two-pane detail
+   pane and the standalone page. Accept/Edit are links to their own pages (Accept
+   is a multi-step diff-preview → fingerprint-confirm flow); Reject is an inline
+   POST (CSRF-gated). `sel` holds the proposal. #}
+{% if sel.flash %}<div class="flash">{{ sel.flash }}</div>{% endif %}
+{% if sel.status == "proposed" and sel.type == "rule" and not sel.project %}
+<div class="notice" style="margin-bottom: 16px">
+  Seen across <b>multiple projects</b>, so this rule names no single project — a rule installs into
+  one project's <code class="mono">{{ sel.target }}</code>, so it can't be accepted as-is. Reject it,
+  or (for now) install it by hand into whichever project you want it in.
+</div>
+{% endif %}
+<div class="skill-actions" style="margin-bottom: 16px">
+  {% if sel.status == "proposed" %}
+    {% if sel.type == "skill" %}
+    <a class="btn primary" href="/suggestions/{{ sel.slug }}/accept?target=user">Accept — user skill</a>
+    <a class="btn" href="/suggestions/{{ sel.slug }}/accept?target=project">Accept — project skill</a>
+    {% elif sel.project %}
+    <a class="btn primary" href="/suggestions/{{ sel.slug }}/accept">Preview accept</a>
+    {% endif %}
+    <a class="btn" href="/suggestions/{{ sel.slug }}/edit">Edit draft</a>
+    <form method="post" action="/suggestions/{{ sel.slug }}/reject" style="margin: 0">
+      <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+      <button class="btn danger" type="submit">Reject</button>
+    </form>
+  {% elif sel.status == "accepted" %}
+    <a class="btn" href="/suggestions/{{ sel.slug }}/accept">Re-check install</a>
+  {% elif sel.status == "rejected" %}
+    <form method="post" action="/suggestions/{{ sel.slug }}/reopen" style="margin: 0">
+      <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+      <button class="btn" type="submit" title="Return this proposal to the review queue">Reconsider</button>
+    </form>
+    <span class="hint">Reopen this rejection — it goes back to the pending queue (ADR-0024).</span>
+  {% endif %}
+</div>

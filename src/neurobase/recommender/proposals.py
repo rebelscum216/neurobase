@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from neurobase.core import redact, store
+from neurobase.core import lock, redact, store
 from neurobase.core.config import RecommendConfig, load_config
 from neurobase.recommender import corpus
 from neurobase.recommender.corpus import (
@@ -59,6 +61,13 @@ DRAFT_END = "<!-- neurobase:draft:end -->"
 
 # Statuses that a fresh `proposed` render must never overwrite (§12.6 Invariant).
 _DECIDED_STATUSES = frozenset({"accepted", "rejected", "superseded"})
+
+# Statuses `recommend edit` must refuse: a rejected or superseded proposal is a
+# decided one whose draft must not change (§12.7). Authoritative — enforced inside
+# the locked `save_edited_draft` so a stale route/CLI pre-check that passed before a
+# concurrent reject cannot let an edit through (Codex P1-DATA-INTEGRITY-001, r2).
+# `accepted` is intentionally editable (a re-accept re-installs the revised draft).
+EDIT_BLOCKED_STATUSES = frozenset({"rejected", "superseded"})
 
 # The §12.1 proposal schema, enforced structurally on every load so a
 # malformed-but-parseable file is skipped rather than crashing a consumer or —
@@ -222,46 +231,56 @@ def _write_one(
 ) -> None:
     slug = candidate.slug
     body = redact_body(render_body(candidate))
-    existing = load_proposal(root, slug)
-    path = proposal_path(root, slug)
+    # Take the store-wide lifecycle lock for the whole load → decided-status check
+    # → write → supersede → append. Without it, a miner refresh that loaded a
+    # `proposed` proposal could resume *after* a concurrent `reject` committed and
+    # re-write it back to `proposed` — silently undoing the decision (Codex
+    # P1-DATA-INTEGRITY-001, round 2). The lock is re-acquired per candidate so a
+    # long batch never starves an interactive accept/reject. `_apply_supersedes`
+    # writes other slugs directly (never via the public locked functions), so this
+    # does not re-enter the lock. Non-mutating branches (malformed/declined) hold
+    # it only briefly.
+    with _lifecycle_lock(root):
+        existing = load_proposal(root, slug)
+        path = proposal_path(root, slug)
 
-    if existing is None:
-        # Missing and malformed are deliberately distinct on the write path.
-        # A malformed existing proposal is user state we cannot safely interpret,
-        # so fail closed instead of silently replacing it (§12 Invariants).
-        if path.exists():
-            logger.warning("skipping %r: existing proposal is malformed", slug)
-            outcome.skipped_malformed.append(slug)
+        if existing is None:
+            # Missing and malformed are deliberately distinct on the write path.
+            # A malformed existing proposal is user state we cannot safely interpret,
+            # so fail closed instead of silently replacing it (§12 Invariants).
+            if path.exists():
+                logger.warning("skipping %r: existing proposal is malformed", slug)
+                outcome.skipped_malformed.append(slug)
+                return
+            # A brand-new proposal: decline if it merely re-states a still-rejected
+            # one (belt-and-suspenders on the miner prompt, §12.6/D18).
+            if _is_rejected_near_duplicate(body, rejected_bodies, cfg.near_duplicate_threshold):
+                logger.info("declining %r: near-duplicate of a rejected proposal", slug)
+                outcome.declined.append(slug)
+                return
+            _write_proposal(root, candidate, body, created_at=at_iso, updated_at=at_iso)
+            outcome.superseded.extend(_apply_supersedes(root, candidate, at_iso))
+            _append_ledger(root, slug, "proposed", at_iso, candidate.candidate_type)
+            outcome.created.append(slug)
             return
-        # A brand-new proposal: decline if it merely re-states a still-rejected
-        # one (belt-and-suspenders on the miner prompt, §12.6/D18).
-        if _is_rejected_near_duplicate(body, rejected_bodies, cfg.near_duplicate_threshold):
-            logger.info("declining %r: near-duplicate of a rejected proposal", slug)
-            outcome.declined.append(slug)
+
+        status = str(existing.get("status") or "proposed")
+        if status in _DECIDED_STATUSES:
+            # Never silently reset a decided proposal back to proposed (Invariant).
+            outcome.skipped_decided.append(slug)
             return
-        _write_proposal(root, candidate, body, created_at=at_iso, updated_at=at_iso)
+
+        # An existing `proposed` proposal. Preserve a user's hand edit rather than
+        # clobbering it with the miner's fresh draft (§12.6).
+        if _edited_since_last_write(root, slug):
+            outcome.preserved_edits.append(slug)
+            return
+
+        created_at = str(existing.get("created_at") or at_iso)
+        _write_proposal(root, candidate, body, created_at=created_at, updated_at=at_iso)
         outcome.superseded.extend(_apply_supersedes(root, candidate, at_iso))
         _append_ledger(root, slug, "proposed", at_iso, candidate.candidate_type)
-        outcome.created.append(slug)
-        return
-
-    status = str(existing.get("status") or "proposed")
-    if status in _DECIDED_STATUSES:
-        # Never silently reset a decided proposal back to proposed (Invariant).
-        outcome.skipped_decided.append(slug)
-        return
-
-    # An existing `proposed` proposal. Preserve a user's hand edit rather than
-    # clobbering it with the miner's fresh draft (§12.6).
-    if _edited_since_last_write(root, slug):
-        outcome.preserved_edits.append(slug)
-        return
-
-    created_at = str(existing.get("created_at") or at_iso)
-    _write_proposal(root, candidate, body, created_at=created_at, updated_at=at_iso)
-    outcome.superseded.extend(_apply_supersedes(root, candidate, at_iso))
-    _append_ledger(root, slug, "proposed", at_iso, candidate.candidate_type)
-    outcome.refreshed.append(slug)
+        outcome.refreshed.append(slug)
 
 
 # --- supersede transition (§12.6) ------------------------------------------
@@ -481,51 +500,104 @@ def replace_draft(body: str, draft: str) -> str | None:
     return f"{body[: start + len(DRAFT_START)]}\n{draft.rstrip()}\n{body[end:]}"
 
 
+class EditBlockedError(ValueError):
+    """``save_edited_draft`` refused because the proposal is in a blocked status
+    (rejected / superseded) at write time. Distinct from the ``False`` returned for
+    a malformed/missing draft so a caller can map it to a named-status **409** — the
+    §14 status for a decided-status conflict — rather than the generic 400 reserved
+    for malformed input (Codex P2-UX-API-CONTRACT-010). Carries the observed
+    ``status`` so the message names it, and so the caller need not re-read (which
+    would reintroduce a race)."""
+
+    def __init__(self, slug: str, status: str) -> None:
+        self.status = status
+        super().__init__(f"cannot edit proposal {slug!r}: status is {status}")
+
+
 def save_edited_draft(root: Path, slug: str, draft: str, *, now: datetime | None = None) -> bool:
-    """Redact and persist one user edit, appending exactly one ledger event."""
-    doc = load_proposal(root, slug)
-    if doc is None:
-        return False
-    updated = replace_draft(doc.body, redact_body(draft))
-    if updated is None:
-        return False
-    stamp = _iso(now if now is not None else datetime.now(UTC))
-    frontmatter = dict(doc.frontmatter)
-    frontmatter["updated_at"] = stamp
-    store.write_doc(doc.file_path, frontmatter, updated)
-    _append_ledger(root, slug, "edited", stamp, None)
-    return True
+    """Redact and persist one user edit, appending exactly one ledger event.
+
+    The rejected/superseded guard is enforced HERE, inside the lock, on the status
+    re-read at write time — not only in the route/CLI before the call. Otherwise a
+    caller that checked `proposed` and then raced a concurrent `reject` would still
+    save, mutating a now-rejected draft and appending `edited` (Codex
+    P1-DATA-INTEGRITY-001, round 2). A blocked status raises
+    :class:`EditBlockedError` (→ caller's 409); a malformed/missing draft returns
+    False (→ caller's 400), keeping those two failure modes distinct
+    (P2-UX-API-CONTRACT-010)."""
+    with _lifecycle_lock(root):
+        doc = load_proposal(root, slug)
+        if doc is None:
+            return False
+        status = str(doc.get("status") or "proposed")
+        if status in EDIT_BLOCKED_STATUSES:
+            raise EditBlockedError(slug, status)
+        updated = replace_draft(doc.body, redact_body(draft))
+        if updated is None:
+            return False
+        stamp = _iso(now if now is not None else datetime.now(UTC))
+        frontmatter = dict(doc.frontmatter)
+        frontmatter["updated_at"] = stamp
+        store.write_doc(doc.file_path, frontmatter, updated)
+        _append_ledger(root, slug, "edited", stamp, None)
+        return True
+
+
+@contextmanager
+def _lifecycle_lock(root: Path) -> Iterator[None]:
+    """Serialize one proposal-lifecycle transition (accept / reject / reopen /
+    revert / edit) against every other writer of the **store-wide** proposal +
+    ledger tree, so the load → status-check → write → append sequence is one
+    atomic critical section (Codex P1-DATA-INTEGRITY-001).
+
+    The per-project store write lock (ADR-0023 / G4) keys on
+    ``memory_dir(project)`` and so does *not* cover ``<root>/proposals/`` or the
+    recommender ledger, which are store-wide, single-profile paths. Without this,
+    two callers — e.g. a CLI ``recommend reopen`` racing the running web UI — can
+    both read the same ``rejected`` document, both pass the only-rejected guard,
+    and both append a ``reopened`` event. Holding this lock across the whole
+    transition means the second caller re-reads the *already-transitioned* status
+    and fails its guard, so exactly one transition (and one ledger line) lands.
+
+    We reuse the generic path-level ``core.lock.project_lock`` primitive, keyed on
+    the recommender directory (``<root>/recommender/``, where ``ledger.jsonl``
+    already lives). The lockfile is a ``.lock`` dotfile there — outside every
+    proposal (``proposals/*.md``) and ledger read path — so readers never see it
+    and never take it, exactly like the per-project lock's placement."""
+    with lock.project_lock(ledger_path(root).parent):
+        yield
 
 
 def reject_proposal(
     root: Path, slug: str, *, reason: str | None = None, now: datetime | None = None
 ) -> str:
     """Reject a still-proposed proposal and append exactly one ledger event."""
-    doc = load_proposal(root, slug)
-    if doc is None:
-        raise ValueError(f"proposal {slug!r} not found or malformed")
-    status = str(doc.get("status") or "proposed")
-    if status != "proposed":
-        raise ValueError(f"cannot reject proposal {slug!r}: status is {status}")
-    stamp = _iso(now if now is not None else datetime.now(UTC))
-    frontmatter = dict(doc.frontmatter)
-    frontmatter["status"] = "rejected"
-    frontmatter["updated_at"] = stamp
-    store.write_doc(doc.file_path, frontmatter, doc.body)
-    record: dict[str, Any] = {"at": stamp, "slug": slug, "event": "rejected"}
-    # Carry the proposal's candidate_type so corpus.load_ledger_summary can build
-    # the per-type reject counts the miner prompt feeds on (§12.2/§12.4/§12.5);
-    # without it, every CLI rejection contributes nothing to that feedback.
-    candidate_type = doc.get("candidate_type")
-    if isinstance(candidate_type, str) and candidate_type:
-        record["candidate_type"] = candidate_type
-    if reason:
-        record["reason"] = reason
-    path = ledger_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return status
+    with _lifecycle_lock(root):
+        doc = load_proposal(root, slug)
+        if doc is None:
+            raise ValueError(f"proposal {slug!r} not found or malformed")
+        status = str(doc.get("status") or "proposed")
+        if status != "proposed":
+            raise ValueError(f"cannot reject proposal {slug!r}: status is {status}")
+        stamp = _iso(now if now is not None else datetime.now(UTC))
+        frontmatter = dict(doc.frontmatter)
+        frontmatter["status"] = "rejected"
+        frontmatter["updated_at"] = stamp
+        store.write_doc(doc.file_path, frontmatter, doc.body)
+        record: dict[str, Any] = {"at": stamp, "slug": slug, "event": "rejected"}
+        # Carry the proposal's candidate_type so corpus.load_ledger_summary can build
+        # the per-type reject counts the miner prompt feeds on (§12.2/§12.4/§12.5);
+        # without it, every CLI rejection contributes nothing to that feedback.
+        candidate_type = doc.get("candidate_type")
+        if isinstance(candidate_type, str) and candidate_type:
+            record["candidate_type"] = candidate_type
+        if reason:
+            record["reason"] = reason
+        path = ledger_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return status
 
 
 class ProposalChangedError(ValueError):
@@ -558,31 +630,37 @@ def accept_proposal(
     the proposal and *then* calls this function has a window in between — this
     function does its own independent reload — so the version it validated need
     not be the version that becomes ``accepted`` (review P1-DATA-INTEGRITY-004).
-    A defensive equality guard, not a lock: it closes the reachable
-    check-then-write gap, and cannot serialize two concurrent writers."""
-    doc = load_proposal(root, slug)
-    if doc is None:
-        raise ValueError(f"proposal {slug!r} not found or malformed")
-    if expect is not None and (doc.frontmatter != expect.frontmatter or doc.body != expect.body):
-        raise ProposalChangedError(
-            f"proposal {slug!r} changed between validation and this write — nothing recorded"
+    The ``expect`` guard closes the reachable check-then-write gap for a caller
+    that validated the doc earlier; the ``_lifecycle_lock`` below additionally
+    serializes this transition against a concurrent reject/reopen/revert of the
+    same proposal (Codex P1-DATA-INTEGRITY-001), so the status re-check here is
+    authoritative at the mutation boundary."""
+    with _lifecycle_lock(root):
+        doc = load_proposal(root, slug)
+        if doc is None:
+            raise ValueError(f"proposal {slug!r} not found or malformed")
+        if expect is not None and (
+            doc.frontmatter != expect.frontmatter or doc.body != expect.body
+        ):
+            raise ProposalChangedError(
+                f"proposal {slug!r} changed between validation and this write — nothing recorded"
+            )
+        status = str(doc.get("status") or "proposed")
+        if status in {"rejected", "superseded"}:
+            raise ValueError(f"cannot accept proposal {slug!r}: status is {status}")
+        stamp = _iso(now if now is not None else datetime.now(UTC))
+        frontmatter = dict(doc.frontmatter)
+        frontmatter.update(
+            status="accepted", target=target, installed_path=str(installed_path), updated_at=stamp
         )
-    status = str(doc.get("status") or "proposed")
-    if status in {"rejected", "superseded"}:
-        raise ValueError(f"cannot accept proposal {slug!r}: status is {status}")
-    stamp = _iso(now if now is not None else datetime.now(UTC))
-    frontmatter = dict(doc.frontmatter)
-    frontmatter.update(
-        status="accepted", target=target, installed_path=str(installed_path), updated_at=stamp
-    )
-    store.write_doc(doc.file_path, frontmatter, doc.body)
-    record: dict[str, Any] = {"at": stamp, "slug": slug, "event": "accepted", "target": target}
-    if installed_hash is not None:
-        record["installed_hash"] = installed_hash
-    path = ledger_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        store.write_doc(doc.file_path, frontmatter, doc.body)
+        record: dict[str, Any] = {"at": stamp, "slug": slug, "event": "accepted", "target": target}
+        if installed_hash is not None:
+            record["installed_hash"] = installed_hash
+        path = ledger_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 # --- artifact liveness: is a managed artifact still live to orphan? (ADR-0020) --
@@ -705,27 +783,28 @@ def revert_proposal(root: Path, slug: str, *, now: datetime | None = None) -> st
     key on current frontmatter status rather than the ledger (§12.9), a reverted
     proposal drops out of them cleanly while the ledger keeps the full
     proposed→accepted→reverted history."""
-    doc = load_proposal(root, slug)
-    if doc is None:
-        raise ValueError(f"proposal {slug!r} not found or malformed")
-    status = str(doc.get("status") or "proposed")
-    if status != "accepted":
-        raise ValueError(
-            f"cannot revert proposal {slug!r}: status is {status} "
-            "(only an accepted proposal can be reverted)"
-        )
-    state = artifact_state(root, doc, slug)
-    refusal = revert_refusal(slug, doc, state)
-    if refusal is not None:
-        raise ValueError(refusal)
-    stamp = _iso(now if now is not None else datetime.now(UTC))
-    frontmatter = dict(doc.frontmatter)
-    frontmatter["status"] = "proposed"
-    frontmatter["installed_path"] = None
-    frontmatter["updated_at"] = stamp
-    store.write_doc(doc.file_path, frontmatter, doc.body)
-    _append_ledger(root, slug, "reverted", stamp, None, {"reason": state})
-    return status
+    with _lifecycle_lock(root):
+        doc = load_proposal(root, slug)
+        if doc is None:
+            raise ValueError(f"proposal {slug!r} not found or malformed")
+        status = str(doc.get("status") or "proposed")
+        if status != "accepted":
+            raise ValueError(
+                f"cannot revert proposal {slug!r}: status is {status} "
+                "(only an accepted proposal can be reverted)"
+            )
+        state = artifact_state(root, doc, slug)
+        refusal = revert_refusal(slug, doc, state)
+        if refusal is not None:
+            raise ValueError(refusal)
+        stamp = _iso(now if now is not None else datetime.now(UTC))
+        frontmatter = dict(doc.frontmatter)
+        frontmatter["status"] = "proposed"
+        frontmatter["installed_path"] = None
+        frontmatter["updated_at"] = stamp
+        store.write_doc(doc.file_path, frontmatter, doc.body)
+        _append_ledger(root, slug, "reverted", stamp, None, {"reason": state})
+        return status
 
 
 def revert_refusal(slug: str, doc: store.Document, state: str) -> str | None:
@@ -754,6 +833,51 @@ def revert_refusal(slug: str, doc: store.Document, state: str) -> str | None:
         "(ADR-0020). Remove the managed block/skill by hand first if you no longer "
         "want it."
     )
+
+
+def reopen_proposal(root: Path, slug: str, *, now: datetime | None = None) -> str:
+    """Reconsider a **rejected** proposal: flip it back to ``proposed`` and append
+    one ``reopened`` ledger event. This is the only sanctioned
+    ``rejected → proposed`` transition (ADR-0024). Returns the prior status
+    (always ``"rejected"`` on success).
+
+    §12.7 keeps a decided proposal durable so the *miner* never silently
+    re-surfaces something the user already judged — but a user may change their
+    mind. ``reopen`` is that explicit, ledgered action, and is deliberately narrow:
+
+    - **Only ``rejected`` reopens.** ``accepted`` has its own paths (re-check /
+      ``revert``, ADR-0020); a ``superseded`` proposal was replaced by a newer one,
+      so reopening it would resurrect a duplicate — both are refused with a
+      named-status error, exactly like the other blocked-status rules (§12.7).
+    - The prior rejection **stays in the ledger** (and in the per-type reject
+      feedback the miner reads): reconsidering does not rewrite the fact that it
+      was rejected once. The next ``recommend run`` sees a live ``proposed``
+      proposal and updates it in place rather than minting a duplicate.
+
+    The whole load → only-rejected check → write → append runs under
+    ``_lifecycle_lock`` so two concurrent reopens (a CLI ``recommend reopen``
+    racing the running UI) cannot both pass the guard on one rejection and append
+    two ``reopened`` events — exactly one wins and the other re-reads
+    ``proposed`` and fails its guard (Codex P1-DATA-INTEGRITY-001)."""
+    with _lifecycle_lock(root):
+        doc = load_proposal(root, slug)
+        if doc is None:
+            raise ValueError(f"proposal {slug!r} not found or malformed")
+        status = str(doc.get("status") or "proposed")
+        if status != "rejected":
+            raise ValueError(
+                f"cannot reopen proposal {slug!r}: status is {status} "
+                "(only a rejected proposal can be reopened)"
+            )
+        stamp = _iso(now if now is not None else datetime.now(UTC))
+        frontmatter = dict(doc.frontmatter)
+        frontmatter["status"] = "proposed"
+        frontmatter["updated_at"] = stamp
+        store.write_doc(doc.file_path, frontmatter, doc.body)
+        candidate_type = doc.get("candidate_type")
+        ct = candidate_type if isinstance(candidate_type, str) and candidate_type else None
+        _append_ledger(root, slug, "reopened", stamp, ct)
+        return status
 
 
 # --- body rendering + redaction ---------------------------------------------

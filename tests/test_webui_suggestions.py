@@ -15,7 +15,7 @@ inside the tmp repo.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -138,17 +138,104 @@ def _preview_fingerprint(client: TestClient, slug: str) -> str:
 # --- list ---------------------------------------------------------------------
 
 
-def test_list_renders_all_three_statuses(client: TestClient, seed: Seed) -> None:
+def test_queue_defaults_to_pending_only(client: TestClient, seed: Seed) -> None:
+    """The queue is a *review* queue: by default it shows only pending
+    (proposed) proposals, so decided items don't clutter it — matching the rail
+    badge, which also counts only pending. The filter chips reach the rest."""
     response = client.get("/suggestions")
     assert response.status_code == 200
     assert seed.proposed_slug in response.text
-    assert seed.accepted_slug in response.text
-    assert seed.rejected_slug in response.text
-    assert "status-chip proposed" in response.text
-    assert "status-chip accepted" in response.text
-    assert "status-chip rejected" in response.text
-    # The metrics strip (metrics.compute_metrics) rendered without a crash.
-    assert "Decided" in response.text
+    assert seed.accepted_slug not in response.text  # accepted filtered out of default
+    assert seed.rejected_slug not in response.text  # rejected too
+    assert 'href="/suggestions?status=all"' in response.text  # filter chips present
+    assert 'href="/suggestions?status=rejected"' in response.text
+
+
+def test_status_filter_selects_the_asked_for_status(client: TestClient, seed: Seed) -> None:
+    all_text = client.get("/suggestions", params={"status": "all"}).text
+    assert seed.proposed_slug in all_text
+    assert seed.accepted_slug in all_text
+    assert seed.rejected_slug in all_text
+
+    rejected_text = client.get("/suggestions", params={"status": "rejected"}).text
+    assert seed.rejected_slug in rejected_text
+    assert seed.proposed_slug not in rejected_text  # only rejected shown
+
+
+def test_default_pane_shows_recommender_health(client: TestClient) -> None:
+    # With nothing selected, the right pane is the metrics overview (no crash).
+    assert "Recommender health" in client.get("/suggestions").text
+
+
+def test_clicking_a_proposal_previews_it_inline(client: TestClient, seed: Seed) -> None:
+    response = client.get(f"/suggestions/{seed.proposed_slug}")
+    assert response.status_code == 200
+    assert 'class="split"' in response.text  # two-pane, queue still on the left
+    assert "Always use uv run." in response.text  # the draft in the right pane
+    assert f"/suggestions/{seed.proposed_slug}?view=full" in response.text  # open-as-page
+    # a proposed proposal offers the inline reject form
+    assert f'action="/suggestions/{seed.proposed_slug}/reject"' in response.text
+
+
+def test_suggestion_fragment_is_pane_only_and_keeps_csrf(client: TestClient, seed: Seed) -> None:
+    """The ?fragment=1 swap must be pane-only AND still carry the CSRF token, or
+    the inline reject form it contains would be unusable after a no-reload swap."""
+    html = client.get(f"/suggestions/{seed.proposed_slug}", params={"fragment": "1"}).text
+    assert "Always use uv run." in html
+    assert "<html" not in html.lower(), "fragment must not carry the page shell"
+    assert 'class="split"' not in html, "fragment must be the pane only"
+    assert 'name="csrf_token"' in html, "fragment lost the CSRF token for its reject form"
+
+
+def test_suggestion_open_as_page_is_standalone(client: TestClient, seed: Seed) -> None:
+    html = client.get(f"/suggestions/{seed.proposed_slug}", params={"view": "full"}).text
+    assert "Always use uv run." in html
+    assert 'class="split"' not in html
+    assert "page narrow" in html
+
+
+# --- reconsider / reopen (ADR-0024) --------------------------------------------
+
+
+def test_rejected_proposal_offers_reconsider_and_reopen_works(
+    client: TestClient, app: Starlette, seed: Seed
+) -> None:
+    # a rejected proposal's detail shows the Reconsider form
+    detail = client.get(f"/suggestions/{seed.rejected_slug}", params={"view": "full"}).text
+    assert f'action="/suggestions/{seed.rejected_slug}/reopen"' in detail
+    # and reopening it flips it back to proposed
+    response = client.post(
+        f"/suggestions/{seed.rejected_slug}/reopen",
+        data={"csrf_token": app.state.csrf_token},
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    doc = proposals.load_proposal(seed.root, seed.rejected_slug)
+    assert doc is not None
+    assert doc.get("status") == "proposed"
+
+
+def test_reopen_on_a_non_rejected_proposal_is_409(
+    client: TestClient, app: Starlette, seed: Seed
+) -> None:
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/reopen",
+        data={"csrf_token": app.state.csrf_token},
+        headers={"origin": str(client.base_url)},
+    )
+    assert response.status_code == 409
+    doc = proposals.load_proposal(seed.root, seed.proposed_slug)
+    assert doc is not None
+    assert doc.get("status") == "proposed"  # untouched
+
+
+def test_reopen_without_csrf_is_rejected_and_writes_nothing(client: TestClient, seed: Seed) -> None:
+    response = client.post(f"/suggestions/{seed.rejected_slug}/reopen", data={})
+    assert response.status_code == 403
+    doc = proposals.load_proposal(seed.root, seed.rejected_slug)
+    assert doc is not None
+    assert doc.get("status") == "rejected"  # CSRF-less POST mutated nothing
 
 
 # --- detail ---------------------------------------------------------------------
@@ -167,6 +254,27 @@ def test_detail_renders_evidence_and_draft(client: TestClient, seed: Seed) -> No
 def test_detail_not_found_returns_404(client: TestClient) -> None:
     response = client.get("/suggestions/does-not-exist")
     assert response.status_code == 404
+
+
+def test_multi_project_rule_explains_instead_of_offering_accept(tmp_path: Path) -> None:
+    """A rule mined across multiple projects has no single project to install
+    into, so `prepare_install` 400s. The detail must EXPLAIN that rather than
+    offer an accept button that dead-ends on the error — while still offering
+    reject/edit. (Own store, no rejected proposal, so the near-duplicate decline
+    in write_ranked doesn't drop the fixture.)"""
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    projects.register_project(root, repo, slug="neurobase")
+    proposals.write_ranked(root, [replace(_rule_candidate("global-rule"), project=None)])
+    client = TestClient(build_app(root), base_url="http://127.0.0.1:8765")
+
+    html = client.get("/suggestions/global-rule", params={"view": "full"}).text
+    assert "multiple projects" in html  # the explanation is shown
+    assert "/suggestions/global-rule/accept" not in html  # no dead-end accept link
+    # reject + edit remain available
+    assert "/suggestions/global-rule/reject" in html
+    assert "/suggestions/global-rule/edit" in html
 
 
 # --- accept preview (GET) ------------------------------------------------------
@@ -577,6 +685,47 @@ def test_edit_round_trips_new_draft(client: TestClient, app: Starlette, seed: Se
 
     history = proposals.ledger_history(seed.root, seed.proposed_slug)
     assert history[-1]["event"] == "edited"
+
+
+def test_edit_race_to_rejected_returns_409_not_400(
+    client: TestClient, app: Starlette, seed: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2-UX-API-CONTRACT-010: if the proposal is decided (rejected) *after* the
+    route's status pre-check but *before* the locked save, the in-lock guard
+    refuses — and that decided-status conflict must surface as a named 409, not the
+    generic 400 reserved for a malformed draft (§14)."""
+    from neurobase.webui import routes
+
+    def _raise_blocked(*_a: object, **_k: object) -> bool:
+        raise proposals.EditBlockedError(seed.proposed_slug, "rejected")
+
+    monkeypatch.setattr(routes.proposals, "save_edited_draft", _raise_blocked)
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/edit",
+        data={"csrf_token": app.state.csrf_token, "draft": "a new draft"},
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 409
+    assert "status is rejected" in response.text
+
+
+def test_edit_with_unsavable_draft_still_returns_400(
+    client: TestClient, app: Starlette, seed: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The malformed/missing-draft failure mode keeps its 400 — only the
+    blocked-status conflict became a 409 (P2-UX-API-CONTRACT-010)."""
+    from neurobase.webui import routes
+
+    monkeypatch.setattr(routes.proposals, "save_edited_draft", lambda *a, **k: False)
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/edit",
+        data={"csrf_token": app.state.csrf_token, "draft": "a new draft"},
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "could not save edited draft" in response.text
 
 
 def _inject_secret_into_draft(seed: Seed) -> str:

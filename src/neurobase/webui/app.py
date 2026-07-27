@@ -12,8 +12,11 @@ from pathlib import Path
 from starlette.applications import Starlette
 from starlette.templating import Jinja2Templates
 
-from neurobase.webui.routes import suggestions_routes
+from neurobase.core import store
+from neurobase.webui.filters import human_datetime
+from neurobase.webui.routes import all_routes, unsupported_schema_handler
 from neurobase.webui.security import CSRF_FORM_FIELD, CSRFMiddleware, new_csrf_token
+from neurobase.webui.shell import shell_context
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -36,7 +39,9 @@ def build_app(root: Path) -> Starlette:
     wires the same-origin/CSRF middleware, and the Suggestions route table
     (``routes.py``).
     """
-    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # ``shell_context`` (registered here, not threaded per-handler) injects the
+    # left-rail nav + live counts into every template render (app-shell Phase 2a).
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR), context_processors=[shell_context])
     # The hidden form field name every mutating template must use — a Jinja
     # global rather than a value every route handler has to thread through
     # its own context, so it can never drift out of sync with
@@ -45,8 +50,16 @@ def build_app(root: Path) -> Starlette:
     # The rail brand badge shows the real store path (base.html) — a Jinja
     # global for the same reason as CSRF_FORM_FIELD above.
     templates.env.globals["store_root_label"] = _store_root_label(root)
+    # Display filter for ISO timestamps → "July 15, 2026 | 1:20pm" across surfaces.
+    templates.env.filters["humandate"] = human_datetime
 
-    app = Starlette(routes=suggestions_routes())
+    # A store that advances past this binary's schema *after* the server started
+    # surfaces as UnsupportedSchemaError from any request-boundary open_store; map
+    # it to a fail-safe typed page rather than a 500 (Codex P1-SAFETY-SECURITY-002).
+    app = Starlette(
+        routes=all_routes(),
+        exception_handlers={store.UnsupportedSchemaError: unsupported_schema_handler},
+    )
     app.state.root = root
     app.state.templates = templates
     app.state.csrf_token = new_csrf_token()

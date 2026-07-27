@@ -17,6 +17,7 @@ re-check (§12.6) — added here for real coverage rather than left untested."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -526,6 +527,200 @@ def test_revert_missing_proposal_raises(tmp_path: Path) -> None:
     root = tmp_path / "store"
     with pytest.raises(ValueError, match="not found or malformed"):
         proposals.revert_proposal(root, "does-not-exist")
+
+
+# --- reopen (ADR-0024): the one sanctioned rejected -> proposed transition ----
+
+
+def test_reopen_flips_rejected_to_proposed_and_ledgers(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    proposals.reject_proposal(root, "prefer-uv-run", reason="not yet", now=NOW)
+
+    prior = proposals.reopen_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+
+    assert prior == "rejected"
+    assert _read(root, "prefer-uv-run").get("status") == "proposed"
+    # the prior rejection stays in the ledger — reconsidering doesn't rewrite it
+    assert [e["event"] for e in _ledger_events(root)] == ["proposed", "rejected", "reopened"]
+
+
+def test_reopen_only_allowed_on_rejected(tmp_path: Path) -> None:
+    """rejected is the only reopenable status; proposed and accepted are hard,
+    named-status errors (a superseded one has no way back either)."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    with pytest.raises(ValueError, match="only a rejected proposal"):
+        proposals.reopen_proposal(root, "prefer-uv-run")  # still proposed
+
+    _accept_real(tmp_path, root)  # now accepted
+    with pytest.raises(ValueError, match="status is accepted"):
+        proposals.reopen_proposal(root, "prefer-uv-run")
+
+
+def test_reopen_missing_proposal_raises(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    with pytest.raises(ValueError, match="not found or malformed"):
+        proposals.reopen_proposal(root, "does-not-exist")
+
+
+def test_reopen_superseded_is_refused_and_writes_nothing(tmp_path: Path) -> None:
+    """§12.7: a superseded proposal was replaced by a newer one — reopening it
+    would resurrect a duplicate, so it is a hard, named-status error that mutates
+    neither the proposal nor the ledger (Codex P2-TEST-GAP-008)."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked(slug="old-rule")], now=NOW)
+    proposals.write_ranked(
+        root, [_ranked(slug="new-rule", supersedes=["old-rule"])], now=NOW + timedelta(days=1)
+    )
+    assert _read(root, "old-rule").get("status") == "superseded"  # precondition
+    ledger_before = _ledger_events(root)
+
+    with pytest.raises(ValueError, match="status is superseded"):
+        proposals.reopen_proposal(root, "old-rule")
+
+    assert _read(root, "old-rule").get("status") == "superseded", "a superseded proposal moved"
+    assert _ledger_events(root) == ledger_before, "a refused reopen appended a ledger line"
+
+
+def test_concurrent_reopen_appends_exactly_one_event(tmp_path: Path) -> None:
+    """P1-DATA-INTEGRITY-001: two reopens racing on one rejection — the
+    store-wide lifecycle lock means exactly one wins (returns "rejected"), the
+    other re-reads the already-flipped `proposed` status and fails its guard, so
+    the ledger gains exactly one `reopened` line and the prior lines are intact."""
+    import threading
+
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW)
+
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+    errors: list[str] = []
+
+    def worker() -> None:
+        barrier.wait()  # maximize contention: both enter reopen together
+        try:
+            results.append(proposals.reopen_proposal(root, "prefer-uv-run"))
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results == ["rejected"], "exactly one reopen should succeed"
+    assert len(errors) == 1 and "only a rejected proposal" in errors[0]
+    assert _read(root, "prefer-uv-run").get("status") == "proposed"
+    assert [e["event"] for e in _ledger_events(root)] == ["proposed", "rejected", "reopened"]
+
+
+def test_concurrent_refresh_and_reject_never_undoes_the_reject(tmp_path: Path) -> None:
+    """P1-DATA-INTEGRITY-001 (round 2): a miner refresh (`write_ranked`) racing a
+    `reject` must not resurrect the proposal. With `write_ranked` under the same
+    lifecycle lock, whichever wins, the reject is final — the ledger never ends
+    `…rejected, proposed`."""
+    import threading
+
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)  # initial proposed
+
+    barrier = threading.Barrier(2)
+    errors: list[str] = []
+
+    def do_refresh() -> None:
+        barrier.wait()
+        try:
+            proposals.write_ranked(root, [_ranked()])  # miner refresh of the same slug
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append(repr(exc))
+
+    def do_reject() -> None:
+        barrier.wait()
+        # If reject wins, it rejects; if the refresh committed first the status is
+        # still proposed, so this still succeeds — a ValueError only if a decided
+        # state raced in, which this two-actor test never produces.
+        with contextlib.suppress(ValueError):
+            proposals.reject_proposal(root, "prefer-uv-run")
+
+    threads = [threading.Thread(target=do_refresh), threading.Thread(target=do_reject)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert _read(root, "prefer-uv-run").get("status") == "rejected", "the reject was undone"
+    assert [e["event"] for e in _ledger_events(root)][-1] == "rejected", "a proposed trailed reject"
+
+
+def test_concurrent_edit_and_reject_never_edits_a_rejected_draft(tmp_path: Path) -> None:
+    """P1-DATA-INTEGRITY-001 (round 2): `save_edited_draft` re-checks the
+    rejected/superseded guard inside the lock, so an edit racing a reject cannot
+    land on a rejected draft — the ledger never ends `…rejected, edited`."""
+    import threading
+
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+
+    barrier = threading.Barrier(2)
+
+    def do_edit() -> None:
+        barrier.wait()
+        # If the reject wins the lock first, the in-lock guard raises
+        # EditBlockedError; that is the correct refusal, not a test failure.
+        with contextlib.suppress(proposals.EditBlockedError):
+            proposals.save_edited_draft(root, "prefer-uv-run", "revised draft body")
+
+    def do_reject() -> None:
+        barrier.wait()
+        with contextlib.suppress(ValueError):
+            proposals.reject_proposal(root, "prefer-uv-run")
+
+    threads = [threading.Thread(target=do_edit), threading.Thread(target=do_reject)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert _read(root, "prefer-uv-run").get("status") == "rejected"
+    events = [e["event"] for e in _ledger_events(root)]
+    assert events[-1] == "rejected", f"an edit landed on a rejected proposal: {events}"
+
+
+def test_save_edited_draft_refuses_a_rejected_proposal(tmp_path: Path) -> None:
+    """The authoritative in-lock guard directly: even called straight on a rejected
+    proposal (bypassing the route/CLI pre-check), the save raises the typed
+    blocked-status error (→ caller's 409) and writes nothing (Codex
+    P1-DATA-INTEGRITY-001 r2 / P2-UX-API-CONTRACT-010 r3)."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW)
+    ledger_before = _ledger_events(root)
+
+    with pytest.raises(proposals.EditBlockedError) as exc_info:
+        proposals.save_edited_draft(root, "prefer-uv-run", "sneaky revision")
+    assert exc_info.value.status == "rejected"
+    assert _ledger_events(root) == ledger_before, "a blocked edit appended a ledger line"
+
+
+def test_reopened_proposal_round_trips_and_can_be_rejected_again(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW)
+    proposals.reopen_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=1))
+    # back to proposed → a normal proposal again, re-rejectable
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW + timedelta(minutes=2))
+
+    assert _read(root, "prefer-uv-run").get("status") == "rejected"
+    assert [e["event"] for e in _ledger_events(root)] == [
+        "proposed",
+        "rejected",
+        "reopened",
+        "rejected",
+    ]
 
 
 def test_reverted_proposal_can_be_reaccepted(tmp_path: Path) -> None:

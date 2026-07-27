@@ -26,16 +26,19 @@ from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
-from neurobase.core import store
+from neurobase.core import redact, search, store
+from neurobase.core.config import load_config
+from neurobase.core.store_handle import StoreMode, open_store
 from neurobase.recommender import corpus as recommend_corpus
 from neurobase.recommender import install, proposals
 from neurobase.recommender import metrics as recommend_metrics
+from neurobase.webui import skills_scan
 
-# Statuses `edit`/`accept` must never operate on (mirrors `recommend edit`'s
-# and `install.prepare_install`'s own guards — re-checked here so a stale
-# link never reaches those functions with a decided proposal for `edit`,
-# which has no typed-exception guard of its own).
-_EDIT_BLOCKED_STATUSES = frozenset({"rejected", "superseded"})
+# Statuses `edit`/`accept` must never operate on — re-checked here so a stale link
+# gives a clean 409 at the request boundary. The authoritative guard now lives
+# inside the locked `proposals.save_edited_draft` (Codex P1-DATA-INTEGRITY-001 r2);
+# this route-level check is the friendly early message, single-sourced from there.
+_EDIT_BLOCKED_STATUSES = proposals.EDIT_BLOCKED_STATUSES
 
 
 def suggestions_routes() -> list[Route]:
@@ -46,8 +49,42 @@ def suggestions_routes() -> list[Route]:
         Route("/suggestions/{slug}", _suggestion_detail, methods=["GET"]),
         Route("/suggestions/{slug}/accept", _accept_view, methods=["GET", "POST"]),
         Route("/suggestions/{slug}/reject", _reject_view, methods=["POST"]),
+        Route("/suggestions/{slug}/reopen", _reopen_view, methods=["POST"]),
         Route("/suggestions/{slug}/edit", _edit_view, methods=["GET", "POST"]),
     ]
+
+
+def sessions_routes() -> list[Route]:
+    """The Sessions surface (app-shell plan, Phase 2b): a read-only browser over
+    the raw captures the scribes write, before the curator folds them."""
+    return [
+        Route("/sessions", _list_sessions, methods=["GET"]),
+        Route("/sessions/{project}/{file}", _session_detail, methods=["GET"]),
+    ]
+
+
+def memory_routes() -> list[Route]:
+    """The Memory + Search surface (app-shell plan, Phase 2c): a read-only browser
+    over curated facts + synthesized nodes, plus keyword search."""
+    return [
+        Route("/memory", _list_memory, methods=["GET"]),
+        Route("/memory/{project}/{slug}", _memory_detail, methods=["GET"]),
+        Route("/search", _search, methods=["GET"]),
+    ]
+
+
+def skills_routes() -> list[Route]:
+    """The Skills gallery (app-shell plan, Phase S): accepted proposals shown as
+    installed skills/rules, with the drift-repair revert action (ADR-0020)."""
+    return [
+        Route("/skills", _skills_gallery, methods=["GET"]),
+        Route("/skills/{slug}/revert", _revert_view, methods=["POST"]),
+    ]
+
+
+def all_routes() -> list[Route]:
+    """Every surface's routes, in one table for the Starlette app (``app.py``)."""
+    return [*suggestions_routes(), *sessions_routes(), *memory_routes(), *skills_routes()]
 
 
 # --- small shared helpers ---------------------------------------------------
@@ -57,6 +94,38 @@ def _root(request: Request) -> Path:
     root = request.app.state.root
     assert isinstance(root, Path)
     return root
+
+
+def _read_root(request: Request) -> Path:
+    """Open a request-local READ ``StoreHandle`` — running the D11 schema guard at
+    THIS request boundary, not just once when the server started — and return its
+    validated root for the ``recommender``/``metrics`` calls below (whose
+    signatures still take ``root: Path`` until the ADR-0015 migration reaches
+    them). READ never creates ``store.toml``, so a GET against an absent store
+    stays a pure no-op read. An unsupported or unreadable schema raises
+    :class:`store.UnsupportedSchemaError`, which ``unsupported_schema_handler``
+    turns into a fail-safe typed page (Codex P1-SAFETY-SECURITY-002, spec
+    §10/D11)."""
+    return open_store(_root(request), StoreMode.READ).root
+
+
+def _write_root(request: Request) -> Path:
+    """Like :func:`_read_root`, but a WRITE handle for a mutating POST: the schema
+    guard runs at the request boundary *before* any proposal/ledger write, so a
+    long-running server that started on a supported store still refuses to mutate
+    forward-schema state after the on-disk store advances under it (Codex
+    P1-SAFETY-SECURITY-002)."""
+    return open_store(_root(request), StoreMode.WRITE).root
+
+
+async def unsupported_schema_handler(request: Request, exc: Exception) -> Response:
+    """App-wide fail-safe for a D11 schema-guard failure raised at *any* request
+    boundary — the request-local Suggestions handles above, and the
+    Sessions/Memory/Search/Skills handles that open a READ handle inline. Renders
+    the typed error page (409) rather than leaking a raw 500/stack trace when the
+    store on disk is newer than this binary supports or its metadata is unreadable
+    (Codex P1-SAFETY-SECURITY-002, spec §10/D11). Registered in ``app.build_app``."""
+    return _error_response(request, 409, str(exc))
 
 
 def _templates(request: Request) -> Jinja2Templates:
@@ -150,11 +219,51 @@ def _list_row(doc: store.Document) -> dict[str, Any]:
     }
 
 
+# The queue filter chips: label → the statuses each shows. "pending" is the
+# default so the queue is the *review* queue (decided items are one click away),
+# matching the rail badge which also counts only pending.
+_STATUS_FILTERS: dict[str, frozenset[str]] = {
+    "pending": frozenset({"proposed"}),
+    "accepted": frozenset({"accepted"}),
+    "rejected": frozenset({"rejected"}),
+    "all": frozenset({"proposed", "accepted", "rejected", "superseded"}),
+}
+
+
+def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        key: sum(1 for r in rows if str(r["status"]) in statuses)
+        for key, statuses in _STATUS_FILTERS.items()
+    }
+
+
+def _suggestions_context(
+    request: Request, sel: dict[str, Any] | None, root: Path | None = None
+) -> dict[str, Any]:
+    """Shared two-pane context: the (filtered) queue on the left, plus the
+    selected proposal or the metrics overview on the right. ``root`` lets a caller
+    that already opened a request-local READ handle (e.g. ``_suggestion_detail``)
+    reuse its validated root, so one request opens one handle and reads one store
+    snapshot rather than two (Codex round-2 non-blocking note)."""
+    if root is None:
+        root = _read_root(request)
+    all_rows = [_list_row(doc) for doc in proposals.load_all_proposals(root)]
+    status = request.query_params.get("status", "pending")
+    if status not in _STATUS_FILTERS:
+        status = "pending"
+    rows = [r for r in all_rows if str(r["status"]) in _STATUS_FILTERS[status]]
+    return {
+        **_base_context(request),
+        "rows": rows,
+        "counts": _status_counts(all_rows),
+        "status": status,
+        "metrics": _metrics_context(recommend_metrics.compute_metrics(root)),
+        "sel": sel,
+    }
+
+
 async def _list_suggestions(request: Request) -> Response:
-    root = _root(request)
-    rows = [_list_row(doc) for doc in proposals.load_all_proposals(root)]
-    result = recommend_metrics.compute_metrics(root)
-    context = {"rows": rows, "metrics": _metrics_context(result)}
+    context = _suggestions_context(request, sel=None)
     return _templates(request).TemplateResponse(request, "suggestions_list.html", context)
 
 
@@ -191,15 +300,14 @@ def _evidence_rows(root: Path, doc: store.Document) -> list[dict[str, Any]]:
 
 
 async def _suggestion_detail(request: Request) -> Response:
-    root = _root(request)
+    root = _read_root(request)
     slug = request.path_params["slug"]
     doc = proposals.load_proposal(root, slug)
     if doc is None:
         return _error_response(request, 404, f"proposal {slug!r} not found or malformed")
 
     scores = doc.get("scores") if isinstance(doc.get("scores"), dict) else {}
-    context: dict[str, Any] = {
-        **_base_context(request),
+    sel: dict[str, Any] = {
         "slug": slug,
         "status": str(doc.get("status") or ""),
         "type": doc.get("type"),
@@ -219,7 +327,18 @@ async def _suggestion_detail(request: Request) -> Response:
         "history": proposals.ledger_history(root, slug),
         "flash": request.query_params.get("flash"),
     }
-    return _templates(request).TemplateResponse(request, "suggestion_detail.html", context)
+    # ?fragment=1 → just the right-pane HTML (swapped in without reload); the
+    # reject form inside needs the CSRF token, so pass _base_context. ?view=full →
+    # the standalone page; otherwise the proposal opens inline in the two-pane.
+    if request.query_params.get("fragment"):
+        ctx = {**_base_context(request), "sel": sel}
+        return _templates(request).TemplateResponse(request, "_suggestion_pane.html", ctx)
+    if request.query_params.get("view") == "full":
+        ctx = {**_base_context(request), "sel": sel}
+        return _templates(request).TemplateResponse(request, "suggestion_detail.html", ctx)
+    return _templates(request).TemplateResponse(
+        request, "suggestions_list.html", _suggestions_context(request, sel=sel, root=root)
+    )
 
 
 # --- GET/POST /suggestions/{slug}/accept ------------------------------------
@@ -291,7 +410,9 @@ def _run_prepare_install(
 
 
 async def _accept_view(request: Request) -> Response:
-    root = _root(request)
+    # GET previews (READ, never materializes store.toml); POST commits (WRITE, the
+    # guard runs before install writes anything) — Codex P1-SAFETY-SECURITY-002.
+    root = _read_root(request) if request.method == "GET" else _write_root(request)
     slug = request.path_params["slug"]
 
     if request.method == "GET":
@@ -371,7 +492,7 @@ async def _accept_view(request: Request) -> Response:
 
 
 async def _reject_view(request: Request) -> Response:
-    root = _root(request)
+    root = _write_root(request)
     slug = request.path_params["slug"]
     doc = proposals.load_proposal(root, slug)
     if doc is None:
@@ -386,11 +507,30 @@ async def _reject_view(request: Request) -> Response:
     return _redirect_with_flash(slug, "Rejected.")
 
 
+async def _reopen_view(request: Request) -> Response:
+    """Reconsider a rejected proposal (ADR-0024). The app-wide CSRF/same-origin
+    gate has already cleared this POST; ``reopen_proposal`` re-checks the status
+    at write time and refuses anything but ``rejected`` with a named-status 409,
+    so a stale "Reconsider" link fails closed rather than mis-transitioning."""
+    root = _write_root(request)
+    slug = request.path_params["slug"]
+    doc = proposals.load_proposal(root, slug)
+    if doc is None:
+        return _error_response(request, 404, f"proposal {slug!r} not found or malformed")
+    try:
+        proposals.reopen_proposal(root, slug)
+    except ValueError as exc:
+        return _error_response(request, 409, str(exc))
+    return _redirect_with_flash(slug, "Reopened — back in the review queue.")
+
+
 # --- GET/POST /suggestions/{slug}/edit --------------------------------------
 
 
 async def _edit_view(request: Request) -> Response:
-    root = _root(request)
+    # GET renders the draft (READ); POST persists the edit (WRITE) — the schema
+    # guard runs at this boundary either way (Codex P1-SAFETY-SECURITY-002).
+    root = _read_root(request) if request.method == "GET" else _write_root(request)
     slug = request.path_params["slug"]
     doc = proposals.load_proposal(root, slug)
     if doc is None:
@@ -412,9 +552,399 @@ async def _edit_view(request: Request) -> Response:
     form = await request.form()
     draft_raw = form.get("draft")
     draft = draft_raw if isinstance(draft_raw, str) else ""
-    if not proposals.save_edited_draft(root, slug, draft):
+    try:
+        saved = proposals.save_edited_draft(root, slug, draft)
+    except proposals.EditBlockedError as exc:
+        # The proposal was decided (e.g. rejected) between this handler's earlier
+        # status check and the locked write — a decided-status conflict is a 409,
+        # not the 400 reserved for malformed input (§14, Codex P2-UX-API-CONTRACT-010).
+        return _error_response(request, 409, str(exc))
+    if not saved:
         return _error_response(request, 400, "could not save edited draft")
     return _redirect_with_flash(slug, "Draft updated.")
 
 
-__all__ = ["suggestions_routes"]
+# --- Sessions (Phase 2b) ----------------------------------------------------
+
+
+def _redact_display(text: str) -> str:
+    """Redact at display time on every raw surface — a raw is scrubbed at capture
+    (D13), but a legacy/hand-edited capture may carry secrets the scribe never
+    saw, so re-scrub with the same pass every write path uses (§14 defense)."""
+    return redact.redact(text, load_config().redact.extra_patterns)
+
+
+def _within_store(path: Path, store_root: Path) -> bool:
+    """True when ``path`` resolves to somewhere at or beneath the validated store
+    root — the same containment ``StoreHandle._require_within_store`` enforces for
+    the handle's own writes (``..`` / absolute / **symlink**), applied to these
+    direct filesystem reads. A symlinked ``raw/`` / ``curated/`` / ``nodes/``
+    directory resolves *outside* the store, so files reached through it are
+    refused even though they sit directly inside that resolved directory (Codex
+    P2-SAFETY-SECURITY-003)."""
+    root = store_root.resolve()
+    resolved = path.resolve()
+    return resolved == root or resolved.is_relative_to(root)
+
+
+def _capture_path(raw_dir: Path, file: str, store_root: Path) -> Path | None:
+    """Resolve a capture filename to a real file **directly inside** ``raw_dir``
+    *and* beneath ``store_root``, or ``None``. Defense-in-depth: ``{file}`` is a
+    single URL segment (Starlette won't match a ``/``), but a crafted ``..``-bearing
+    name is refused here rather than trusted — the resolved path must have
+    ``raw_dir`` as its immediate parent, so it can neither escape the project's
+    ``raw/`` nor dip into a subdirectory. The extra ``store_root`` containment
+    catches the case where ``raw/`` *itself* is a symlink out of the store: the
+    file is then legitimately inside the resolved ``raw_dir`` but outside the
+    validated store, and must not be read (Codex P2-SAFETY-SECURITY-003).
+    ``raw_dir`` must already be ``.resolve()``-d by the caller."""
+    if not _within_store(raw_dir, store_root):
+        return None
+    path = (raw_dir / file).resolve()
+    if path.parent != raw_dir or not path.is_file():
+        return None
+    if not _within_store(path, store_root):
+        return None
+    return path
+
+
+def _session_row(project: str, doc: store.Document) -> dict[str, Any]:
+    session_id = str(doc.get("session_id") or "")
+    return {
+        "project": project,
+        "file": doc.file_path.name,
+        "session": session_id[:8] or "—",
+        "agent": str(doc.get("agent") or "—"),
+        "branch": str(doc.get("branch") or "—"),
+        "captured_at": doc.get("captured_at"),
+        "consumed": bool(doc.get("consumed")),
+    }
+
+
+def _session_rows(handle: Any) -> list[dict[str, Any]]:
+    """Every raw capture across projects, newest-first. Fail-soft per project so
+    one unreadable project can't blank the whole surface."""
+    rows: list[dict[str, Any]] = []
+    for project in handle.load_registry():
+        try:
+            for doc in handle.list_raw(project, unconsumed_only=False):
+                # Skip a capture that resolves outside the store — a symlinked
+                # `raw/` dir (or entry) must not surface external metadata on the
+                # list, just as the detail read refuses it (Codex P2-SAFETY-SECURITY-003).
+                if not handle.contains(doc.file_path):
+                    continue
+                rows.append(_session_row(project, doc))
+        except (OSError, ValueError):
+            continue
+    rows.sort(key=lambda r: str(r["captured_at"] or ""), reverse=True)
+    return rows
+
+
+async def _list_sessions(request: Request) -> Response:
+    handle = open_store(_root(request), StoreMode.READ)
+    rows = _session_rows(handle)
+    unconsumed = sum(1 for r in rows if not r["consumed"])
+    context = {"rows": rows, "unconsumed": unconsumed, "sel": None}
+    return _templates(request).TemplateResponse(request, "sessions_list.html", context)
+
+
+async def _session_detail(request: Request) -> Response:
+    root = _root(request)
+    project = request.path_params["project"]
+    file = request.path_params["file"]
+    handle = open_store(root, StoreMode.READ)
+    try:
+        raw_dir = (handle.memory_dir(project) / "raw").resolve()
+    except store.InvalidSlugError:
+        return _error_response(request, 404, "Unknown project.")
+    path = _capture_path(raw_dir, file, handle.root)
+    if path is None:
+        return _error_response(request, 404, "No such capture.")
+    try:
+        doc = store.read_doc(path)
+    except (ValueError, OSError):
+        return _error_response(request, 404, "This capture is unreadable.")
+    session_id = str(doc.get("session_id") or "")
+    sel = {
+        "project": project,
+        "file": file,
+        "session": session_id[:8] or "—",
+        "session_full": session_id,
+        "agent": str(doc.get("agent") or "—"),
+        "branch": str(doc.get("branch") or "—"),
+        "cwd": str(doc.get("cwd") or "—"),
+        "captured_at": doc.get("captured_at"),
+        "consumed": bool(doc.get("consumed")),
+        "body": _redact_display(doc.body),
+    }
+    # ?fragment=1 → just the right-pane HTML, fetched by the list's inline JS so a
+    # click swaps the pane without a full-page reload (no flicker). ?view=full →
+    # the standalone page (the "Open as page" link). Otherwise the full two-pane.
+    if request.query_params.get("fragment"):
+        return _templates(request).TemplateResponse(request, "_session_pane.html", {"sel": sel})
+    if request.query_params.get("view") == "full":
+        return _templates(request).TemplateResponse(request, "session_detail.html", {"sel": sel})
+    rows = _session_rows(handle)
+    unconsumed = sum(1 for r in rows if not r["consumed"])
+    context = {"rows": rows, "unconsumed": unconsumed, "sel": sel}
+    return _templates(request).TemplateResponse(request, "sessions_list.html", context)
+
+
+# --- Memory + Search (Phase 2c) ---------------------------------------------
+
+
+def _fact_row(project: str, doc: store.Document) -> dict[str, Any]:
+    provenance = doc.get("provenance") if isinstance(doc.get("provenance"), list) else []
+    supersedes = doc.get("supersedes") if isinstance(doc.get("supersedes"), list) else []
+    return {
+        "project": project,
+        "slug": str(doc.get("name") or doc.file_path.stem),
+        "updated_at": doc.get("updated_at"),
+        "provenance": len(provenance),
+        "supersedes": len(supersedes),
+        "agent_last": str(doc.get("agent_last") or "—"),
+    }
+
+
+def _read_nodes(handle: Any, project: str) -> list[dict[str, Any]]:
+    """The project's synthesized node(s) — the curator's regenerated summary of
+    active memory. Fail-soft: an unreadable node is skipped, never fatal."""
+    nodes_dir = handle.memory_dir(project) / "nodes"
+    out: list[dict[str, Any]] = []
+    if not nodes_dir.is_dir():
+        return out
+    for path in sorted(nodes_dir.glob("*.md")):
+        # Skip anything that resolves outside the store — e.g. a symlinked `nodes/`
+        # dir, or a symlinked entry within it (Codex P2-SAFETY-SECURITY-003).
+        if not _within_store(path, handle.root):
+            continue
+        try:
+            doc = store.read_doc(path)
+        except (ValueError, OSError):
+            continue
+        out.append(
+            {
+                "name": str(doc.get("name") or path.stem),
+                "generated_at": doc.get("generated_at"),
+                "body": _redact_display(doc.body),
+            }
+        )
+    return out
+
+
+def _memory_facts(handle: Any) -> list[dict[str, Any]]:
+    """Every active curated fact across projects, newest-first. Fail-soft per
+    project so one unreadable project can't blank the whole surface."""
+    facts: list[dict[str, Any]] = []
+    for project in sorted(handle.load_registry()):
+        try:
+            facts.extend(
+                _fact_row(project, d)
+                for d in handle.list_curated(project, True)
+                # A symlinked `curated/` dir (or entry) resolves outside the store;
+                # don't list an external fact (Codex P2-SAFETY-SECURITY-003).
+                if handle.contains(d.file_path)
+            )
+        except (OSError, ValueError):
+            continue
+    facts.sort(key=lambda f: str(f["updated_at"] or ""), reverse=True)
+    return facts
+
+
+def _all_nodes(handle: Any) -> list[dict[str, Any]]:
+    """Every project's synthesized node — the default right-pane overview until a
+    fact is selected."""
+    nodes: list[dict[str, Any]] = []
+    for project in sorted(handle.load_registry()):
+        nodes.extend({**n, "project": project} for n in _read_nodes(handle, project))
+    return nodes
+
+
+async def _list_memory(request: Request) -> Response:
+    handle = open_store(_root(request), StoreMode.READ)
+    context = {"facts": _memory_facts(handle), "nodes": _all_nodes(handle), "sel": None}
+    return _templates(request).TemplateResponse(request, "memory_list.html", context)
+
+
+async def _memory_detail(request: Request) -> Response:
+    root = _root(request)
+    project = request.path_params["project"]
+    slug = request.path_params["slug"]
+    handle = open_store(root, StoreMode.READ)
+    try:
+        curated_dir = handle.memory_dir(project) / "curated"
+    except store.InvalidSlugError:
+        return _error_response(request, 404, "Unknown project.")
+    # A curated slug is `^[a-z0-9-]+$` (store.SLUG_RE) — validating it both rejects
+    # a bad request and structurally forecloses traversal (no `.`/`/` can appear).
+    if not store.SLUG_RE.match(slug):
+        return _error_response(request, 404, "No such fact.")
+    path = curated_dir / f"{slug}.md"
+    # A valid slug can't escape `curated/`, but `curated/` itself could be a symlink
+    # out of the store — require the resolved file beneath the validated root before
+    # reading (Codex P2-SAFETY-SECURITY-003).
+    if not _within_store(path, handle.root) or not path.is_file():
+        return _error_response(request, 404, "No such fact.")
+    try:
+        doc = store.read_doc(path)
+    except (ValueError, OSError):
+        return _error_response(request, 404, "This fact is unreadable.")
+    provenance = doc.get("provenance") if isinstance(doc.get("provenance"), list) else []
+    supersedes = doc.get("supersedes") if isinstance(doc.get("supersedes"), list) else []
+    sel = {
+        "project": project,
+        "slug": str(doc.get("name") or slug),
+        "status": str(doc.get("status") or "active"),
+        "agent_last": str(doc.get("agent_last") or "—"),
+        "updated_at": doc.get("updated_at"),
+        "provenance": [_prov_link(project, p) for p in provenance],
+        "supersedes": [str(s) for s in supersedes],
+        "body": _redact_display(doc.body),
+    }
+    # ?fragment=1 → just the right-pane HTML (swapped in by the list's inline JS);
+    # ?view=full → the standalone page; otherwise the fact opens inline in the
+    # Memory two-pane, facts list still on the left.
+    if request.query_params.get("fragment"):
+        return _templates(request).TemplateResponse(request, "_memory_pane.html", {"sel": sel})
+    if request.query_params.get("view") == "full":
+        return _templates(request).TemplateResponse(request, "memory_detail.html", {"sel": sel})
+    context = {"facts": _memory_facts(handle), "nodes": _all_nodes(handle), "sel": sel}
+    return _templates(request).TemplateResponse(request, "memory_list.html", context)
+
+
+def _prov_link(project: str, entry: object) -> dict[str, Any]:
+    """Shape one provenance entry for display, linking it back to its source
+    capture when it names a raw (``raw/<file>``) — the Memory→Sessions half of
+    the provenance chain. Anything else renders as plain text."""
+    label = str(entry)
+    href = f"/sessions/{project}/{label[len('raw/') :]}" if label.startswith("raw/") else None
+    return {"label": label, "href": href}
+
+
+def _hit_row(hit: search.SearchHit) -> dict[str, Any]:
+    href = f"/memory/{hit.project}/{hit.name}" if hit.kind == "curated" else "/memory"
+    return {
+        "project": hit.project,
+        "name": hit.name,
+        "kind": hit.kind,
+        "score": hit.score,
+        "snippet": _redact_display(hit.snippet),
+        "href": href,
+    }
+
+
+async def _search(request: Request) -> Response:
+    root = _root(request)
+    query = (request.query_params.get("q") or "").strip()
+    hits: list[dict[str, Any]] = []
+    if query:
+        handle = open_store(root, StoreMode.READ)
+        hits = [_hit_row(h) for h in search.search(handle, query)]
+    context = {"q": query, "hits": hits}
+    return _templates(request).TemplateResponse(request, "search_results.html", context)
+
+
+# --- Skills gallery (every skill on the machine) + revert -------------------
+
+# artifact_state → the status-chip class the design system already ships.
+_STATE_CHIP = {
+    proposals.ARTIFACT_LIVE: "accepted",
+    proposals.ARTIFACT_MISSING: "superseded",
+    proposals.ARTIFACT_ORPHANED: "proposed",
+    proposals.ARTIFACT_UNRESOLVABLE: "rejected",
+}
+
+
+def _discovered_card(skill: skills_scan.InstalledSkill) -> dict[str, Any]:
+    """A SKILL.md found on disk — Neurobase-managed (carries our frontmatter) or
+    external (hand-authored / from elsewhere). It's present, so nothing to revert.
+
+    The name/description/path are read verbatim off an arbitrary third-party file
+    on this machine and rendered, so they go through the same display-redaction
+    pass every other surface uses — a secret-shaped external skill description must
+    not render verbatim (Codex P2-SAFETY-SECURITY-006). ``nb_slug`` is an internal
+    routing/ownership identifier (a validated canonical slug, never secret-shaped)
+    and stays unredacted so links and ``present_nb`` keep working."""
+    return {
+        "name": _redact_display(skill.name),
+        "description": _redact_display(skill.description),
+        "scope": skill.scope,
+        "project": skill.project,
+        "path": _redact_display(skill.path),
+        "source": "neurobase" if skill.managed else "external",
+        "nb_slug": skill.nb_slug,
+        "state": "installed",
+        "chip": "accepted" if skill.managed else "superseded",
+        "revertable": False,
+    }
+
+
+def _missing_skill_card(root: Path, doc: store.Document) -> dict[str, Any]:
+    """A Neurobase skill proposal accepted but whose SKILL.md wasn't found on this
+    machine — drift. Kept visible and revertable (ADR-0020 liveness guard)."""
+    slug = str(doc.get("name") or doc.file_path.stem)
+    state = proposals.artifact_state(root, doc, slug)
+    return {
+        "name": slug,
+        "description": str(doc.get("candidate_type") or ""),
+        "scope": "user" if doc.get("target") == "user-skill" else "project",
+        "project": doc.get("project"),
+        "path": doc.get("installed_path") or "—",
+        "source": "neurobase",
+        "nb_slug": slug,
+        "state": state,
+        "chip": _STATE_CHIP.get(state, "superseded"),
+        "revertable": proposals.revert_refusal(slug, doc, state) is None,
+    }
+
+
+async def _skills_gallery(request: Request) -> Response:
+    root = _root(request)
+    handle = open_store(root, StoreMode.READ)
+    discovered = skills_scan.discover_skills(handle)
+    present_nb = {s.nb_slug for s in discovered if s.nb_slug}
+    cards = [_discovered_card(s) for s in discovered]
+    # Neurobase skill proposals accepted but not found on disk here → show them as
+    # drift so they stay visible and revertable (artifact gone, or on another Mac).
+    for doc in proposals.load_all_proposals(root):
+        if str(doc.get("status")) != "accepted" or str(doc.get("type")) != "skill":
+            continue
+        if str(doc.get("name") or doc.file_path.stem) in present_nb:
+            continue
+        cards.append(_missing_skill_card(root, doc))
+    counts = {
+        "total": len(cards),
+        "neurobase": sum(1 for c in cards if c["source"] == "neurobase"),
+        "external": sum(1 for c in cards if c["source"] == "external"),
+    }
+    # _base_context supplies the CSRF token the revert form needs.
+    context = {**_base_context(request), "cards": cards, "counts": counts}
+    return _templates(request).TemplateResponse(request, "skills_list.html", context)
+
+
+async def _revert_view(request: Request) -> Response:
+    """Drift-repair revert (§12.7, G2, ADR-0020). The app-wide CSRF/same-origin
+    gate has already cleared this POST; ``revert_proposal`` re-checks liveness at
+    write time and refuses a still-live artifact, so a stale "Revert" link (the
+    artifact came back, or another tab already reverted) fails closed with 409
+    rather than orphaning it."""
+    root = _write_root(request)
+    slug = request.path_params["slug"]
+    doc = proposals.load_proposal(root, slug)
+    if doc is None:
+        return _error_response(request, 404, f"proposal {slug!r} not found or malformed")
+    try:
+        proposals.revert_proposal(root, slug)
+    except ValueError as exc:
+        return _error_response(request, 409, str(exc))
+    return _redirect_with_flash(slug, "Reverted to proposed — drift repaired.")
+
+
+__all__ = [
+    "all_routes",
+    "memory_routes",
+    "sessions_routes",
+    "skills_routes",
+    "suggestions_routes",
+    "unsupported_schema_handler",
+]

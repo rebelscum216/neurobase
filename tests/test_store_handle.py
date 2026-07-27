@@ -290,6 +290,29 @@ def test_method_mark_consumed_rejects_path_outside_the_handle_store(
     assert len(other.list_raw("proj", unconsumed_only=True)) == 1
 
 
+def test_contains_is_true_within_and_false_outside(handle: StoreHandle, tmp_path: Path) -> None:
+    inside = handle.root / "proj" / "raw" / "cap.md"
+    assert handle.contains(handle.root) is True
+    assert handle.contains(inside) is True
+    assert handle.contains(tmp_path / "elsewhere" / "x.md") is False
+
+
+def test_contains_never_raises_on_a_symlink_loop(handle: StoreHandle) -> None:
+    """A self-referential symlink must never let an exception escape ``contains()``
+    — that is the fail-soft invariant Codex P2-REGRESSION-009 restored. The *value*
+    is Python-version-dependent: on ≤3.12 ``Path.resolve()`` raises on the loop, so
+    the guard returns ``False`` (fail-closed); on 3.13+ ``resolve()`` no longer
+    raises and returns the loop path itself (under the root), so ``contains()``
+    returns ``True`` — still safe, because the downstream ``read_doc`` then raises
+    ``OSError`` and the reader skips it (pinned end-to-end by the /search and
+    core-search loop tests). What must hold on every version is that this returns a
+    ``bool`` cleanly rather than propagating the error."""
+    loop = handle.root / "loop.md"
+    loop.parent.mkdir(parents=True, exist_ok=True)
+    loop.symlink_to(loop)  # self-loop
+    assert isinstance(handle.contains(loop), bool)  # no OSError/RuntimeError escapes
+
+
 def test_method_upsert_then_list_curated_round_trip(handle: StoreHandle) -> None:
     handle.ensure_tree("proj")
     handle.upsert_curated("proj", "a-fact", "the body", provenance=["raw/x.md"])

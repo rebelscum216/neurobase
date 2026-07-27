@@ -1,0 +1,19 @@
+{# The capture's metadata + redacted transcript. Shared by the Sessions two-pane
+   detail pane (sessions_list.html) and the standalone page (session_detail.html);
+   both put the selected capture in `sel`. #}
+<section class="card">
+  <div class="card-head"><div><h2>Capture metadata</h2></div></div>
+  <div class="signal-grid">
+    <div class="signal-tile"><div class="signal-label">Agent</div><div class="signal-value small">{{ sel.agent }}</div></div>
+    <div class="signal-tile"><div class="signal-label">Branch</div><div class="signal-value small mono">{{ sel.branch }}</div></div>
+    <div class="signal-tile"><div class="signal-label">Captured</div><div class="signal-value small">{{ sel.captured_at | humandate }}</div></div>
+    <div class="signal-tile"><div class="signal-label">State</div><div class="signal-value small">{{ 'consumed' if sel.consumed else 'unconsumed' }}</div></div>
+    <div class="signal-tile wide"><div class="signal-label">Session id</div><div class="signal-value small mono">{{ sel.session_full }}</div></div>
+    <div class="signal-tile wide"><div class="signal-label">Working directory</div><div class="signal-value small mono">{{ sel.cwd }}</div></div>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-head"><div><h2>Transcript</h2><p>Redacted at display</p></div></div>
+  <pre class="rawbody">{{ sel.body }}</pre>
+</section>

@@ -90,10 +90,17 @@ def _candidates(handle: StoreHandle, project: str) -> Iterator[tuple[str, str, s
     except OSError:
         curated = []
     for doc in curated:
+        # Never index a fact that resolves outside the validated store — a
+        # symlinked `curated/` dir (or entry) must not have its body searched or
+        # snippeted (Codex P2-SAFETY-SECURITY-003).
+        if not handle.contains(doc.file_path):
+            continue
         yield (str(doc.get("name") or doc.file_path.stem), "curated", doc.body)
     nodes_dir = mem / "nodes"
     if nodes_dir.exists():
         for path in sorted(nodes_dir.glob("*.md")):
+            if not handle.contains(path):
+                continue  # symlinked nodes/ dir or entry — skip (P2-SAFETY-SECURITY-003)
             try:
                 doc = store.read_doc(path)
             except (ValueError, OSError):

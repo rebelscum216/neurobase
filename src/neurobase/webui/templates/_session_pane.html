@@ -1,0 +1,9 @@
+{# The right-hand detail pane for one capture: a header (session id + "open as
+   page") over the shared metadata/transcript card. Rendered both inside the
+   two-pane list (server-side) and on its own as the ?fragment=1 response the
+   list's inline JS swaps in without a reload. #}
+<div class="pane-head">
+  <div class="who"><span class="mono">{{ sel.session }}</span> <span class="hint">{{ sel.agent }} · {{ sel.project }}</span></div>
+  <a class="btn" href="/sessions/{{ sel.project }}/{{ sel.file }}?view=full" title="Open this capture as its own page">⤢ Open as page</a>
+</div>
+{% include "_session_card.html" %}

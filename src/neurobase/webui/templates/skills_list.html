@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Skills{% endblock %}
+{% block crumb %}Skills{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1>Skills</h1>
+    <p class="hero-sub">Every skill on this machine — installed by Neurobase or authored by hand.</p>
+  </div>
+  <div class="hero-pills">
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ counts.total }} skills</span>
+    <span class="hero-pill">{{ counts.neurobase }} Neurobase</span>
+    <span class="hero-pill">{{ counts.external }} external</span>
+  </div>
+</div>
+
+{% if not cards %}
+<section class="card">
+  <p>No skills found on this machine. Skills live under <code class="mono">~/.claude/skills</code> and each
+    project's <code class="mono">.claude/skills</code>; accept a <a href="/suggestions">suggestion</a> to install one.</p>
+</section>
+{% else %}
+<div class="gallery">
+  {% for c in cards %}
+  <section class="card skill">
+    <div class="card-head">
+      <div>
+        <h2>{% if c.nb_slug %}<a class="mono" href="/suggestions/{{ c.nb_slug }}">{{ c.name }}</a>{% else %}<span class="mono">{{ c.name }}</span>{% endif %}</h2>
+        <p>{{ c.description or "—" }}</p>
+      </div>
+      <div class="right"><span class="status-chip {{ 'accepted' if c.source == 'neurobase' else 'superseded' }}">{{ c.source }}</span></div>
+    </div>
+    <div class="skill-meta">
+      <div><span class="k">Scope</span><span class="v">{{ c.scope }}{% if c.project %} · {{ c.project }}{% endif %}</span></div>
+      <div><span class="k">State</span><span class="v">{{ c.state }}</span></div>
+      <div class="wide2"><span class="k">Path</span><span class="v mono" title="{{ c.path }}">{{ c.path }}</span></div>
+    </div>
+    {% if c.revertable %}
+    <div class="skill-actions">
+      <form method="post" action="/skills/{{ c.nb_slug }}/revert"
+            onsubmit="return confirm('Revert {{ c.name }} to proposed? Its managed artifact is {{ c.state }} on disk — this repairs the record, it does not delete anything.');">
+        <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+        <button type="submit" class="btn danger">Revert drift</button>
+      </form>
+      <span class="hint">{{ c.state }} — the record can be repaired</span>
+    </div>
+    {% elif c.source == "external" %}
+    <div class="skill-actions"><span class="hint">External skill — Neurobase doesn't manage this one.</span></div>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

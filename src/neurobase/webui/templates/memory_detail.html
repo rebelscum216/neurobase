@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — {{ sel.slug }}{% endblock %}
+{% block crumb %}Memory / {{ sel.slug }}{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1 class="mono">{{ sel.slug }}</h1>
+    <p class="hero-sub">{{ sel.project }} · {{ sel.status }} · last by {{ sel.agent_last }}</p>
+  </div>
+  <div class="hero-pills">
+    <a class="hero-pill" href="/memory/{{ sel.project }}/{{ sel.slug }}">← back to Memory</a>
+    {% if sel.updated_at %}<span class="hero-pill">updated {{ sel.updated_at | humandate }}</span>{% endif %}
+  </div>
+</div>
+
+{% include "_memory_card.html" %}
+{% endblock %}

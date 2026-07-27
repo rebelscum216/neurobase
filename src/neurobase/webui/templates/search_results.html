@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Search{% endblock %}
+{% block crumb %}Search{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1>Search</h1>
+    <p class="hero-sub">
+      {% if q %}Curated facts and nodes matching “{{ q }}”, ranked.{% else %}Type a query in the bar above to search memory.{% endif %}
+    </p>
+  </div>
+  <div class="hero-pills">
+    <span class="hero-pill">{{ hits | length }} hit{{ '' if hits | length == 1 else 's' }}</span>
+  </div>
+</div>
+
+<section class="card">
+  <div class="card-head"><div><h2>Matches</h2><p>Grep + term-frequency over curated facts and nodes</p></div></div>
+  {% if hits %}
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Kind</th><th>Project</th><th>Score</th><th>Snippet</th></tr>
+    </thead>
+    <tbody>
+      {% for h in hits %}
+      <tr>
+        <td><a class="mono" href="{{ h.href }}">{{ h.name }}</a></td>
+        <td><span class="tiny-pill">{{ h.kind }}</span></td>
+        <td>{{ h.project }}</td>
+        <td class="mono">{{ h.score }}</td>
+        <td>{{ h.snippet }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif q %}
+  <p>No matches for “{{ q }}”.</p>
+  {% else %}
+  <p>Enter a search term in the bar above.</p>
+  {% endif %}
+</section>
+{% endblock %}

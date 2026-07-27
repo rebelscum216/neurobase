@@ -113,7 +113,8 @@ def test_scribe_writes_raw_with_agent_codex(enabled: tuple[Path, Path], tmp_path
     assert "Fix the login bug" in doc.body
     assert "Done — the null check was missing in auth.py" in doc.body
     # Filename derives from the session-start timestamp (per-turn overwrite key).
-    assert written.name.startswith("2026-07-05T23-21-06Z_codex_")
+    assert written.name.startswith("2026-07-05T23-21-06.")  # microsecond ts (ADR-0023)
+    assert "_codex_" in written.name
 
 
 def test_scribe_writes_transcript_path_and_capture_version(

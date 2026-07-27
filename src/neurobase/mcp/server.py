@@ -34,7 +34,7 @@ from mcp.server.fastmcp.resources import FunctionResource
 from mcp.types import CallToolResult, TextContent
 
 from neurobase.adapters import recall_common
-from neurobase.core import redact, search, store
+from neurobase.core import lock, redact, search, store
 from neurobase.core.config import Config, load_config
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
@@ -263,11 +263,19 @@ def build_server(
         # boundary and the maintainer's call to make against D24's one-open wording.
         handle.ensure_tree(target)
         body = redact.redact(text, config.redact.extra_patterns)
-        # Slug from the REDACTED text — otherwise a secret in the first line
-        # would leak into the filename + frontmatter name (§10/§13). Redact-then-
-        # derive keeps secrets out of every store artifact, not just the body.
-        slug = _fresh_slug(handle, target, _slugify_fact(body))
-        path = handle.upsert_curated(target, slug, body, provenance=["user-directed"])
+        # G4 close-out (ADR-0023): memory_remember is a *mutating* pass, so it
+        # takes the project write lock — blocking, because this is user intent
+        # and must not be silently dropped the way the detached freshness pass
+        # is. `_fresh_slug` reads the curated set to pick a non-colliding slug
+        # and `upsert_curated` then writes it; without the lock a concurrent
+        # curate pass could land the same slug between those two steps, and the
+        # save would silently overwrite a fact it never saw.
+        with lock.project_lock(handle.memory_dir(target)):
+            # Slug from the REDACTED text — otherwise a secret in the first line
+            # would leak into the filename + frontmatter name (§10/§13). Redact-then-
+            # derive keeps secrets out of every store artifact, not just the body.
+            slug = _fresh_slug(handle, target, _slugify_fact(body))
+            path = handle.upsert_curated(target, slug, body, provenance=["user-directed"])
         return {"project": target, "slug": slug, "path": str(path)}
 
     @server.tool()

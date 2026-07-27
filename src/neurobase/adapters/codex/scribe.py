@@ -26,7 +26,7 @@ from neurobase.adapters.scribe_common import (
     bullet,
     final_summary,
 )
-from neurobase.core import store
+from neurobase.core import lock, store
 from neurobase.core.config import load_config
 from neurobase.core.enable import resolve_or_auto_enable
 from neurobase.core.redact import redact
@@ -320,7 +320,8 @@ def scribe(
     # exactly as the old ensure_store_metadata guard did.
     writer = open_store(root, StoreMode.WRITE)
     try:
-        return writer.write_raw(
+        return lock.write_raw_guarded(
+            writer,
             project,
             agent="codex",
             session_id=sid,
@@ -333,7 +334,8 @@ def scribe(
     except store.RawConsumedError:
         # The session's raw was already folded mid-session; write a fresh
         # capture under a new filename (spec §1 mutability rule).
-        return writer.write_raw(
+        return lock.write_raw_guarded(
+            writer,
             project,
             agent="codex",
             session_id=sid,

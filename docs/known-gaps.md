@@ -282,11 +282,34 @@ not carry frontmatter), but the emitter should not depend on that.
 
 ### G4 — no project-level store lock: concurrent curate passes can interleave store mutations
 
-- **status:** open
-- **severity:** major — reachable in normal operation, and it is the prerequisite
+- **status:** fixed (ADR-0023 — the per-project advisory write lock,
+  `core/lock.py`; `docs/reviews/2026-07-24-store-write-lock-v2.md`). Every
+  mutating pass now holds `project_lock(handle.memory_dir(project))` for its
+  whole duration: the curator (`engine.curate`), the seed importer
+  (`recommender/seed._import_tree`), and MCP `memory_remember`. Readers never
+  take it. Ownership is bound to an open OS handle (`filelock`), so a killed
+  holder is released by the kernel and no stale-lock policy exists to get wrong.
+  The embedded `prune_tombstones` TOCTOU closes structurally: its only call site
+  is inside the locked pass. Scribes cannot block (ADR-0003 latency budget), so
+  they acquire **non-blocking** and, when contended, write a *fresh* raw
+  (`write_raw_guarded`) rather than overwriting the raw a pass is mid-consume on.
+- **residual:** `filelock` falls back to a *soft* lock where the platform
+  primitive is unavailable (e.g. `flock` returning `ENOSYS` on some network
+  filesystems), and a soft lock does **not** auto-release on process death. The
+  auto-release guarantee therefore holds on filesystems that support the platform
+  hard-lock primitive — which covers the local stores this project targets, but is
+  not unconditional. The lock is also **advisory**: a writer that bypasses
+  `core.lock` is not excluded, which is why `mark_consumed`'s digest check is kept
+  as defense-in-depth.
+- **severity:** major — reachable in normal operation, and it was the prerequisite
   for *any* safe automatic reclamation of tombstone residue.
 - **found:** 2026-07-19 by Codex (provenance Slice B review, round 3 —
   `P1-DATA-INTEGRITY-003`), with a deterministic interleaving probe.
+
+> **The remainder of this entry is the original pre-fix analysis, kept as the
+> historical record of what the lock resolves. It is written in the present
+> tense of the unfixed store; read every "Nothing serializes…" / "can race" /
+> "needs an ADR" below as describing the state *before* ADR-0023.**
 
 Nothing serializes mutations to a project's store. `SessionStart` launches
 **detached `curate --if-stale` processes** (`adapters/recall_common.py`), and the

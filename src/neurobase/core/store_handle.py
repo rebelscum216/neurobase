@@ -131,6 +131,7 @@ class StoreHandle:
         captured_at: datetime,
         body: str,
         transcript_path: str | None = None,
+        unique: bool = False,
     ) -> Path:
         return store.write_raw(
             self.root,
@@ -142,12 +143,13 @@ class StoreHandle:
             captured_at=captured_at,
             body=body,
             transcript_path=transcript_path,
+            unique=unique,
         )
 
     def list_raw(self, project: str, unconsumed_only: bool = True) -> list[store.Document]:
         return store.list_raw(self.root, project, unconsumed_only)
 
-    def mark_consumed(self, path: Path) -> Path:
+    def mark_consumed(self, path: Path, *, expect_digest: str | None = None) -> Path | None:
         """Flip ``consumed: true`` on a raw file **inside this handle's store**.
 
         Unlike the other methods — which build their path from ``self.root`` and
@@ -157,9 +159,14 @@ class StoreHandle:
         under another, unvalidated (possibly newer-schema) store — the exact
         boundary ADR-0015 closes. Callers pass a ``Document.file_path`` obtained
         from *this* handle's :meth:`list_raw`.
+
+        ``expect_digest`` forwards to :func:`store.mark_consumed`'s defensive
+        guard (ADR-0023): the raw is left unconsumed and ``None`` is returned if
+        its content changed since the caller read it. It is defense-in-depth
+        behind the project write lock, not a compare-and-swap.
         """
         self._require_within_store(path)
-        return store.mark_consumed(path)
+        return store.mark_consumed(path, expect_digest=expect_digest)
 
     def _require_within_store(self, path: Path) -> None:
         """Reject a path that does not resolve to somewhere under ``self.root``.

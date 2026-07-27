@@ -261,6 +261,11 @@ def curate(
             distill_chunk_chars=config.curate.distill_chunk_chars,
             redact_patterns=tuple(config.redact.extra_patterns),
             pass_budget=curate_budget.from_config(config.curate, automatic=if_stale),
+            # the detached --if-stale pass is background freshness: if another
+            # writer holds the project store lock it skips rather than queues
+            # (ADR-0023). This layers under the curate single-flight above,
+            # which only excludes concurrent curate runs, not scribe writers.
+            blocking_lock=not if_stale,
         )
 
         if dry_run:

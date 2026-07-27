@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from neurobase.brain.base import Brain, BrainError, combine_prompt
-from neurobase.core import linkify, store
+from neurobase.core import linkify, lock, store
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 from neurobase.curator import budget as budget_mod
 from neurobase.curator import distill as distill_mod
@@ -287,8 +287,8 @@ def _log_pass(
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def curate(
-    root: Path,
+def _curate_unlocked(
+    handle: StoreHandle,
     project: str,
     brain: Brain,
     *,
@@ -301,20 +301,17 @@ def curate(
     redact_patterns: tuple[str, ...] = (),
     pass_budget: budget_mod.PassBudget | None = None,
 ) -> dict[str, Any]:
-    """Run one curate pass (spec §2). Returns the summary dict.
+    """Run one curate pass (spec §2) with the project write lock ALREADY held.
+
+    ``curate`` is the entry point: it opens the WRITE handle, takes the lock, and
+    delegates here. Nothing else may call this — the read-then-write in step 6
+    (``mark_consumed``) is only safe under the lock (ADR-0023).
 
     ``pass_budget`` bounds the pass (P0, 2026-07-17 runaway incident). Omitting
     it builds the permissive explicit-tier default, so a direct caller is still
     bounded — there is no unbounded path — while the CLI passes the much
     smaller automatic tier for hook-triggered runs.
     """
-    # curate always intends to mutate, so obtain a WRITE handle up front: it runs
-    # the D11 schema guard (a newer-schema store raises, exactly as the old
-    # ensure_tree → ensure_store_metadata did) and ensures store.toml; ensure_tree
-    # then creates the project subdirs. Every store/registry access below goes
-    # through this validated handle.
-    handle = open_store(root, StoreMode.WRITE)
-    handle.ensure_tree(project)
     if pass_budget is None:
         pass_budget = budget_mod.explicit_budget()
 
@@ -363,7 +360,7 @@ def curate(
     # this pass, degrading to the skim on any failure (D16 — never aborts). The
     # cache is derived state; a dry run reads it but never writes it.
     raw_docs, distill_counts = distill_mod.distill_docs(
-        root,
+        handle.root,
         project,
         raw_docs,
         budgeted.for_distill(),
@@ -459,7 +456,17 @@ def curate(
         # Step 6 per batch: the plan was valid and its state is durable. Capture
         # session identity at consumption time so the edge outlives raw retention.
         for doc in batch_docs:
-            handle.mark_consumed(doc.file_path)
+            # Defensive digest guard (NOT a compare-and-swap — the check and the
+            # write are separate syscalls; correctness comes from the pass holding
+            # the project lock) on the digest read at plan time (ADR-0023,
+            # P1-DATA-INTEGRITY-002): a scribe that bypassed the advisory lock may
+            # have overwritten this session-keyed raw with a newer body while the
+            # plan was in flight. Marking that newer body consumed would discard
+            # captures the plan never saw, so leave it unconsumed for the next
+            # pass — and keep it out of the fold journal, which records what was
+            # actually folded.
+            if handle.mark_consumed(doc.file_path, expect_digest=doc.digest) is None:
+                continue
             fold_consumed.append(
                 {
                     "file": doc.file_path.name,
@@ -627,6 +634,41 @@ def curate(
     }
     _log_pass(handle, project, summary, fold=fold if batch_count else None)
     return summary
+
+
+def curate(
+    root: Path,
+    project: str,
+    brain: Brain,
+    *,
+    blocking_lock: bool = True,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Run one curate pass **under the per-project write lock** (ADR-0023).
+
+    The lock is held once around the whole pass — consume, plan, upsert,
+    soft-delete, prune — so no other mutator can interleave, and
+    ``prune_tombstones`` (whose only call site is inside this pass) cannot race
+    a concurrent soft-delete. It also makes the scribes' non-blocking acquire
+    fail while a pass is in flight, which is what routes a mid-pass capture to a
+    fresh filename instead of over the raw being consumed.
+
+    ``blocking_lock=False`` is the detached ``curate --if-stale`` freshness
+    pass: if another mutator holds the lock, freshening is already underway, so
+    it **skips** rather than queues.
+
+    The WRITE handle is opened here, before the lock, because it is what names
+    the lockfile: ``handle.memory_dir(project)/.lock``. Opening it also runs the
+    D11 schema guard and ensures ``store.toml``; ``ensure_tree`` then creates the
+    project subdirs, so the memory dir exists before the lock is taken.
+    """
+    handle = open_store(root, StoreMode.WRITE)
+    handle.ensure_tree(project)
+    try:
+        with lock.project_lock(handle.memory_dir(project), blocking=blocking_lock):
+            return _curate_unlocked(handle, project, brain, **kwargs)
+    except lock.LockContended:
+        return {"status": "skipped-locked", "reason": "another writer holds the project lock"}
 
 
 def is_stale(root: Path, project: str, hours: int) -> bool:

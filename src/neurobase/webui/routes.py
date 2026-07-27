@@ -488,20 +488,25 @@ def _session_row(project: str, doc: store.Document) -> dict[str, Any]:
     }
 
 
-async def _list_sessions(request: Request) -> Response:
-    root = _root(request)
-    handle = open_store(root, StoreMode.READ)
+def _session_rows(handle: Any) -> list[dict[str, Any]]:
+    """Every raw capture across projects, newest-first. Fail-soft per project so
+    one unreadable project can't blank the whole surface."""
     rows: list[dict[str, Any]] = []
     for project in handle.load_registry():
         try:
             for doc in handle.list_raw(project, unconsumed_only=False):
                 rows.append(_session_row(project, doc))
         except (OSError, ValueError):
-            continue  # one unreadable project must not blank the whole surface
-    # Newest capture first — most recent activity at the top of a review list.
+            continue
     rows.sort(key=lambda r: str(r["captured_at"] or ""), reverse=True)
+    return rows
+
+
+async def _list_sessions(request: Request) -> Response:
+    handle = open_store(_root(request), StoreMode.READ)
+    rows = _session_rows(handle)
     unconsumed = sum(1 for r in rows if not r["consumed"])
-    context = {"rows": rows, "unconsumed": unconsumed}
+    context = {"rows": rows, "unconsumed": unconsumed, "sel": None}
     return _templates(request).TemplateResponse(request, "sessions_list.html", context)
 
 
@@ -522,8 +527,9 @@ async def _session_detail(request: Request) -> Response:
     except (ValueError, OSError):
         return _error_response(request, 404, "This capture is unreadable.")
     session_id = str(doc.get("session_id") or "")
-    context = {
+    sel = {
         "project": project,
+        "file": file,
         "session": session_id[:8] or "—",
         "session_full": session_id,
         "agent": str(doc.get("agent") or "—"),
@@ -533,7 +539,14 @@ async def _session_detail(request: Request) -> Response:
         "consumed": bool(doc.get("consumed")),
         "body": _redact_display(doc.body),
     }
-    return _templates(request).TemplateResponse(request, "session_detail.html", context)
+    # ?view=full → the standalone page (linked as "Open as page"); otherwise the
+    # capture opens inline in the Sessions two-pane, list still on the left.
+    if request.query_params.get("view") == "full":
+        return _templates(request).TemplateResponse(request, "session_detail.html", {"sel": sel})
+    rows = _session_rows(handle)
+    unconsumed = sum(1 for r in rows if not r["consumed"])
+    context = {"rows": rows, "unconsumed": unconsumed, "sel": sel}
+    return _templates(request).TemplateResponse(request, "sessions_list.html", context)
 
 
 # --- Memory + Search (Phase 2c) ---------------------------------------------

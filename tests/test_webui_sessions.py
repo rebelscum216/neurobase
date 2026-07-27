@@ -128,3 +128,41 @@ def test_capture_path_rejects_escapes_and_subdirs(store_root: Path) -> None:
 def test_traversal_url_is_404_over_http(client: TestClient) -> None:
     r = client.get(f"/sessions/{PROJECT}/..%2f..%2f..%2fstore.toml")
     assert r.status_code == 404
+
+
+# --- two-pane master/detail (Phase 2b restyle) ------------------------------
+
+
+def _first_file(store_root: Path) -> str:
+    return store.list_raw(store_root, PROJECT, unconsumed_only=False)[0].file_path.name
+
+
+def test_sessions_is_two_pane_with_a_placeholder(client: TestClient) -> None:
+    html = client.get("/sessions").text
+    assert 'class="split"' in html, "the Sessions surface should render the two-pane split"
+    assert "Select a capture" in html, "the empty detail pane should prompt a selection"
+
+
+def test_clicking_a_session_previews_it_inline(client: TestClient, store_root: Path) -> None:
+    file = _first_file(store_root)
+    html = client.get(f"/sessions/{PROJECT}/{file}").text
+    # the list stays on the left AND the detail shows in the right pane
+    assert 'class="split"' in html
+    assert "Capture metadata" in html and "Transcript" in html
+    # with an affordance to open the capture as its own standalone page
+    assert f"/sessions/{PROJECT}/{file}?view=full" in html
+
+
+def test_selected_row_is_highlighted(client: TestClient, store_root: Path) -> None:
+    file = _first_file(store_root)
+    assert 'class="on"' in client.get(f"/sessions/{PROJECT}/{file}").text
+    # nothing is highlighted when no capture is selected
+    assert 'class="on"' not in client.get("/sessions").text
+
+
+def test_open_as_page_is_the_standalone_view(client: TestClient, store_root: Path) -> None:
+    file = _first_file(store_root)
+    html = client.get(f"/sessions/{PROJECT}/{file}", params={"view": "full"}).text
+    assert "Capture metadata" in html  # the detail is present
+    assert 'class="split"' not in html  # but NOT the two-pane list
+    assert "page narrow" in html  # it renders as the standalone narrow page

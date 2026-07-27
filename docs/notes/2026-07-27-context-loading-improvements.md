@@ -12,43 +12,57 @@ claim is disputed, the dispute lives in the annotation next to it.
 
 ## Claude's summary position
 
+_Revised 2026-07-27 after Codex review round 1 (`changes-requested`). All four
+findings were verified and accepted; the corrections are folded in below and
+marked **[R1]** where they reverse an earlier claim._
+
 The incident that motivated this document is real and worth fixing. Three
 substantive disagreements with the plan as drafted:
 
 1. **The root cause is misidentified.** Nodes are not "falling behind" their
-   curated facts. Node synthesis is *failing*, and has been for weeks. Phase 2
-   as drafted builds a subsystem to label a broken pipeline "stale" instead of
-   repairing it. Evidence in [C-1].
+   curated facts — each node was produced by the last curate pass that
+   succeeded, and no later pass has succeeded. Phase 2 as drafted builds a
+   subsystem to label a stalled pipeline "stale" instead of restarting it.
+   Evidence in [C-1].
 2. **Phase 1 cannot work at the hook it targets.** `SessionStart` has no
-   conversation to classify — injection completes before the user types. Intent
-   routing requires relocating injection to `UserPromptSubmit`, which is a
-   different architectural proposal with its own costs. Evidence in [C-3].
-3. **Roughly half of Phase 3 already shipped** in ADR-0022. The gap is
-   behavioral, not structural. Evidence in [C-8].
+   conversation to classify — injection completes before the user types. But
+   **[R1]** `UserPromptSubmit` is *not* the cross-agent answer: Codex exposes only
+   `SessionStart` and `Stop`. This needs to be an agent-capability-specific
+   proposal. Evidence in [C-3].
+3. **The lifecycle schema already exists** — `status` / `supersedes` /
+   `provenance` predate ADR-0022. **[R1]** But the earlier claim that "the curator
+   never writes `supersedes`" is **withdrawn**: 67 of 88 facts are pinned
+   (`user-directed`) and MUST be carried forward unchanged, so an empty field is
+   largely the contract working, not a bug. Evidence in [C-8].
 
 And one item that outranks the entire document, discovered while verifying it:
 
 4. **A critical runaway recurred today**, of the same class as the 2026-07-17
-   incident. It makes the curate failure rate cited throughout this review a
-   *symptom* rather than an independent bug, and it is the real ADR-0025.
-   Evidence in [C-13].
+   incident. **[R1] Its cause is version skew, not insufficient hardening** — the
+   hooks execute a 2026-07-09 shim that contains none of the fixes. Evidence in
+   [C-13].
 
 ### Evidence table (gathered 2026-07-27 from the live store)
 
 | Claim | Measurement |
 |---|---|
-| ccgolf curate passes | 37 total — **1 `ok`**, 29 `partial`, 7 `error` |
-| ccgolf last successful synthesis | `2026-07-20T20:28:57Z` |
-| `ccgolf-status.md` `generated_at` | `2026-07-20T20:28:57Z` — **exact match** |
-| neurobase curate passes | 3,323 total — **54 `ok`**, ~3,200 `error` |
-| neurobase last successful synthesis | `2026-07-16T17:20:22Z` |
-| `neurobase-status.md` `generated_at` | `2026-07-16T17:20:22Z` — **exact match** |
+| ccgolf curate passes | 37 total — 1 `ok`, 29 `partial`, 7 `error` |
+| ccgolf sole `ok` pass, logged | `2026-07-20T20:28:57.776799Z` |
+| `ccgolf-status.md` `generated_at` | `2026-07-20T20:28:57.762885Z` — same pass, 14 ms earlier |
+| neurobase curate passes | 3,323 total — 54 `ok`, 41 `partial`, rest `error` |
+| neurobase last `ok` pass, logged | `2026-07-16T17:20:22.704433Z` |
+| `neurobase-status.md` `generated_at` | `2026-07-16T17:20:22.687841Z` — same pass, 17 ms earlier |
 | Dominant error | `claude -p timed out` / `claude -p exited 1` |
-| Curated facts with non-empty `supersedes` | **0 of 88** |
-| `doctor` checks covering curate health | **none** |
+| Curated facts with non-empty `supersedes` | 0 of 88 — **of which 67 are pinned and ineligible** |
+| Installed shim executed by both hooks | `neurobase-cli 0.1.0.dev0`, built **2026-07-09** |
+| `core/locks.py`, `core/process_guard.py` in that shim | **absent** |
+| `doctor` checks covering curate health | none |
 
-The exact timestamp match on both projects is the finding: a node's age *is* its
-last successful curate pass. Nothing is decaying; synthesis simply stops running.
+**[R1] Correction:** an earlier revision called the node/log timestamps
+"byte-identical." They are not — the node is written *before* the pass is logged,
+so they differ by 14–17 ms. The correct claim is narrower and still sufficient:
+each node was written by the last pass that succeeded, and no successful pass has
+occurred since. Nothing is decaying; synthesis simply stopped running.
 
 ---
 
@@ -72,9 +86,13 @@ had not propagated into the synthesized project status.
 > **[C-1] The omission has a mundane cause, and it is not propagation lag.**
 > The Square pivot fact (`cc-golf-lab-pivoted-customer-booking-from-the-cust.md`)
 > was written `2026-07-27T15:05:02Z`. `ccgolf-status.md` carries
-> `generated_at: 2026-07-20T20:28:57Z` — seven days earlier. That timestamp is
-> byte-identical to the only `ok` entry in ccgolf's `.curator-log.jsonl`. Every
-> pass since has been `partial` or `error`, 36 of 37 with `claude -p timed out`.
+> `generated_at: 2026-07-20T20:28:57.762885Z` — seven days earlier, and 14 ms
+> before the sole `ok` entry in ccgolf's `.curator-log.jsonl`
+> (`2026-07-20T20:28:57.776799Z`). Same pass: the node is written, then the pass
+> is logged. Every pass since has been `partial` or `error`, 36 of 37 with
+> `claude -p timed out` — **[R1]** though see [C-13], all 36 fall inside the
+> 2026-07-27 burst, so for ccgolf this is seven days of *no* curation rather than
+> seven days of failing curation.
 >
 > `partial` is the documented state in `curator/engine.py:15`: raws consumed and
 > facts upserted, then synthesis dies. So curated facts advance while the node
@@ -152,16 +170,28 @@ Use these signals in priority order:
 > exists as text, `ccgolf-status` was injected seconds earlier. No confidence
 > threshold changes that ordering.
 >
-> Intent-aware routing requires **moving or supplementing injection at
-> `UserPromptSubmit`**, a hook Neurobase does not install today. That is a real
-> architectural change and should be stated as one. It also runs directly into
-> AGENTS.md build principle #3 — hooks are deterministic, run no LLM, and always
-> exit 0 — because a classifier on the prompt path puts an LLM call in front of
-> every turn.
+> Intent-aware routing requires **supplementing injection with a prompt-aware
+> path**, which Neurobase does not install today. That is a real architectural
+> change and should be stated as one.
 >
-> **Ask:** does Codex agree Phase 1 needs to be re-scoped as a
-> `SessionStart` → `UserPromptSubmit` proposal, with principle #3 addressed
-> head-on? If the answer is "keep it at SessionStart," what signal is it reading?
+> **[R1] Two corrections from review round 1:**
+>
+> 1. **`UserPromptSubmit` is not a cross-agent solution.** It is a Claude Code
+>    hook. The verified Codex surface is `SessionStart` and `Stop` (ADR-0005) —
+>    there is no equivalent prompt hook. Since the motivating acceptance criterion
+>    is explicitly about *Codex* in the CC Golf workspace, a Claude-only mechanism
+>    does not satisfy it. The proposal must be agent-capability-specific: keep the
+>    deterministic `SessionStart` baseline as the floor, add a post-prompt path per
+>    agent that has one, and define a tool-mediated fallback (MCP recall) where
+>    none exists. Replacing SessionStart injection outright would also change the
+>    §3/§5 recall contract.
+> 2. **An earlier revision claimed a router "necessarily puts an LLM call in front
+>    of every turn." That is withdrawn** — it contradicted [C-4] in this same
+>    document, which argues *for* deterministic rules over a confidence score. A
+>    deterministic prompt-aware router (explicit selection, named repo/entity match,
+>    else fall back to cwd) satisfies principle #3 without an LLM. The principle #3
+>    tension applies only to an LLM-backed classifier, which [C-4] already advises
+>    against.
 
 The router should produce a structured and inspectable result:
 
@@ -282,22 +312,34 @@ Extend curated facts with lifecycle and relationship metadata:
 }
 ```
 
-> **[C-8] `status`, `supersedes`, and `provenance` already exist and shipped in
-> ADR-0022.** Every curated fact on disk carries them; `store.py:454-484` merges
-> provenance and supersedes on upsert; tombstones with grace-period pruning are
-> live. This phase is not a schema change.
+> **[C-8] `status`, `supersedes`, and `provenance` already exist.** Every curated
+> fact on disk carries them; `store.py:454-484` merges provenance and supersedes
+> on upsert; tombstones with grace-period pruning are live. This phase is not a
+> schema change.
 >
-> The real gap is behavioral: **`supersedes` is populated on 0 of 88 curated
-> facts.** The curator never writes it — the log's `superseded` counter reads 0 on
-> every pass. So Phase 3 should be retitled *"make the curator populate the
-> supersession field that already exists,"* which is a curator-prompt change.
+> **[R1] Three corrections from review round 1:**
 >
-> This matters for budget: the suggested implementation order's step 5 is mostly
-> done. `effective_at` is the only clearly new field worth adding; I'd defer
+> 1. **Mis-attribution.** These fields did *not* ship in ADR-0022. ADR-0022 is the
+>    fold-journal / `from_raw`-validation decision (dated 2026-07-24) and
+>    explicitly builds on the pre-existing schema; `supersedes` is referenced as
+>    already-existing as far back as ADR-0007. The fields predate both.
+> 2. **The "curator never writes it" diagnosis is withdrawn.** `PLAN_SYSTEM`
+>    already instructs the model to emit `supersedes`, and both `_apply_upserts`
+>    implementations persist it. The write path is not missing.
+> 3. **The 0-of-88 statistic does not mean what it was used to mean.** **67 of
+>    those 88 facts are pinned** (`provenance: [user-directed]`), and spec §478
+>    requires pinned facts to be carried forward unchanged. Most of this corpus is
+>    contractually ineligible for supersession, so an empty field is largely the
+>    contract working correctly. The real eligible population is ~21 facts, which
+>    is far too small a base to conclude anything from.
+>
+> **Revised position:** Phase 3 is neither a schema phase nor a one-line prompt
+> change. The prerequisite is a **single clean curate pass on a current build**
+> (see [C-13] — no pass on current code has ever run here) to establish whether
+> supersession is emitted at all when the pipeline works. Diagnose, then decide.
+>
+> `effective_at` remains the one clearly new field worth adding; defer
 > `materiality` until something consumes it (review question 3).
->
-> It also bears on AGENTS.md principle #4, "optimize for deletion" — a curator
-> that never records supersession isn't doing the job the principle names.
 
 During synthesis:
 
@@ -310,11 +352,29 @@ During synthesis:
 The Square migration should be classified as a high-materiality directional
 change because it affects architecture, deployment, testing, and pending work.
 
-> **[C-9]** Note the store already contains a *worked example* of the
-> contradiction this phase targets: `cc-golf-lab-mobile-finding-2026-07-27...`
-> describes the in-app scheduler's booking page as an open concern while noting
-> "Square's widget replaces that UI." Two active facts, one transition, no
-> `supersedes` link between them. Good fixture material for Phase 6.
+> **[C-9] [R1] Rewritten — the original fixture proposal violated a spec MUST.**
+>
+> The store contains a worked example of the *contradiction* this phase targets:
+> `cc-golf-lab-mobile-finding-2026-07-27...` describes the in-app scheduler's
+> booking page as an open concern while noting "Square's widget replaces that UI."
+> Two active facts, one transition, no `supersedes` link.
+>
+> An earlier revision proposed making the curator add that link. **That is a spec
+> violation:** both facts carry `provenance: [user-directed]`, and spec §478
+> requires pinned facts to be carried forward unchanged — never tombstoned,
+> superseded, or reworded. Withdrawn.
+>
+> The finding underneath it survives, and separating the two is the actual design
+> insight this phase was missing:
+>
+> - **Contradiction *display*** — surfacing that two active facts describe a
+>   transition — is non-destructive and legal on pinned facts. This is what the
+>   motivating incident actually needed.
+> - **Destructive supersession** — rewriting or tombstoning the older fact —
+>   is illegal on pinned facts and must be restricted to the unpinned population.
+>
+> Phase 3 should specify both separately. Phase 6 fixtures for the destructive
+> path must use unpinned facts; this pair is valid only as a display fixture.
 
 ### Acceptance criteria
 
@@ -489,57 +549,101 @@ changing it, while delivering freshness and retrieval improvements independently
 of the more subjective intent router.
 
 > **[C-13] This ordering is superseded by an incident that occurred while this
-> document was being reviewed.**
+> document was being reviewed.** _(Substantially rewritten after review round 1 —
+> the original root-cause conclusion was wrong.)_
 >
 > **On 2026-07-27 the Claude and Codex `SessionStart` hooks were reinstalled
 > user-scope, and `auto_enable_roots = ["~/Projects"]` was configured. Four
 > minutes later a runaway began.** At containment it had reached **125 concurrent
-> `neurobase curate` processes and 39 concurrent `claude -p` processes**, and the
-> neurobase curator log had grown from 1,996 to 3,323 entries — 1,741 passes in
-> one day against a prior baseline of 1–11 per day. Containment: remove both
-> `SessionStart` hooks, kill the process trees. Capture hooks were left in place.
+> `neurobase curate` processes and 39 concurrent `claude -p` processes**.
+> Containment: remove both `SessionStart` hooks, kill the process trees. Capture
+> hooks (`SessionEnd` / `Stop`) were left in place and verified quiet afterwards.
 >
 > For the record: Claude performed that install, at the user's request to enable
 > Neurobase across `~/Projects`, without first reading
-> `docs/notes/2026-07-17-claude-usage-runaway-incident.md` — which ends with the
+> `docs/notes/2026-07-17-claude-usage-runaway-incident.md` — which carries the
 > standing instruction that Claude `SessionStart` *"must remain disabled until the
 > code is hardened."*
 >
-> Three consequences for this document:
+> ### [R1] The root cause: version skew, not insufficient hardening
 >
-> 1. **The `claude -p` timeouts cited throughout are substantially a symptom of
->    contention**, not an independent bug. 125 concurrent curators against one
->    subscription will time out. Diagnose the timeout on a quiet machine before
->    treating it as a separate defect — though note ccgolf's node was already
->    stale on 2026-07-20 and neurobase's on 2026-07-16, well before today, so
->    there is a pre-existing failure underneath the burst.
-> 2. **The hardening added since 2026-07-17 is insufficient, and today proves
->    it.** The `is_internal_call()` reentrancy guard (`cli/__init__.py:1391`), the
->    ADR-0023 per-project write lock, and the `auto_max_raws` / `auto_max_brain_calls`
->    budgets were all in place and the runaway still happened.
->    `spawn_curate_if_stale` (`recall_common.py:140`) still has no debounce and no
->    check for an already-running curator; it unconditionally `Popen`s a detached
->    process on every session start. With `auto_enable_roots` set, that is now
->    every session in every repo under the root.
-> 3. **The 2026-07-17 note is stale in a way that caused harm.** It still reads as
->    a live containment instruction with no indication of what was subsequently
->    fixed or what remains unsafe. Any agent following it correctly would refuse
->    to install `SessionStart`; any agent not reading it repeats today.
+> An earlier revision of this annotation concluded that the post-2026-07-17
+> hardening "was all in place and the runaway still happened." **That is wrong,
+> and the error was not checking what the hooks actually execute.** Both hooks
+> invoke `/Users/andrewsmith/.local/share/uv/tools/neurobase-cli/bin/neurobase`:
 >
-> **Proposed resequencing:**
+> | | |
+> |---|---|
+> | Installed shim | `neurobase-cli 0.1.0.dev0`, built **2026-07-09** |
+> | Repo | `version = "0.1.0"` |
+> | `core/locks.py` in shim | **absent** |
+> | `core/process_guard.py` in shim | **absent** |
+>
+> **The hooks ran three-week-old code containing none of the fixes.** The
+> `is_internal_call()` reentrancy guard, the `try_curate_lock` single-flight, the
+> ADR-0023 store lock, and the automatic-pass budgets were all read from `src/`
+> and assumed to be running. None of them were. That is why 125 curators spawned
+> concurrently — exactly the pre-hardening failure mode of 2026-07-17.
+>
+> Consequently: **current source has never been exercised by a live hook on this
+> machine.** No conclusion about the sufficiency of the current design can be
+> drawn from this incident, in either direction.
+>
+> Two further corrections:
+>
+> - **Spawn-side debounce is an efficiency layer, not the correctness boundary.**
+>   Current source takes a non-blocking curate single-flight lock *before*
+>   staleness and brain resolution — the boundary the 2026-07-17 note itself
+>   identifies. On a current build, 125 spawns would exit immediately on the lock
+>   without a single `claude -p` call. Debounce is worth adding to avoid the
+>   process churn, but it is not the fix.
+> - **The 2026-07-17 note is not stale in the way earlier claimed.** It does carry
+>   implementation status, live marker spikes, and the remaining unsafe acceptance
+>   criteria. The failure was that it was not read before the reinstall. The right
+>   action is to **append** the recurrence and version-skew evidence to it, not to
+>   rewrite it as deficient.
+>
+> ### [R1] Corrections to the supporting evidence
+>
+> - **Arithmetic.** An earlier revision juxtaposed "1,996 → 3,323 entries" with
+>   "1,741 passes in one day." Those are two different measurements taken at
+>   different times (1,741 was the day's total at first sampling; 1,327 is the
+>   growth between the two samples) and reading them together implies a
+>   contradiction. Stated correctly: the neurobase log grew by **1,327 entries
+>   between two samples minutes apart**, against a pre-2026-07-27 baseline of
+>   1–11 passes per day.
+> - **ccgolf shows no pre-burst failure.** Its log has exactly one `ok` pass on
+>   2026-07-20 and then nothing until the 2026-07-27 burst. Its 36 failures are
+>   all inside the burst, so ccgolf's staleness is *seven days of no curation*,
+>   not seven days of failing curation. The claim of a pre-existing synthesis
+>   defect survives **only for `neurobase`**, which logged errors on 07-17, 07-18,
+>   07-19, 07-21 (7), 07-22 (6) and 07-23 (11) — all, note, also under the July-9
+>   shim.
+> - **The `claude -p` timeouts remain substantially a contention symptom.** 125
+>   concurrent curators against one subscription will time out. Diagnose on a
+>   quiet machine, on a current build, before treating the timeout as an
+>   independent defect.
+>
+> ### [R1] Proposed resequencing
 >
 > | # | Work | Why first |
 > |---|---|---|
-> | 0 | Debounce//single-flight `spawn_curate_if_stale`; re-audit the SessionStart path end to end | An active critical-severity regression |
-> | 0b | Update the 2026-07-17 note with current status, or supersede it with an ADR | It is the control that failed today |
-> | 1 | Curate health check in `doctor` | ~10 lines; would have caught both stale nodes weeks ago |
+> | 0 | **Resolve the installed-artifact skew** — upgrade `neurobase-cli`, assert `core.locks` + `core.process_guard` are present in the *installed* package, pin the shim version in `doctor` | The hooks have never run the hardened code; nothing else is measurable until they do |
+> | 0b | **Live regression on the current shim** in one disposable repo before re-enabling `SessionStart` anywhere | Proves the single-flight lock under real concurrency |
+> | 0c | **Append** recurrence + version-skew evidence to the 2026-07-17 note | It is the control that failed; keep one record, don't fork it |
+> | 1 | **`doctor` gains a curate-health check** and an installed-vs-source version check | ~10 lines; would have caught both the stale nodes *and* the skew |
 > | 2 | "Search beneath the summary" clause in the inject `HEADER` | Most of Phase 5, one string |
-> | 3 | Curator populates `supersedes` | Field already exists (ADR-0022) |
+> | 3 | One clean curate pass on a current build, then diagnose supersession | Prerequisite for any Phase 3 scoping ([C-8]) |
 > | 4 | Stale detection + material-fact supplement (Phase 2, minus pre-injection regeneration) | Degrades gracefully while synthesis is down |
-> | 5 | Injection-point ADR: `SessionStart` vs `UserPromptSubmit` (Phase 1) | Genuine architectural fork; needs its own decision record |
+> | 5 | Injection-point ADR, agent-capability-specific (Phase 1) | Genuine architectural fork; needs its own decision record ([C-3]) |
 >
-> Items 0 and 0b are not ADR material — they are a bug and a doc fix. Item 5 is
-> the real ADR-0025.
+> Items 0–0c and 1 are not ADR material — they are a build/packaging defect, a
+> test, a doc append, and a diagnostic. Item 5 is the real ADR-0025.
+>
+> **A note on `doctor`.** It reported all-green immediately before this incident.
+> It verifies that the hook command *string* matches the shim path, but never that
+> the shim is current or contains the safety code it depends on. That gap is what
+> allowed a three-week-old binary to look correctly installed.
 
 ## Definition of done
 
@@ -554,9 +658,14 @@ The work is complete when:
   summary.
 - The CC Golf/Square incident passes as an automated regression test.
 
-> **[C-14]** Add: *automatic curation cannot spawn unbounded concurrent
-> processes, and a synthesis failure is visible in `doctor` within one pass.*
-> Without those, everything above can be true while the system is on fire.
+> **[C-14]** Add three, the third **[R1]** from review round 1:
+>
+> - Automatic curation cannot spawn unbounded concurrent processes.
+> - A synthesis failure is visible in `doctor` within one pass.
+> - **The shim the hooks invoke is verified current, and `doctor` fails when the
+>   installed package is older than the source it was built from.**
+>
+> Without these, everything above can be true while the system is on fire.
 
 ## Review questions
 
@@ -576,9 +685,10 @@ The work is complete when:
 > 1. **Load the `neurobase` project node.** It exists and is correct for a
 >    Neurobase conversation. The failure was loading the *wrong* project, not
 >    loading one. (See [C-5].)
-> 2. **None — remove the option.** Synthesis exceeds the 120s brain timeout today;
->    regenerating at startup violates non-goal #4 and principle #3. Regenerate
->    out-of-band, inject a supplement. (See [C-7].)
+> 2. **None — remove the option.** Regenerating at startup violates non-goal #4
+>    and spec §3, which requires the detached `curate --if-stale` to run *after*
+>    emitting and not delay startup. Regenerate out of band, inject a bounded
+>    deterministic supplement. (See [C-7]. Codex concurred in round 1.)
 > 3. **Defer entirely.** No consumer exists yet. `effective_at` is worth adding;
 >    `materiality` is speculative until something reads it. (See [C-8].)
 > 4. **Automatic, gated on a miss rather than a threshold.** A search returning
@@ -587,13 +697,34 @@ The work is complete when:
 >    already in `.curator-log.jsonl`, are local-only, and contain no conversational
 >    text. Principle #5 forbids telemetry regardless. (See [C-12b].)
 >
-> **Open questions back to Codex:**
+> ### Round 1 outcome — where the two agents now stand
 >
-> - **Q-A:** Do you accept that Phase 1 must move to `UserPromptSubmit`, or do you
->   see a signal available at `SessionStart` that I've missed?
-> - **Q-B:** Do you accept that Phase 3 is a curator-behavior change rather than a
->   schema change, given ADR-0022 shipped the fields?
-> - **Q-C:** Do you agree items 0/0b (runaway containment + stale incident note)
->   outrank every phase in this document?
-> - **Q-D:** Is there a case for keeping pre-injection regeneration that I'm
->   dismissing too fast?
+> Codex returned `changes-requested` with four findings. All four were verified
+> against the live machine and **accepted in full**; no pushback. Resolution:
+>
+> | Q | Round-1 answer | Status |
+> |---|---|---|
+> | **Q-A** | No missed signal at `SessionStart` — but `UserPromptSubmit` is Claude-only and does not solve the Codex case | **Agreed.** [C-3] rewritten as agent-capability-specific |
+> | **Q-B** | Schema pre-exists (not ADR-0022); "curator-prompt change" diagnosis rejected — corpus is 67/88 pinned | **Agreed.** [C-8] rewritten; diagnosis withdrawn pending a clean pass |
+> | **Q-C** | Containment outranks the phases, but proposed 0/0b missed the real target: the stale installed shim | **Agreed.** [C-13] rewritten; version skew is now item 0 |
+> | **Q-D** | No synchronous LLM regeneration before injection; bounded deterministic supplement is spec-compatible | **Agreed**, and it strengthens [C-7] with the §3 citation |
+>
+> The one substantive disagreement remaining is a matter of degree, not direction:
+> whether spawn-side debounce is worth building at all once the single-flight lock
+> is actually running. Both agents agree it is not the correctness boundary.
+>
+> ### Open questions for round 2
+>
+> - **Q-E:** With version skew identified as the root cause, does anything in
+>   items 1–5 of the resequencing change order? Specifically, should item 3 (clean
+>   curate pass) precede item 2 (the `HEADER` clause), since item 2 is independent
+>   of the pipeline?
+> - **Q-F:** Should `doctor` fail hard, or warn, when the installed package is
+>   older than the source tree? Hard failure risks wedging a working install
+>   during development, where the two legitimately diverge.
+> - **Q-G:** Is "contradiction display vs. destructive supersession" ([C-9]) the
+>   right seam, or does surfacing a contradiction between two pinned facts still
+>   constitute a modification the spec means to forbid?
+> - **Q-H:** Does the neurobase-only pre-burst error series (07-17 through 07-23,
+>   all under the July-9 shim) support *any* claim of a synthesis defect
+>   independent of the missing hardening, or should that claim be dropped too?

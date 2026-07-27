@@ -96,6 +96,38 @@ def _root(request: Request) -> Path:
     return root
 
 
+def _read_root(request: Request) -> Path:
+    """Open a request-local READ ``StoreHandle`` — running the D11 schema guard at
+    THIS request boundary, not just once when the server started — and return its
+    validated root for the ``recommender``/``metrics`` calls below (whose
+    signatures still take ``root: Path`` until the ADR-0015 migration reaches
+    them). READ never creates ``store.toml``, so a GET against an absent store
+    stays a pure no-op read. An unsupported or unreadable schema raises
+    :class:`store.UnsupportedSchemaError`, which ``unsupported_schema_handler``
+    turns into a fail-safe typed page (Codex P1-SAFETY-SECURITY-002, spec
+    §10/D11)."""
+    return open_store(_root(request), StoreMode.READ).root
+
+
+def _write_root(request: Request) -> Path:
+    """Like :func:`_read_root`, but a WRITE handle for a mutating POST: the schema
+    guard runs at the request boundary *before* any proposal/ledger write, so a
+    long-running server that started on a supported store still refuses to mutate
+    forward-schema state after the on-disk store advances under it (Codex
+    P1-SAFETY-SECURITY-002)."""
+    return open_store(_root(request), StoreMode.WRITE).root
+
+
+async def unsupported_schema_handler(request: Request, exc: Exception) -> Response:
+    """App-wide fail-safe for a D11 schema-guard failure raised at *any* request
+    boundary — the request-local Suggestions handles above, and the
+    Sessions/Memory/Search/Skills handles that open a READ handle inline. Renders
+    the typed error page (409) rather than leaking a raw 500/stack trace when the
+    store on disk is newer than this binary supports or its metadata is unreadable
+    (Codex P1-SAFETY-SECURITY-002, spec §10/D11). Registered in ``app.build_app``."""
+    return _error_response(request, 409, str(exc))
+
+
 def _templates(request: Request) -> Jinja2Templates:
     templates = request.app.state.templates
     assert isinstance(templates, Jinja2Templates)
@@ -208,7 +240,7 @@ def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 def _suggestions_context(request: Request, sel: dict[str, Any] | None) -> dict[str, Any]:
     """Shared two-pane context: the (filtered) queue on the left, plus the
     selected proposal or the metrics overview on the right."""
-    root = _root(request)
+    root = _read_root(request)
     all_rows = [_list_row(doc) for doc in proposals.load_all_proposals(root)]
     status = request.query_params.get("status", "pending")
     if status not in _STATUS_FILTERS:
@@ -262,7 +294,7 @@ def _evidence_rows(root: Path, doc: store.Document) -> list[dict[str, Any]]:
 
 
 async def _suggestion_detail(request: Request) -> Response:
-    root = _root(request)
+    root = _read_root(request)
     slug = request.path_params["slug"]
     doc = proposals.load_proposal(root, slug)
     if doc is None:
@@ -372,7 +404,9 @@ def _run_prepare_install(
 
 
 async def _accept_view(request: Request) -> Response:
-    root = _root(request)
+    # GET previews (READ, never materializes store.toml); POST commits (WRITE, the
+    # guard runs before install writes anything) — Codex P1-SAFETY-SECURITY-002.
+    root = _read_root(request) if request.method == "GET" else _write_root(request)
     slug = request.path_params["slug"]
 
     if request.method == "GET":
@@ -452,7 +486,7 @@ async def _accept_view(request: Request) -> Response:
 
 
 async def _reject_view(request: Request) -> Response:
-    root = _root(request)
+    root = _write_root(request)
     slug = request.path_params["slug"]
     doc = proposals.load_proposal(root, slug)
     if doc is None:
@@ -472,7 +506,7 @@ async def _reopen_view(request: Request) -> Response:
     gate has already cleared this POST; ``reopen_proposal`` re-checks the status
     at write time and refuses anything but ``rejected`` with a named-status 409,
     so a stale "Reconsider" link fails closed rather than mis-transitioning."""
-    root = _root(request)
+    root = _write_root(request)
     slug = request.path_params["slug"]
     doc = proposals.load_proposal(root, slug)
     if doc is None:
@@ -488,7 +522,9 @@ async def _reopen_view(request: Request) -> Response:
 
 
 async def _edit_view(request: Request) -> Response:
-    root = _root(request)
+    # GET renders the draft (READ); POST persists the edit (WRITE) — the schema
+    # guard runs at this boundary either way (Codex P1-SAFETY-SECURITY-002).
+    root = _read_root(request) if request.method == "GET" else _write_root(request)
     slug = request.path_params["slug"]
     doc = proposals.load_proposal(root, slug)
     if doc is None:
@@ -525,15 +561,36 @@ def _redact_display(text: str) -> str:
     return redact.redact(text, load_config().redact.extra_patterns)
 
 
-def _capture_path(raw_dir: Path, file: str) -> Path | None:
-    """Resolve a capture filename to a real file **directly inside** ``raw_dir``,
-    or ``None``. Defense-in-depth: ``{file}`` is a single URL segment (Starlette
-    won't match a ``/``), but a crafted ``..``-bearing name is refused here rather
-    than trusted — the resolved path must have ``raw_dir`` as its immediate parent,
-    so it can neither escape the project's ``raw/`` nor dip into a subdirectory.
+def _within_store(path: Path, store_root: Path) -> bool:
+    """True when ``path`` resolves to somewhere at or beneath the validated store
+    root — the same containment ``StoreHandle._require_within_store`` enforces for
+    the handle's own writes (``..`` / absolute / **symlink**), applied to these
+    direct filesystem reads. A symlinked ``raw/`` / ``curated/`` / ``nodes/``
+    directory resolves *outside* the store, so files reached through it are
+    refused even though they sit directly inside that resolved directory (Codex
+    P2-SAFETY-SECURITY-003)."""
+    root = store_root.resolve()
+    resolved = path.resolve()
+    return resolved == root or resolved.is_relative_to(root)
+
+
+def _capture_path(raw_dir: Path, file: str, store_root: Path) -> Path | None:
+    """Resolve a capture filename to a real file **directly inside** ``raw_dir``
+    *and* beneath ``store_root``, or ``None``. Defense-in-depth: ``{file}`` is a
+    single URL segment (Starlette won't match a ``/``), but a crafted ``..``-bearing
+    name is refused here rather than trusted — the resolved path must have
+    ``raw_dir`` as its immediate parent, so it can neither escape the project's
+    ``raw/`` nor dip into a subdirectory. The extra ``store_root`` containment
+    catches the case where ``raw/`` *itself* is a symlink out of the store: the
+    file is then legitimately inside the resolved ``raw_dir`` but outside the
+    validated store, and must not be read (Codex P2-SAFETY-SECURITY-003).
     ``raw_dir`` must already be ``.resolve()``-d by the caller."""
+    if not _within_store(raw_dir, store_root):
+        return None
     path = (raw_dir / file).resolve()
     if path.parent != raw_dir or not path.is_file():
+        return None
+    if not _within_store(path, store_root):
         return None
     return path
 
@@ -582,7 +639,7 @@ async def _session_detail(request: Request) -> Response:
         raw_dir = (handle.memory_dir(project) / "raw").resolve()
     except store.InvalidSlugError:
         return _error_response(request, 404, "Unknown project.")
-    path = _capture_path(raw_dir, file)
+    path = _capture_path(raw_dir, file, handle.root)
     if path is None:
         return _error_response(request, 404, "No such capture.")
     try:
@@ -639,6 +696,10 @@ def _read_nodes(handle: Any, project: str) -> list[dict[str, Any]]:
     if not nodes_dir.is_dir():
         return out
     for path in sorted(nodes_dir.glob("*.md")):
+        # Skip anything that resolves outside the store — e.g. a symlinked `nodes/`
+        # dir, or a symlinked entry within it (Codex P2-SAFETY-SECURITY-003).
+        if not _within_store(path, handle.root):
+            continue
         try:
             doc = store.read_doc(path)
         except (ValueError, OSError):
@@ -695,7 +756,10 @@ async def _memory_detail(request: Request) -> Response:
     if not store.SLUG_RE.match(slug):
         return _error_response(request, 404, "No such fact.")
     path = curated_dir / f"{slug}.md"
-    if not path.is_file():
+    # A valid slug can't escape `curated/`, but `curated/` itself could be a symlink
+    # out of the store — require the resolved file beneath the validated root before
+    # reading (Codex P2-SAFETY-SECURITY-003).
+    if not _within_store(path, handle.root) or not path.is_file():
         return _error_response(request, 404, "No such fact.")
     try:
         doc = store.read_doc(path)
@@ -769,13 +833,20 @@ _STATE_CHIP = {
 
 def _discovered_card(skill: skills_scan.InstalledSkill) -> dict[str, Any]:
     """A SKILL.md found on disk — Neurobase-managed (carries our frontmatter) or
-    external (hand-authored / from elsewhere). It's present, so nothing to revert."""
+    external (hand-authored / from elsewhere). It's present, so nothing to revert.
+
+    The name/description/path are read verbatim off an arbitrary third-party file
+    on this machine and rendered, so they go through the same display-redaction
+    pass every other surface uses — a secret-shaped external skill description must
+    not render verbatim (Codex P2-SAFETY-SECURITY-006). ``nb_slug`` is an internal
+    routing/ownership identifier (a validated canonical slug, never secret-shaped)
+    and stays unredacted so links and ``present_nb`` keep working."""
     return {
-        "name": skill.name,
-        "description": skill.description,
+        "name": _redact_display(skill.name),
+        "description": _redact_display(skill.description),
         "scope": skill.scope,
         "project": skill.project,
-        "path": skill.path,
+        "path": _redact_display(skill.path),
         "source": "neurobase" if skill.managed else "external",
         "nb_slug": skill.nb_slug,
         "state": "installed",
@@ -833,7 +904,7 @@ async def _revert_view(request: Request) -> Response:
     write time and refuses a still-live artifact, so a stale "Revert" link (the
     artifact came back, or another tab already reverted) fails closed with 409
     rather than orphaning it."""
-    root = _root(request)
+    root = _write_root(request)
     slug = request.path_params["slug"]
     doc = proposals.load_proposal(root, slug)
     if doc is None:
@@ -851,4 +922,5 @@ __all__ = [
     "sessions_routes",
     "skills_routes",
     "suggestions_routes",
+    "unsupported_schema_handler",
 ]

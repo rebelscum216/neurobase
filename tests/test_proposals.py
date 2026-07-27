@@ -563,6 +563,59 @@ def test_reopen_missing_proposal_raises(tmp_path: Path) -> None:
         proposals.reopen_proposal(root, "does-not-exist")
 
 
+def test_reopen_superseded_is_refused_and_writes_nothing(tmp_path: Path) -> None:
+    """§12.7: a superseded proposal was replaced by a newer one — reopening it
+    would resurrect a duplicate, so it is a hard, named-status error that mutates
+    neither the proposal nor the ledger (Codex P2-TEST-GAP-008)."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked(slug="old-rule")], now=NOW)
+    proposals.write_ranked(
+        root, [_ranked(slug="new-rule", supersedes=["old-rule"])], now=NOW + timedelta(days=1)
+    )
+    assert _read(root, "old-rule").get("status") == "superseded"  # precondition
+    ledger_before = _ledger_events(root)
+
+    with pytest.raises(ValueError, match="status is superseded"):
+        proposals.reopen_proposal(root, "old-rule")
+
+    assert _read(root, "old-rule").get("status") == "superseded", "a superseded proposal moved"
+    assert _ledger_events(root) == ledger_before, "a refused reopen appended a ledger line"
+
+
+def test_concurrent_reopen_appends_exactly_one_event(tmp_path: Path) -> None:
+    """P1-DATA-INTEGRITY-001: two reopens racing on one rejection — the
+    store-wide lifecycle lock means exactly one wins (returns "rejected"), the
+    other re-reads the already-flipped `proposed` status and fails its guard, so
+    the ledger gains exactly one `reopened` line and the prior lines are intact."""
+    import threading
+
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=NOW)
+    proposals.reject_proposal(root, "prefer-uv-run", now=NOW)
+
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+    errors: list[str] = []
+
+    def worker() -> None:
+        barrier.wait()  # maximize contention: both enter reopen together
+        try:
+            results.append(proposals.reopen_proposal(root, "prefer-uv-run"))
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results == ["rejected"], "exactly one reopen should succeed"
+    assert len(errors) == 1 and "only a rejected proposal" in errors[0]
+    assert _read(root, "prefer-uv-run").get("status") == "proposed"
+    assert [e["event"] for e in _ledger_events(root)] == ["proposed", "rejected", "reopened"]
+
+
 def test_reopened_proposal_round_trips_and_can_be_rejected_again(tmp_path: Path) -> None:
     root = tmp_path / "store"
     proposals.write_ranked(root, [_ranked()], now=NOW)

@@ -12,8 +12,9 @@ from pathlib import Path
 from starlette.applications import Starlette
 from starlette.templating import Jinja2Templates
 
+from neurobase.core import store
 from neurobase.webui.filters import human_datetime
-from neurobase.webui.routes import all_routes
+from neurobase.webui.routes import all_routes, unsupported_schema_handler
 from neurobase.webui.security import CSRF_FORM_FIELD, CSRFMiddleware, new_csrf_token
 from neurobase.webui.shell import shell_context
 
@@ -52,7 +53,13 @@ def build_app(root: Path) -> Starlette:
     # Display filter for ISO timestamps → "July 15, 2026 | 1:20pm" across surfaces.
     templates.env.filters["humandate"] = human_datetime
 
-    app = Starlette(routes=all_routes())
+    # A store that advances past this binary's schema *after* the server started
+    # surfaces as UnsupportedSchemaError from any request-boundary open_store; map
+    # it to a fail-safe typed page rather than a 500 (Codex P1-SAFETY-SECURITY-002).
+    app = Starlette(
+        routes=all_routes(),
+        exception_handlers={store.UnsupportedSchemaError: unsupported_schema_handler},
+    )
     app.state.root = root
     app.state.templates = templates
     app.state.csrf_token = new_csrf_token()

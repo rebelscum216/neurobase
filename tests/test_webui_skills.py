@@ -152,3 +152,59 @@ def test_discover_skills_tags_managed_vs_external(store_root: Path) -> None:
     assert found["my-external-tool"].managed is False
     assert found["my-external-tool"].nb_slug is None
     assert "gone-skill" not in found  # removed from disk
+
+
+def _user_skill(tmp_path: Path, slug: str, frontmatter: str, body: str = "# Do it\n") -> Path:
+    """Plant a skill dir under the (monkeypatched) user skills root the fixture set
+    up at ``tmp_path/userhome/.claude/skills``."""
+    d = tmp_path / "userhome" / ".claude" / "skills" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n\n{body}", encoding="utf-8")
+    return d
+
+
+def test_invalid_utf8_skill_is_omitted_not_fatal(tmp_path: Path, client: TestClient) -> None:
+    """P2-CORRECTNESS-004: one undecodable SKILL.md must not crash the gallery —
+    it is skipped, and the valid skills beside it still render."""
+    d = tmp_path / "userhome" / ".claude" / "skills" / "binary-skill"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_bytes(b"---\nname: bin\n---\n\n\xff\xfe not valid utf-8")
+
+    r = client.get("/skills")
+    assert r.status_code == 200, "one bad skill must not 500 the gallery"
+    assert "my-external-tool" in r.text, "a valid skill beside it still shows"
+    assert "binary-skill" not in r.text, "the undecodable skill is omitted"
+
+
+def test_quoted_false_managed_is_treated_as_external(tmp_path: Path, store_root: Path) -> None:
+    """P2-CORRECTNESS-005: `neurobase_managed: "false"` is a truthy *string*, but
+    the strict predicate keys on the boolean `is True` — so it is external, not
+    managed, and carries no nb_slug."""
+    from neurobase.core.store_handle import StoreMode, open_store
+
+    _user_skill(tmp_path, "spoof-managed", 'neurobase_managed: "false"\nneurobase_slug: nb-skill')
+    found = {s.slug: s for s in skills_scan.discover_skills(open_store(store_root, StoreMode.READ))}
+    assert found["spoof-managed"].managed is False
+    assert found["spoof-managed"].nb_slug is None
+
+
+def test_foreign_slug_does_not_suppress_a_drift_card(tmp_path: Path, client: TestClient) -> None:
+    """P2-CORRECTNESS-005: an external skill carrying a matching `neurobase_slug`
+    but no `neurobase_managed: true` must NOT populate `present_nb`, so the genuine
+    accepted-but-missing proposal's drift card stays visible and revertable."""
+    _user_skill(tmp_path, "sneaky", "name: sneaky\nneurobase_slug: gone-skill")
+
+    html = client.get("/skills").text
+    assert 'action="/skills/gone-skill/revert"' in html, "foreign slug suppressed the drift card"
+
+
+def test_external_skill_metadata_is_redacted(tmp_path: Path, client: TestClient) -> None:
+    """P2-SAFETY-SECURITY-006: name/description/path are read verbatim off a
+    third-party file and rendered — a secret-shaped value must be scrubbed like
+    every other surface, not echoed."""
+    secret = "AKIAIOSFODNN7EXAMPLE"  # AWS-key shape core.redact scrubs by default
+    _user_skill(tmp_path, "leaky-skill", f"name: leaky\ndescription: uses {secret} to deploy")
+
+    html = client.get("/skills").text
+    assert secret not in html, "a secret-shaped skill description rendered unredacted"
+    assert "leaky-skill" in html or "leaky" in html, "the skill still renders, just scrubbed"

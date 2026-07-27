@@ -111,7 +111,7 @@ def test_capture_path_rejects_escapes_and_subdirs(store_root: Path) -> None:
     ``store.toml``, which really exists — and a subdir dip is refused too."""
     raw_dir = (store.memory_dir(PROJECT, store_root) / "raw").resolve()
     good = store.list_raw(store_root, PROJECT, unconsumed_only=False)[0].file_path.name
-    assert _capture_path(raw_dir, good) is not None, "a real capture must resolve"
+    assert _capture_path(raw_dir, good, store_root) is not None, "a real capture must resolve"
 
     escape_target = store_root.resolve() / "store.toml"
     assert escape_target.is_file(), "precondition: the escape target really exists"
@@ -119,10 +119,49 @@ def test_capture_path_rejects_escapes_and_subdirs(store_root: Path) -> None:
     # the guard must refuse both even though the target is a real file.
     rel_escape = relpath(escape_target, raw_dir)
     assert ".." in rel_escape and (raw_dir / rel_escape).resolve() == escape_target
-    assert _capture_path(raw_dir, rel_escape) is None, "escaped raw/ via .. — must be refused"
-    assert _capture_path(raw_dir, str(escape_target)) is None, "absolute escape — must be refused"
-    assert _capture_path(raw_dir, "..") is None
-    assert _capture_path(raw_dir, "nested/deeper.md") is None, "subdir dip — must be refused"
+    assert _capture_path(raw_dir, rel_escape, store_root) is None, "escaped raw/ via .."
+    assert _capture_path(raw_dir, str(escape_target), store_root) is None, "absolute escape"
+    assert _capture_path(raw_dir, "..", store_root) is None
+    assert _capture_path(raw_dir, "nested/deeper.md", store_root) is None, "subdir dip"
+
+
+def test_capture_path_rejects_a_symlinked_raw_dir(tmp_path: Path, store_root: Path) -> None:
+    """P2-SAFETY-SECURITY-003: if the project's ``raw/`` is itself a symlink to an
+    external directory, a file sitting *directly* inside that resolved directory
+    still passes the immediate-parent check — but it is outside the validated store
+    and must be refused by the store-root containment guard."""
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "secret.md").write_text(
+        "---\nsession_id: x\n---\n\nexternal loot", encoding="utf-8"
+    )
+    real_raw = store.memory_dir(PROJECT, store_root) / "raw"
+    # Replace the real raw/ with a symlink to the external dir.
+    for f in real_raw.iterdir():
+        f.unlink()
+    real_raw.rmdir()
+    real_raw.symlink_to(external, target_is_directory=True)
+
+    raw_dir = real_raw.resolve()  # resolves to `external`, outside the store
+    assert _capture_path(raw_dir, "secret.md", store_root) is None, "symlinked raw/ must be refused"
+
+
+def test_symlinked_raw_dir_is_404_over_http(tmp_path: Path, store_root: Path) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "secret.md").write_text(
+        f"---\nsession_id: x\n---\n\nexternal loot {_SECRET}", encoding="utf-8"
+    )
+    real_raw = store.memory_dir(PROJECT, store_root) / "raw"
+    for f in real_raw.iterdir():
+        f.unlink()
+    real_raw.rmdir()
+    real_raw.symlink_to(external, target_is_directory=True)
+
+    client = TestClient(build_app(store_root), base_url="http://127.0.0.1:8765")
+    r = client.get(f"/sessions/{PROJECT}/secret.md")
+    assert r.status_code == 404
+    assert "external loot" not in r.text
 
 
 def test_traversal_url_is_404_over_http(client: TestClient) -> None:

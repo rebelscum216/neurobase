@@ -18,6 +18,8 @@ from typing import Any
 
 import yaml
 
+from neurobase.core import store
+
 # Leading YAML frontmatter, tolerant of a BOM and whitespace around the fences,
 # and not requiring the blank line the store's stricter _DOC_RE wants.
 _FM_RE = re.compile(r"\A﻿?---[ \t]*\n(.*?)\n---[ \t]*(?:\n|$)", re.DOTALL)
@@ -48,11 +50,17 @@ def _tilde(path: Path) -> str:
         return str(path)
 
 
-def _frontmatter(path: Path) -> dict[str, Any]:
+def _frontmatter(path: Path) -> dict[str, Any] | None:
+    """Parsed leading YAML frontmatter as a dict; ``{}`` when the file is readable
+    but carries no usable frontmatter (no fences / non-dict / bad YAML — a
+    legitimate hand-authored external skill); ``None`` when the file itself cannot
+    be read or decoded as UTF-8, so the caller **skips that skill** rather than
+    crashing the whole gallery on it (Codex P2-CORRECTNESS-004). ``UnicodeError``
+    is a ``ValueError``, not an ``OSError``, so it needs its own arm here."""
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
+    except (OSError, UnicodeError):
+        return None
     match = _FM_RE.match(text)
     if not match:
         return {}
@@ -61,6 +69,23 @@ def _frontmatter(path: Path) -> dict[str, Any]:
     except yaml.YAMLError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _managed_slug(fm: dict[str, Any]) -> str | None:
+    """The canonical Neurobase slug this ``SKILL.md`` legitimately claims, or
+    ``None`` when it is external. Mirrors the emitter's **strict** ownership
+    predicate (``recommender/emitters.py``): only ``neurobase_managed`` being the
+    boolean ``True`` (not a truthy string like ``"false"``) *and* a valid
+    canonical ``neurobase_slug`` counts as managed. This is what stops a foreign or
+    type-confused frontmatter from spoofing "Neurobase-managed" or suppressing a
+    genuine drift card merely by carrying a matching ``neurobase_slug`` (Codex
+    P2-CORRECTNESS-005)."""
+    if fm.get("neurobase_managed") is not True:
+        return None
+    slug = fm.get("neurobase_slug")
+    if isinstance(slug, str) and store.SLUG_RE.match(slug):
+        return slug
+    return None
 
 
 def _scan(skills_dir: Path, scope: str, project: str | None) -> list[InstalledSkill]:
@@ -74,7 +99,13 @@ def _scan(skills_dir: Path, scope: str, project: str | None) -> list[InstalledSk
         if not skill_md.is_file():
             continue
         fm = _frontmatter(skill_md)
-        nb_slug = fm.get("neurobase_slug")
+        if fm is None:
+            continue  # unreadable/undecodable SKILL.md — skip, never fatal (P2-CORRECTNESS-004)
+        # Ownership is the strict emitter predicate, and `nb_slug` is retained ONLY
+        # when it is genuinely managed — so a foreign skill carrying a stray
+        # `neurobase_slug` neither shows as managed nor pollutes `present_nb`
+        # (Codex P2-CORRECTNESS-005).
+        nb_slug = _managed_slug(fm)
         out.append(
             InstalledSkill(
                 slug=sub.name,
@@ -83,8 +114,8 @@ def _scan(skills_dir: Path, scope: str, project: str | None) -> list[InstalledSk
                 scope=scope,
                 project=project,
                 path=_tilde(skill_md),
-                managed=bool(fm.get("neurobase_managed")),
-                nb_slug=str(nb_slug) if nb_slug else None,
+                managed=nb_slug is not None,
+                nb_slug=nb_slug,
             )
         )
     return out

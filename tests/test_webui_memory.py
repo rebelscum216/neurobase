@@ -126,6 +126,46 @@ def test_non_slug_fact_name_is_404(client: TestClient) -> None:
     assert client.get(f"/memory/{PROJECT}/Not.A.Slug").status_code == 404
 
 
+def test_symlinked_curated_dir_fact_is_404(tmp_path: Path, store_root: Path) -> None:
+    """P2-SAFETY-SECURITY-003: a valid slug can't escape ``curated/``, but if
+    ``curated/`` itself is a symlink out of the store, the resolved fact file is
+    outside the validated root and must not be read/rendered."""
+    external = tmp_path / "external-curated"
+    external.mkdir()
+    (external / "loot.md").write_text(
+        f"---\nname: loot\nstatus: active\n---\n\nexternal fact {_SECRET}", encoding="utf-8"
+    )
+    curated = store.memory_dir(PROJECT, store_root) / "curated"
+    for f in curated.iterdir():
+        f.unlink()
+    curated.rmdir()
+    curated.symlink_to(external, target_is_directory=True)
+
+    client = TestClient(build_app(store_root), base_url="http://127.0.0.1:8765")
+    r = client.get(f"/memory/{PROJECT}/loot")
+    assert r.status_code == 404
+    assert "external fact" not in r.text and _SECRET not in r.text
+
+
+def test_symlinked_nodes_dir_is_skipped(tmp_path: Path, store_root: Path) -> None:
+    """P2-SAFETY-SECURITY-003: a symlinked ``nodes/`` directory resolves outside
+    the store, so its entries are skipped rather than rendered on the overview."""
+    external = tmp_path / "external-nodes"
+    external.mkdir()
+    (external / "loot.md").write_text(
+        "---\nname: loot\n---\n\nEXTERNAL NODE BODY", encoding="utf-8"
+    )
+    nodes = store.memory_dir(PROJECT, store_root) / "nodes"
+    for f in nodes.iterdir():
+        f.unlink()
+    nodes.rmdir()
+    nodes.symlink_to(external, target_is_directory=True)
+
+    client = TestClient(build_app(store_root), base_url="http://127.0.0.1:8765")
+    html = client.get("/memory").text
+    assert "EXTERNAL NODE BODY" not in html, "a symlinked nodes/ dir must not be rendered"
+
+
 def test_search_finds_a_fact_and_links_to_it(client: TestClient) -> None:
     r = client.get("/search", params={"q": "uv"})
     assert r.status_code == 200

@@ -1383,10 +1383,10 @@ append-only pass log (`curator/engine.py:_log_pass`).
 |---|---|---|
 | `at` | ISO8601 | Event time |
 | `slug` | str | Proposal slug |
-| `event` | `proposed \| accepted \| rejected \| edited` | One line per event; a proposal accumulates multiple lines over its life |
-| `candidate_type` | str, optional | Carried for the miner's ledger-summary input (§12.5) |
+| `event` | `proposed \| accepted \| rejected \| edited \| reverted \| reopened` | One line per event; a proposal accumulates multiple lines over its life. `reverted` (ADR-0020, G2) records a drift-repair `accepted → proposed`; `reopened` (ADR-0024) records the one sanctioned `rejected → proposed`. The log is append-only: a transition adds exactly one line and never rewrites a prior one |
+| `candidate_type` | str, optional | Carried for the miner's ledger-summary input (§12.5); also on a `reopened` line |
 | `target` | str, optional | Resolved target, present from `accepted` onward |
-| `reason` | str, optional | `reject --reason TEXT` |
+| `reason` | str, optional | The `reject --reason TEXT` on a `rejected` line; the artifact-liveness state (`missing`/`orphaned`/…) that justified a `reverted` line (ADR-0020) |
 | `installed_hash` | str, optional | `accepted` only (ADR-0011): sha256 of the artifact's exact bytes at accept time, for §12.9's survival check. Absent on an `accepted` line written before this field existed — survival falls back to existence-only for those, never treated as a parse error |
 
 ```jsonl
@@ -1399,7 +1399,9 @@ append-only pass log (`curator/engine.py:_log_pass`).
 persist the user's revised body/draft on the proposal file itself, not just in
 the ledger (workstream F: "edit updates the proposal body/draft and appends an
 edited ledger event"). `accept`/`reject` MUST each append exactly one line
-(workstream F: "reject updates proposal + ledger").
+(workstream F: "reject updates proposal + ledger"). `revert` (ADR-0020) and
+`reopen` (ADR-0024) likewise MUST each append exactly one line and leave every
+prior line untouched.
 
 A malformed line anywhere in the ledger (partial append, corrupt JSON — the
 ledger accumulates across many independent CLI invocations, so this is a

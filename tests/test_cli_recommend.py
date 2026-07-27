@@ -18,7 +18,11 @@ from neurobase.recommender.ranker import RankedCandidate, Scores
 runner = CliRunner()
 
 
-def _ranked(slug: str = "prefer-uv-run", draft: str = "Always use uv run.") -> RankedCandidate:
+def _ranked(
+    slug: str = "prefer-uv-run",
+    draft: str = "Always use uv run.",
+    supersedes: list[str] | None = None,
+) -> RankedCandidate:
     return RankedCandidate(
         slug=slug,
         type="rule",
@@ -28,7 +32,7 @@ def _ranked(slug: str = "prefer-uv-run", draft: str = "Always use uv run.") -> R
         draft=draft,
         target="AGENTS.md",
         project="neurobase",
-        supersedes=[],
+        supersedes=supersedes or [],
         evidence=[EvidenceRef.proposal("old-example")],
         scores=Scores(3, 2, 1.0, 6.0),
         sessions=2,
@@ -214,6 +218,76 @@ def test_show_redacts_stored_body_with_configured_extra_pattern(
     assert result.exit_code == 0
     assert "SEKRET-4242" not in result.output
     assert "[REDACTED:custom]" in result.output
+
+
+# --- recommend reopen (ADR-0024, §12.7) — Codex P2-TEST-GAP-008 --------------
+# The public command was previously exercised only at the function level; these
+# drive the CLI itself: success on rejected, refusal on every other status
+# (proposed / accepted / superseded) and on a missing proposal, with no write on
+# the refusal path.
+
+
+def test_reopen_returns_a_rejected_proposal_to_the_queue(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()])
+    proposals.reject_proposal(root, "prefer-uv-run", reason="not yet")
+
+    result = runner.invoke(app, ["recommend", "reopen", "prefer-uv-run", "--root", str(root)])
+
+    assert result.exit_code == 0
+    assert "rejected → proposed" in result.output
+    assert _status(root) == "proposed"
+    # exactly one reopened line, and the prior rejection is preserved
+    events = [e["event"] for e in proposals.ledger_history(root, "prefer-uv-run")]
+    assert events == ["proposed", "rejected", "reopened"]
+
+
+def test_reopen_proposed_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()])  # still proposed
+
+    result = runner.invoke(app, ["recommend", "reopen", "prefer-uv-run", "--root", str(root)])
+
+    assert result.exit_code == 1
+    assert "only a rejected proposal" in result.output
+    assert _status(root) == "proposed"
+    assert "reopened" not in [e["event"] for e in proposals.ledger_history(root, "prefer-uv-run")]
+
+
+def test_reopen_accepted_is_refused_and_writes_nothing(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    _accept_via_cli(tmp_path, root)  # status accepted, artifact live
+
+    result = runner.invoke(app, ["recommend", "reopen", "prefer-uv-run", "--root", str(root)])
+
+    assert result.exit_code == 1
+    assert "status is accepted" in result.output
+    assert _status(root) == "accepted"
+    assert "reopened" not in [e["event"] for e in proposals.ledger_history(root, "prefer-uv-run")]
+
+
+def test_reopen_superseded_is_refused_and_writes_nothing(tmp_path: Path) -> None:
+    """§12.7 names superseded as permanently non-reopenable — the CLI must refuse
+    it and leave the proposal + ledger untouched."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked(slug="old-rule")])
+    proposals.write_ranked(root, [_ranked(slug="new-rule", supersedes=["old-rule"])])
+    assert _status(root, "old-rule") == "superseded"  # precondition
+    ledger_before = proposals.ledger_history(root, "old-rule")
+
+    result = runner.invoke(app, ["recommend", "reopen", "old-rule", "--root", str(root)])
+
+    assert result.exit_code == 1
+    assert "status is superseded" in result.output
+    assert _status(root, "old-rule") == "superseded"
+    assert proposals.ledger_history(root, "old-rule") == ledger_before
+
+
+def test_reopen_missing_proposal_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    result = runner.invoke(app, ["recommend", "reopen", "does-not-exist", "--root", str(root)])
+    assert result.exit_code == 1
+    assert "not found or malformed" in result.output
 
 
 def test_show_and_list_skip_unparseable_yaml_proposal(tmp_path: Path) -> None:

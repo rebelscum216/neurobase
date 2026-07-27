@@ -290,6 +290,23 @@ def test_method_mark_consumed_rejects_path_outside_the_handle_store(
     assert len(other.list_raw("proj", unconsumed_only=True)) == 1
 
 
+def test_contains_is_true_within_and_false_outside(handle: StoreHandle, tmp_path: Path) -> None:
+    inside = handle.root / "proj" / "raw" / "cap.md"
+    assert handle.contains(handle.root) is True
+    assert handle.contains(inside) is True
+    assert handle.contains(tmp_path / "elsewhere" / "x.md") is False
+
+
+def test_contains_fails_closed_on_a_symlink_loop(handle: StoreHandle) -> None:
+    """A path whose ``resolve()`` raises (a self-referential symlink → RuntimeError)
+    is treated as NOT contained rather than letting the error escape — so every
+    filtering consumer stays fail-soft (Codex P2-REGRESSION-009)."""
+    loop = handle.root / "loop.md"
+    loop.parent.mkdir(parents=True, exist_ok=True)
+    loop.symlink_to(loop)  # self-loop
+    assert handle.contains(loop) is False  # no RuntimeError escapes
+
+
 def test_method_upsert_then_list_curated_round_trip(handle: StoreHandle) -> None:
     handle.ensure_tree("proj")
     handle.upsert_curated("proj", "a-fact", "the body", provenance=["raw/x.md"])

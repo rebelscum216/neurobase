@@ -552,7 +552,14 @@ async def _edit_view(request: Request) -> Response:
     form = await request.form()
     draft_raw = form.get("draft")
     draft = draft_raw if isinstance(draft_raw, str) else ""
-    if not proposals.save_edited_draft(root, slug, draft):
+    try:
+        saved = proposals.save_edited_draft(root, slug, draft)
+    except proposals.EditBlockedError as exc:
+        # The proposal was decided (e.g. rejected) between this handler's earlier
+        # status check and the locked write — a decided-status conflict is a 409,
+        # not the 400 reserved for malformed input (§14, Codex P2-UX-API-CONTRACT-010).
+        return _error_response(request, 409, str(exc))
+    if not saved:
         return _error_response(request, 400, "could not save edited draft")
     return _redirect_with_flash(slug, "Draft updated.")
 

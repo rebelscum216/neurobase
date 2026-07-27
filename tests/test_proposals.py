@@ -669,7 +669,10 @@ def test_concurrent_edit_and_reject_never_edits_a_rejected_draft(tmp_path: Path)
 
     def do_edit() -> None:
         barrier.wait()
-        proposals.save_edited_draft(root, "prefer-uv-run", "revised draft body")
+        # If the reject wins the lock first, the in-lock guard raises
+        # EditBlockedError; that is the correct refusal, not a test failure.
+        with contextlib.suppress(proposals.EditBlockedError):
+            proposals.save_edited_draft(root, "prefer-uv-run", "revised draft body")
 
     def do_reject() -> None:
         barrier.wait()
@@ -689,14 +692,17 @@ def test_concurrent_edit_and_reject_never_edits_a_rejected_draft(tmp_path: Path)
 
 def test_save_edited_draft_refuses_a_rejected_proposal(tmp_path: Path) -> None:
     """The authoritative in-lock guard directly: even called straight on a rejected
-    proposal (bypassing the route/CLI pre-check), the save refuses and writes
-    nothing (Codex P1-DATA-INTEGRITY-001, round 2)."""
+    proposal (bypassing the route/CLI pre-check), the save raises the typed
+    blocked-status error (→ caller's 409) and writes nothing (Codex
+    P1-DATA-INTEGRITY-001 r2 / P2-UX-API-CONTRACT-010 r3)."""
     root = tmp_path / "store"
     proposals.write_ranked(root, [_ranked()], now=NOW)
     proposals.reject_proposal(root, "prefer-uv-run", now=NOW)
     ledger_before = _ledger_events(root)
 
-    assert proposals.save_edited_draft(root, "prefer-uv-run", "sneaky revision") is False
+    with pytest.raises(proposals.EditBlockedError) as exc_info:
+        proposals.save_edited_draft(root, "prefer-uv-run", "sneaky revision")
+    assert exc_info.value.status == "rejected"
     assert _ledger_events(root) == ledger_before, "a blocked edit appended a ledger line"
 
 

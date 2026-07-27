@@ -500,6 +500,20 @@ def replace_draft(body: str, draft: str) -> str | None:
     return f"{body[: start + len(DRAFT_START)]}\n{draft.rstrip()}\n{body[end:]}"
 
 
+class EditBlockedError(ValueError):
+    """``save_edited_draft`` refused because the proposal is in a blocked status
+    (rejected / superseded) at write time. Distinct from the ``False`` returned for
+    a malformed/missing draft so a caller can map it to a named-status **409** — the
+    §14 status for a decided-status conflict — rather than the generic 400 reserved
+    for malformed input (Codex P2-UX-API-CONTRACT-010). Carries the observed
+    ``status`` so the message names it, and so the caller need not re-read (which
+    would reintroduce a race)."""
+
+    def __init__(self, slug: str, status: str) -> None:
+        self.status = status
+        super().__init__(f"cannot edit proposal {slug!r}: status is {status}")
+
+
 def save_edited_draft(root: Path, slug: str, draft: str, *, now: datetime | None = None) -> bool:
     """Redact and persist one user edit, appending exactly one ledger event.
 
@@ -507,14 +521,17 @@ def save_edited_draft(root: Path, slug: str, draft: str, *, now: datetime | None
     re-read at write time — not only in the route/CLI before the call. Otherwise a
     caller that checked `proposed` and then raced a concurrent `reject` would still
     save, mutating a now-rejected draft and appending `edited` (Codex
-    P1-DATA-INTEGRITY-001, round 2). Returns False on a blocked status so the
-    existing "could not save" path fail-closes."""
+    P1-DATA-INTEGRITY-001, round 2). A blocked status raises
+    :class:`EditBlockedError` (→ caller's 409); a malformed/missing draft returns
+    False (→ caller's 400), keeping those two failure modes distinct
+    (P2-UX-API-CONTRACT-010)."""
     with _lifecycle_lock(root):
         doc = load_proposal(root, slug)
         if doc is None:
             return False
-        if str(doc.get("status") or "proposed") in EDIT_BLOCKED_STATUSES:
-            return False
+        status = str(doc.get("status") or "proposed")
+        if status in EDIT_BLOCKED_STATUSES:
+            raise EditBlockedError(slug, status)
         updated = replace_draft(doc.body, redact_body(draft))
         if updated is None:
             return False

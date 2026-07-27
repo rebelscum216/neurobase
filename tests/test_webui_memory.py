@@ -199,6 +199,19 @@ def test_symlinked_curated_dir_not_indexed_by_search(tmp_path: Path, store_root:
     assert "EXTERNAL CURATED BODY" not in r.text and "leaky-external" not in r.text
 
 
+def test_search_survives_a_symlink_loop_node(store_root: Path) -> None:
+    """P2-REGRESSION-009: a self-referential `nodes/*.md` symlink (resolve() →
+    RuntimeError) must not turn /search into a 500 — containment fails closed and
+    skips it, and the healthy fact still surfaces."""
+    loop = store.memory_dir(PROJECT, store_root) / "nodes" / "loop.md"
+    loop.symlink_to(loop)  # self-loop
+
+    client = TestClient(build_app(store_root), base_url="http://127.0.0.1:8765")
+    r = client.get("/search", params={"q": "uv"})
+    assert r.status_code == 200, "a symlink-loop node 500'd /search"
+    assert "prefer-uv" in r.text, "the healthy fact should still be found"
+
+
 def test_search_finds_a_fact_and_links_to_it(client: TestClient) -> None:
     r = client.get("/search", params={"q": "uv"})
     assert r.status_code == 200

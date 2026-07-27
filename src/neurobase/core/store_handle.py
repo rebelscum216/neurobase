@@ -175,9 +175,20 @@ class StoreHandle:
         whose own root is reached through a symlink (e.g. macOS ``/var`` →
         ``/private/var``) still matches, because the root is resolved too. The
         predicate form of :meth:`_require_within_store`, for read paths that filter
-        entries rather than raise (Codex P2-SAFETY-SECURITY-003)."""
-        root = self.root.resolve()
-        target = path.resolve()
+        entries rather than raise (Codex P2-SAFETY-SECURITY-003).
+
+        Fails **closed**: a ``Path.resolve()`` that raises — a self-referential
+        symlink loop (``RuntimeError``) or an unreadable parent (``OSError``) — is
+        a hostile/unreadable entry, so it is treated as *not* contained rather than
+        letting the error escape. That keeps every filtering consumer fail-soft
+        (spec §13): before this predicate existed, ``store.read_doc`` swallowed the
+        loop's ``OSError`` and Search skipped it; the predicate must not regress
+        that into a 500 / MCP ``ToolError`` (Codex P2-REGRESSION-009)."""
+        try:
+            root = self.root.resolve()
+            target = path.resolve()
+        except (OSError, RuntimeError):
+            return False
         return target == root or target.is_relative_to(root)
 
     def _require_within_store(self, path: Path) -> None:

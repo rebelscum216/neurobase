@@ -687,6 +687,47 @@ def test_edit_round_trips_new_draft(client: TestClient, app: Starlette, seed: Se
     assert history[-1]["event"] == "edited"
 
 
+def test_edit_race_to_rejected_returns_409_not_400(
+    client: TestClient, app: Starlette, seed: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2-UX-API-CONTRACT-010: if the proposal is decided (rejected) *after* the
+    route's status pre-check but *before* the locked save, the in-lock guard
+    refuses — and that decided-status conflict must surface as a named 409, not the
+    generic 400 reserved for a malformed draft (§14)."""
+    from neurobase.webui import routes
+
+    def _raise_blocked(*_a: object, **_k: object) -> bool:
+        raise proposals.EditBlockedError(seed.proposed_slug, "rejected")
+
+    monkeypatch.setattr(routes.proposals, "save_edited_draft", _raise_blocked)
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/edit",
+        data={"csrf_token": app.state.csrf_token, "draft": "a new draft"},
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 409
+    assert "status is rejected" in response.text
+
+
+def test_edit_with_unsavable_draft_still_returns_400(
+    client: TestClient, app: Starlette, seed: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The malformed/missing-draft failure mode keeps its 400 — only the
+    blocked-status conflict became a 409 (P2-UX-API-CONTRACT-010)."""
+    from neurobase.webui import routes
+
+    monkeypatch.setattr(routes.proposals, "save_edited_draft", lambda *a, **k: False)
+    response = client.post(
+        f"/suggestions/{seed.proposed_slug}/edit",
+        data={"csrf_token": app.state.csrf_token, "draft": "a new draft"},
+        headers={"origin": str(client.base_url)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "could not save edited draft" in response.text
+
+
 def _inject_secret_into_draft(seed: Seed) -> str:
     """Write a secret directly into the on-disk managed draft region — the
     legacy/hand-edited shape that bypassed every redacting write path

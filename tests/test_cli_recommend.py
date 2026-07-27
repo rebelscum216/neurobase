@@ -91,6 +91,28 @@ def test_edit_updates_only_draft_redacts_and_logs(
     assert [event["event"] for event in history].count("edited") == 1
 
 
+def test_edit_race_to_rejected_keeps_a_named_blocked_status_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2-UX-API-CONTRACT-010: if a reject lands between the CLI's status pre-check
+    and the locked save, the in-lock guard raises `EditBlockedError`; the CLI must
+    keep the named blocked-status message, not the generic "could not save"."""
+    root = tmp_path / "store"
+    proposals.write_ranked(root, [_ranked()], now=None)  # still proposed → pre-check passes
+    monkeypatch.setattr(cli_module.click, "edit", lambda *a, **k: "revised draft")
+
+    def _raise_blocked(*_a: object, **_k: object) -> bool:
+        raise proposals.EditBlockedError("prefer-uv-run", "rejected")
+
+    monkeypatch.setattr(cli_module.proposals, "save_edited_draft", _raise_blocked)
+
+    result = runner.invoke(app, ["recommend", "edit", "prefer-uv-run", "--root", str(root)])
+
+    assert result.exit_code == 1
+    assert "status is rejected" in result.output
+    assert "could not save" not in result.output
+
+
 def test_reject_updates_proposal_and_ledger(tmp_path: Path) -> None:
     root = tmp_path / "store"
     proposals.write_ranked(root, [_ranked()])

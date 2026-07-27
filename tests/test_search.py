@@ -143,3 +143,17 @@ def test_unreadable_curated_entry_is_skipped_search_survives(root: Path) -> None
     (store.memory_dir("alpha", root) / "curated" / "bad.md").mkdir(parents=True, exist_ok=True)
     hits = search.search(open_store(root, StoreMode.READ), "keyword", project="alpha")
     assert [h.name for h in hits] == ["good-node"]
+
+
+def test_symlink_loop_node_is_skipped_search_survives(root: Path) -> None:
+    """A self-referential ``nodes/*.md`` symlink makes ``Path.resolve()`` raise a
+    ``RuntimeError`` (symlink loop). The containment predicate must fail closed and
+    skip it rather than let the error escape as a 500 / MCP ToolError — spec §13
+    fail-soft (Codex P2-REGRESSION-009). The healthy fact still surfaces."""
+    _curated(root, "alpha", "good-fact", "shared keyword here")
+    loop = store.memory_dir("alpha", root) / "nodes" / "loop.md"
+    loop.parent.mkdir(parents=True, exist_ok=True)
+    loop.symlink_to(loop)  # self-loop → resolve() raises RuntimeError
+
+    hits = search.search(open_store(root, StoreMode.READ), "keyword", project="alpha")
+    assert [h.name for h in hits] == ["good-fact"]

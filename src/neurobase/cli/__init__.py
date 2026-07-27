@@ -1010,7 +1010,15 @@ def recommend_edit(slug: str, root: str | None = typer.Option(None, "--root")) -
     if edited is None:
         typer.echo(draft)
         return
-    if not proposals.save_edited_draft(handle.root, slug, edited):
+    try:
+        saved = proposals.save_edited_draft(handle.root, slug, edited)
+    except proposals.EditBlockedError as exc:
+        # Decided-status conflict raced in after the pre-check — keep the named
+        # blocked-status error rather than the generic "could not save"
+        # (Codex P2-UX-API-CONTRACT-010).
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    if not saved:
         typer.secho("could not save edited draft", err=True)
         raise typer.Exit(code=1)
     typer.echo(f"Edited proposal {slug}.")

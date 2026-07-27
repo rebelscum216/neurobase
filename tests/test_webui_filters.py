@@ -8,17 +8,21 @@ from neurobase.webui.filters import human_datetime
 
 
 @pytest.mark.parametrize(
-    ("iso", "expected"),
+    ("iso", "date", "time"),
     [
-        ("2026-07-15T13:20:33Z", "July 15, 2026<br>1:20pm"),  # date over time
-        ("2026-07-15T12:07:00Z", "July 15, 2026<br>12:07pm"),  # noon is 12pm
-        ("2026-07-15T00:07:00Z", "July 15, 2026<br>12:07am"),  # midnight is 12am
-        ("2026-07-01T09:05:00Z", "July 1, 2026<br>9:05am"),  # no leading zero on day/hour
-        ("2026-12-31T23:59:00+00:00", "December 31, 2026<br>11:59pm"),  # offset form parses too
+        ("2026-07-15T13:20:33Z", "July 15, 2026", "1:20pm"),
+        ("2026-07-15T12:07:00Z", "July 15, 2026", "12:07pm"),  # noon is 12pm
+        ("2026-07-15T00:07:00Z", "July 15, 2026", "12:07am"),  # midnight is 12am
+        ("2026-07-01T09:05:00Z", "July 1, 2026", "9:05am"),  # no leading zero on day/hour
+        ("2026-12-31T23:59:00+00:00", "December 31, 2026", "11:59pm"),  # offset form parses
     ],
 )
-def test_human_datetime_formats(iso: str, expected: str) -> None:
-    assert human_datetime(iso) == expected
+def test_human_datetime_formats(iso: str, date: str, time: str) -> None:
+    out = human_datetime(iso)
+    # date over time, each in its own nowrap span (so a narrow column can't wrap it)
+    assert f'<span class="hd-date">{date}</span>' in out
+    assert f'<span class="hd-time">{time}</span>' in out
+    assert out.index("hd-date") < out.index("hd-time"), "date must come before time"
 
 
 def test_human_datetime_empty_is_dash() -> None:

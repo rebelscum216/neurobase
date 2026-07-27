@@ -32,4 +32,8 @@ def human_datetime(value: Any) -> str:
     meridiem = "am" if dt.hour < 12 else "pm"
     date = f"{dt.strftime('%B')} {dt.day}, {dt.year}"
     time = f"{hour}:{dt.minute:02d}{meridiem}"
-    return Markup("{}<br>{}").format(escape(date), escape(time))
+    # Two blocks (date over time), each nowrap so a narrow column can't wrap the
+    # year onto its own line — see the .hd-date/.hd-time rules in base.html.
+    return Markup('<span class="hd-date">{}</span><span class="hd-time">{}</span>').format(
+        escape(date), escape(time)
+    )

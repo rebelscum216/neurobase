@@ -1,40 +1,18 @@
 {% extends "base.html" %}
-{% block title %}Neurobase UI — {{ slug }}{% endblock %}
-{% block crumb %}Memory / {{ slug }}{% endblock %}
+{% block title %}Neurobase UI — {{ sel.slug }}{% endblock %}
+{% block crumb %}Memory / {{ sel.slug }}{% endblock %}
 {% block page_class %}narrow{% endblock %}
 {% block content %}
 <div class="hero">
   <div>
-    <h1 class="mono">{{ slug }}</h1>
-    <p class="hero-sub">{{ project }} · {{ status }} · last by {{ agent_last }}</p>
+    <h1 class="mono">{{ sel.slug }}</h1>
+    <p class="hero-sub">{{ sel.project }} · {{ sel.status }} · last by {{ sel.agent_last }}</p>
   </div>
   <div class="hero-pills">
-    <a class="hero-pill" href="/memory">← all memory</a>
-    {% if updated_at %}<span class="hero-pill">updated {{ updated_at | humandate }}</span>{% endif %}
+    <a class="hero-pill" href="/memory/{{ sel.project }}/{{ sel.slug }}">← back to Memory</a>
+    {% if sel.updated_at %}<span class="hero-pill">updated {{ sel.updated_at | humandate }}</span>{% endif %}
   </div>
 </div>
 
-<section class="card">
-  <div class="card-head"><div><h2>Fact</h2><p>Redacted at display</p></div></div>
-  <pre class="rawbody">{{ body }}</pre>
-</section>
-
-<section class="card">
-  <div class="card-head"><div><h2>Provenance</h2><p>The raw captures this fact folded from</p></div></div>
-  {% if provenance %}
-  <ul class="prov">
-    {% for p in provenance %}
-    <li class="mono">{% if p.href %}<a href="{{ p.href }}">{{ p.label }}</a>{% else %}{{ p.label }}{% endif %}</li>
-    {% endfor %}
-  </ul>
-  {% else %}
-  <p>No provenance recorded.</p>
-  {% endif %}
-  {% if supersedes %}
-  <div class="card-head" style="margin-top: 16px"><div><h2>Supersedes</h2><p>Facts this one replaced</p></div></div>
-  <ul class="prov">
-    {% for s in supersedes %}<li class="mono">{{ s }}</li>{% endfor %}
-  </ul>
-  {% endif %}
-</section>
+{% include "_memory_card.html" %}
 {% endblock %}

@@ -590,19 +590,31 @@ def _read_nodes(handle: Any, project: str) -> list[dict[str, Any]]:
     return out
 
 
-async def _list_memory(request: Request) -> Response:
-    root = _root(request)
-    handle = open_store(root, StoreMode.READ)
-    groups: list[dict[str, Any]] = []
+def _memory_facts(handle: Any) -> list[dict[str, Any]]:
+    """Every active curated fact across projects, newest-first. Fail-soft per
+    project so one unreadable project can't blank the whole surface."""
+    facts: list[dict[str, Any]] = []
     for project in sorted(handle.load_registry()):
         try:
-            facts = [_fact_row(project, d) for d in handle.list_curated(project, active_only=True)]
+            facts.extend(_fact_row(project, d) for d in handle.list_curated(project, True))
         except (OSError, ValueError):
-            continue  # one unreadable project must not blank the whole surface
-        facts.sort(key=lambda f: str(f["updated_at"] or ""), reverse=True)
-        groups.append({"project": project, "nodes": _read_nodes(handle, project), "facts": facts})
-    total = sum(len(g["facts"]) for g in groups)
-    context = {"groups": groups, "total": total}
+            continue
+    facts.sort(key=lambda f: str(f["updated_at"] or ""), reverse=True)
+    return facts
+
+
+def _all_nodes(handle: Any) -> list[dict[str, Any]]:
+    """Every project's synthesized node — the default right-pane overview until a
+    fact is selected."""
+    nodes: list[dict[str, Any]] = []
+    for project in sorted(handle.load_registry()):
+        nodes.extend({**n, "project": project} for n in _read_nodes(handle, project))
+    return nodes
+
+
+async def _list_memory(request: Request) -> Response:
+    handle = open_store(_root(request), StoreMode.READ)
+    context = {"facts": _memory_facts(handle), "nodes": _all_nodes(handle), "sel": None}
     return _templates(request).TemplateResponse(request, "memory_list.html", context)
 
 
@@ -628,7 +640,7 @@ async def _memory_detail(request: Request) -> Response:
         return _error_response(request, 404, "This fact is unreadable.")
     provenance = doc.get("provenance") if isinstance(doc.get("provenance"), list) else []
     supersedes = doc.get("supersedes") if isinstance(doc.get("supersedes"), list) else []
-    context = {
+    sel = {
         "project": project,
         "slug": str(doc.get("name") or slug),
         "status": str(doc.get("status") or "active"),
@@ -638,7 +650,15 @@ async def _memory_detail(request: Request) -> Response:
         "supersedes": [str(s) for s in supersedes],
         "body": _redact_display(doc.body),
     }
-    return _templates(request).TemplateResponse(request, "memory_detail.html", context)
+    # ?fragment=1 → just the right-pane HTML (swapped in by the list's inline JS);
+    # ?view=full → the standalone page; otherwise the fact opens inline in the
+    # Memory two-pane, facts list still on the left.
+    if request.query_params.get("fragment"):
+        return _templates(request).TemplateResponse(request, "_memory_pane.html", {"sel": sel})
+    if request.query_params.get("view") == "full":
+        return _templates(request).TemplateResponse(request, "memory_detail.html", {"sel": sel})
+    context = {"facts": _memory_facts(handle), "nodes": _all_nodes(handle), "sel": sel}
+    return _templates(request).TemplateResponse(request, "memory_list.html", context)
 
 
 def _prov_link(project: str, entry: object) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Neurobase UI — Memory{% endblock %}
 {% block crumb %}Memory{% endblock %}
+{% block page_class %}wide{% endblock %}
 {% block content %}
 <div class="hero">
   <div>
@@ -8,55 +9,57 @@
     <p class="hero-sub">Curated facts and the synthesized node the curator keeps in sync with them.</p>
   </div>
   <div class="hero-pills">
-    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ total }} active facts</span>
-    <span class="hero-pill">{{ groups | length }} project{{ '' if groups | length == 1 else 's' }}</span>
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ facts | length }} active facts</span>
+    <span class="hero-pill">{{ nodes | length }} node{{ '' if nodes | length == 1 else 's' }}</span>
   </div>
 </div>
 
-{% if not groups %}
-<section class="card">
-  <p>No curated memory yet. Run <code class="mono">neurobase curate</code> to fold sessions into facts.</p>
-</section>
-{% endif %}
-
-{% for g in groups %}
-<div class="dash-lower">
-  {% for node in g.nodes %}
-  <section class="card">
+<div class="split">
+  <section class="card split-list">
     <div class="card-head">
-      <div><h2>{{ g.project }} · {{ node.name }}</h2><p>Synthesized node — regenerated after every curate</p></div>
-      <div class="right"><span class="tiny-pill">{{ node.generated_at | humandate }}</span></div>
+      <div><h2>Facts</h2><p>Every active curated fact — click one to preview it here</p></div>
+      <div class="right"><span class="tiny-pill">{{ facts | length }} total</span></div>
     </div>
-    <pre class="rawbody">{{ node.body }}</pre>
-  </section>
-  {% endfor %}
-
-  <section class="card">
-    <div class="card-head">
-      <div><h2>{{ g.project }} — facts</h2><p>Every active curated fact, newest first</p></div>
-      <div class="right"><span class="tiny-pill">{{ g.facts | length }} facts</span></div>
-    </div>
-    {% if g.facts %}
+    {% if facts %}
     <table>
       <thead>
-        <tr><th>Fact</th><th>Provenance</th><th>Supersedes</th><th>Last by</th><th>Updated</th></tr>
+        <tr><th>Fact</th><th>Project</th><th>Prov</th><th>Updated</th></tr>
       </thead>
       <tbody>
-        {% for f in g.facts %}
-        <tr>
+        {% for f in facts %}
+        <tr class="{{ 'on' if sel and f.project == sel.project and f.slug == sel.slug else '' }}"
+            data-href="/memory/{{ f.project }}/{{ f.slug }}">
           <td><a class="mono" href="/memory/{{ f.project }}/{{ f.slug }}">{{ f.slug }}</a></td>
+          <td>{{ f.project }}</td>
           <td class="mono">{{ f.provenance }}</td>
-          <td class="mono">{{ f.supersedes }}</td>
-          <td>{{ f.agent_last }}</td>
           <td>{{ f.updated_at | humandate }}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
     {% else %}
-    <p>No active facts for this project.</p>
+    <p>No curated memory yet. Run <code class="mono">neurobase curate</code> to fold sessions into facts.</p>
     {% endif %}
   </section>
+
+  <aside class="split-detail" id="detail-pane">
+    {% if sel %}
+    {% include "_memory_pane.html" %}
+    {% elif nodes %}
+    {# default overview: the synthesized node(s) — the current memory #}
+    {% for node in nodes %}
+    <section class="card">
+      <div class="card-head">
+        <div><h2>{{ node.project }} · {{ node.name }}</h2><p>Synthesized node — the current memory, regenerated after every curate</p></div>
+      </div>
+      <pre class="rawbody">{{ node.body }}</pre>
+    </section>
+    {% endfor %}
+    {% else %}
+    <div class="pane-empty">Select a fact on the left to preview it here.</div>
+    {% endif %}
+  </aside>
 </div>
-{% endfor %}
+
+{% include "_two_pane_script.html" %}
 {% endblock %}

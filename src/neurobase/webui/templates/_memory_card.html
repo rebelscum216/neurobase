@@ -1,0 +1,26 @@
+{# Shared fact detail: redacted body + provenance (linked back to Sessions) +
+   supersedes. Used by the Memory two-pane detail pane and the standalone page;
+   both put the selected fact in `sel`. #}
+<section class="card">
+  <div class="card-head"><div><h2>Fact</h2><p>Redacted at display</p></div></div>
+  <pre class="rawbody">{{ sel.body }}</pre>
+</section>
+
+<section class="card">
+  <div class="card-head"><div><h2>Provenance</h2><p>The raw captures this fact folded from</p></div></div>
+  {% if sel.provenance %}
+  <ul class="prov">
+    {% for p in sel.provenance %}
+    <li class="mono">{% if p.href %}<a href="{{ p.href }}">{{ p.label }}</a>{% else %}{{ p.label }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No provenance recorded.</p>
+  {% endif %}
+  {% if sel.supersedes %}
+  <div class="card-head" style="margin-top: 16px"><div><h2>Supersedes</h2><p>Facts this one replaced</p></div></div>
+  <ul class="prov">
+    {% for s in sel.supersedes %}<li class="mono">{{ s }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</section>

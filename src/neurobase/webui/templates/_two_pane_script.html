@@ -1,0 +1,33 @@
+{# Shared master/detail behaviour for any two-pane surface: a `.split-list` whose
+   rows carry `data-href`, and a `#detail-pane` that gets swapped with the row's
+   `?fragment=1` HTML on click — no page reload, no flicker. Progressive
+   enhancement: without JS the row's inner link still navigates; modified clicks
+   open normally; any fetch failure falls back to a full navigation. GET-only,
+   same-origin/loopback. #}
+<script>
+  (function () {
+    var list = document.querySelector('.split-list');
+    var pane = document.getElementById('detail-pane');
+    if (!list || !pane) return;
+    list.addEventListener('click', function (e) {
+      if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+      var row = e.target.closest('[data-href]');
+      if (!row) return;
+      e.preventDefault();
+      var url = row.getAttribute('data-href');
+      fetch(url + '?fragment=1')
+        .then(function (r) { if (!r.ok) throw new Error(); return r.text(); })
+        .then(function (html) {
+          pane.innerHTML = html;
+          pane.scrollTop = 0;
+          Array.prototype.forEach.call(list.querySelectorAll('.on'), function (r) {
+            r.classList.remove('on');
+          });
+          row.classList.add('on');
+          history.pushState(null, '', url);
+        })
+        .catch(function () { window.location.href = url; });
+    });
+    window.addEventListener('popstate', function () { window.location.reload(); });
+  })();
+</script>

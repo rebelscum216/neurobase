@@ -76,6 +76,42 @@ def test_memory_detail_redacts_secrets_at_display(client: TestClient) -> None:
     assert _SECRET not in r.text, "a secret rendered unredacted on the fact page"
 
 
+# --- two-pane master/detail ------------------------------------------------
+
+
+def test_memory_is_two_pane_with_node_overview(client: TestClient) -> None:
+    html = client.get("/memory").text
+    assert 'class="split"' in html, "Memory should render the two-pane split"
+    # with nothing selected, the default right pane shows the synthesized node
+    assert "Synthesized memory node body." in html
+
+
+def test_clicking_a_fact_previews_it_inline(client: TestClient) -> None:
+    html = client.get(f"/memory/{PROJECT}/prefer-uv").text
+    assert 'class="split"' in html  # facts list stays on the left
+    assert "Prefer uv over pip" in html  # fact body in the right pane
+    assert f"/memory/{PROJECT}/prefer-uv?view=full" in html  # open-as-page affordance
+
+
+def test_memory_fragment_is_pane_only(client: TestClient) -> None:
+    html = client.get(f"/memory/{PROJECT}/prefer-uv", params={"fragment": "1"}).text
+    assert "Prefer uv over pip" in html
+    assert "<html" not in html.lower(), "fragment must not carry the page shell"
+    assert 'class="split"' not in html, "fragment must be the pane only"
+
+
+def test_memory_open_as_page_is_standalone(client: TestClient) -> None:
+    html = client.get(f"/memory/{PROJECT}/prefer-uv", params={"view": "full"}).text
+    assert "Prefer uv over pip" in html
+    assert 'class="split"' not in html
+    assert "page narrow" in html
+
+
+def test_memory_selected_row_is_highlighted(client: TestClient) -> None:
+    assert 'class="on"' in client.get(f"/memory/{PROJECT}/prefer-uv").text
+    assert 'class="on"' not in client.get("/memory").text
+
+
 def test_unknown_project_is_404(client: TestClient) -> None:
     assert client.get("/memory/no-such-project/prefer-uv").status_code == 404
 

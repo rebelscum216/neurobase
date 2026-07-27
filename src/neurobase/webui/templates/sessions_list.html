@@ -43,7 +43,7 @@
     {% endif %}
   </section>
 
-  <aside class="split-detail" id="session-pane">
+  <aside class="split-detail" id="detail-pane">
     {% if sel %}
     {% include "_session_pane.html" %}
     {% else %}
@@ -52,34 +52,5 @@
   </aside>
 </div>
 
-<script>
-  // Progressive enhancement: swap just the right pane on a row click instead of
-  // reloading the whole page (no flicker). Without JS the row's session-id link
-  // still navigates to the two-pane page. Loopback + same-origin, GET only.
-  (function () {
-    var list = document.querySelector('.split-list');
-    var pane = document.getElementById('session-pane');
-    if (!list || !pane) return;
-    list.addEventListener('click', function (e) {
-      if (e.metaKey || e.ctrlKey || e.shiftKey) return; // let modified clicks open normally
-      var row = e.target.closest('tr[data-href]');
-      if (!row) return;
-      e.preventDefault();
-      var url = row.getAttribute('data-href');
-      fetch(url + '?fragment=1')
-        .then(function (r) { if (!r.ok) throw new Error(); return r.text(); })
-        .then(function (html) {
-          pane.innerHTML = html;
-          pane.scrollTop = 0;
-          Array.prototype.forEach.call(list.querySelectorAll('tr.on'), function (r) {
-            r.classList.remove('on');
-          });
-          row.classList.add('on');
-          history.pushState(null, '', url);
-        })
-        .catch(function () { window.location.href = url; });
-    });
-    window.addEventListener('popstate', function () { window.location.reload(); });
-  })();
-</script>
+{% include "_two_pane_script.html" %}
 {% endblock %}

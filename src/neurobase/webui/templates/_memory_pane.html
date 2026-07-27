@@ -1,0 +1,7 @@
+{# The right-hand detail pane for one curated fact. Rendered inside the two-pane
+   list and as the ?fragment=1 response the list's inline JS swaps in. #}
+<div class="pane-head">
+  <div class="who"><span class="mono">{{ sel.slug }}</span> <span class="hint">{{ sel.project }} · {{ sel.status }} · last by {{ sel.agent_last }}</span></div>
+  <a class="btn" href="/memory/{{ sel.project }}/{{ sel.slug }}?view=full" title="Open this fact as its own page">⤢ Open as page</a>
+</div>
+{% include "_memory_card.html" %}

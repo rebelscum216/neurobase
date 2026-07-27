@@ -1,18 +1,17 @@
-"""Tests for the Skills gallery + revert action (app-shell plan, Phase S).
+"""Tests for the machine-wide Skills gallery + drift-repair revert.
 
-Two accepted proposals are installed for real through the shared install service:
-one stays **live** on disk, the other is **orphaned** (its managed block is
-removed). The gallery must show both, offer revert only on the drifted one, and
-the revert POST must repair the drifted record while **refusing** the live one
-(the ADR-0020 boundary that stops accept→revert→reject from orphaning a live
-artifact) and refusing any POST without a CSRF token.
+The gallery shows every SKILL.md on the machine, not just what Neurobase
+installed: a Neurobase-managed skill on disk, a hand-authored **external** skill
+in the user scope, and a Neurobase skill that's **missing** on disk (drift). The
+external one offers no revert; the missing one does, and the ADR-0020 guard still
+refuses to revert a live artifact even via a crafted POST.
 """
 
 from __future__ import annotations
 
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 from starlette.applications import Starlette
@@ -22,52 +21,57 @@ from neurobase.core import projects
 from neurobase.recommender import install, proposals
 from neurobase.recommender.corpus import EvidenceRef
 from neurobase.recommender.ranker import RankedCandidate, Scores
+from neurobase.webui import skills_scan
 from neurobase.webui.app import build_app
 from neurobase.webui.security import CSRF_FORM_FIELD
 
 NOW = datetime(2026, 7, 10, tzinfo=UTC)
 
 
-def _ranked(**overrides: Any) -> RankedCandidate:
-    base: dict[str, Any] = {
-        "slug": "prefer-uv-run",
-        "type": "rule",
-        "candidate_type": "repeated-instruction",
-        "title": "Prefer uv run",
-        "rationale": "corrected repeatedly across sessions",
-        "draft": "Always invoke Python via `uv run`.",
-        "target": "AGENTS.md",
-        "project": "neurobase",
-        "supersedes": [],
-        "evidence": [EvidenceRef.raw("neurobase", "2026-07-01T00-00-00Z_claude_ab12cd34.md")],
-        "scores": Scores(recurrence=5, breadth=6, recency=0.86, total=25.8),
-        "sessions": 3,
-        "agents": 2,
-        "projects": 1,
-    }
-    base.update(overrides)
-    return RankedCandidate(**base)
+def _skill(slug: str) -> RankedCandidate:
+    return RankedCandidate(
+        slug=slug,
+        type="skill",
+        candidate_type="repeated-workflow",
+        title=slug,
+        rationale="repeated across sessions",
+        draft="# Do the thing\n\nStep one, step two.",
+        target="project-skill",
+        project="proj",
+        supersedes=[],
+        evidence=[EvidenceRef.raw("proj", "2026-07-01T00-00-00Z_claude_ab12cd34.md")],
+        scores=Scores(recurrence=4, breadth=2, recency=0.9, total=8.0),
+        sessions=3,
+        agents=1,
+        projects=1,
+    )
 
 
-def _accept(root: Path, slug: str, project: str) -> None:
-    proposals.write_ranked(root, [_ranked(slug=slug, project=project, title=slug)], now=NOW)
-    install.commit_install(root, install.prepare_install(root, slug))
+def _accept_project_skill(root: Path, slug: str) -> None:
+    proposals.write_ranked(root, [_skill(slug)], now=NOW)
+    install.commit_install(root, install.prepare_install(root, slug, target="project"))
 
 
 @pytest.fixture
-def store_root(tmp_path: Path) -> Path:
+def store_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "store"
-    repo_alpha = tmp_path / "alpha"
-    repo_beta = tmp_path / "beta"
-    repo_alpha.mkdir()
-    repo_beta.mkdir()
-    projects.register_project(root, repo_alpha, slug="alpha")
-    projects.register_project(root, repo_beta, slug="beta")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    projects.register_project(root, repo, slug="proj")
 
-    _accept(root, "live-skill", "alpha")  # stays live on disk
-    _accept(root, "drifted-skill", "beta")
-    # remove the managed block for the drifted one → artifact_state == orphaned
-    (repo_beta / "AGENTS.md").write_text("the user replaced the whole file\n", encoding="utf-8")
+    # 1. A Neurobase-managed skill, installed on disk (project scope).
+    _accept_project_skill(root, "nb-skill")
+    # 2. A Neurobase skill accepted, then its SKILL.md removed → drift (missing).
+    _accept_project_skill(root, "gone-skill")
+    shutil.rmtree(repo / ".claude" / "skills" / "gone-skill")
+    # 3. A hand-authored EXTERNAL skill in the (test-scoped) user skills dir.
+    user_skills = tmp_path / "userhome" / ".claude" / "skills" / "my-external-tool"
+    user_skills.mkdir(parents=True)
+    (user_skills / "SKILL.md").write_text(
+        "---\nname: my-external-tool\ndescription: A hand-authored skill.\n---\n\n# Do it\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(skills_scan, "user_skills_root", lambda: user_skills.parent)
     return root
 
 
@@ -87,55 +91,64 @@ def _read_status(root: Path, slug: str) -> str:
     return str(doc.get("status"))
 
 
-def test_skills_nav_is_live_with_count(client: TestClient) -> None:
+def test_gallery_shows_neurobase_and_external_skills(client: TestClient) -> None:
     html = client.get("/skills").text
-    assert 'href="/skills"' in html
-    assert '<span class="count">2</span>' in html  # two accepted proposals
+    assert "nb-skill" in html  # Neurobase-managed, on disk
+    assert "my-external-tool" in html  # hand-authored external skill
+    assert "gone-skill" in html  # Neurobase skill missing on disk (drift)
+    # source is labelled on each card
+    assert ">neurobase<" in html and ">external<" in html
 
 
-def test_gallery_shows_both_skills_and_their_states(client: TestClient) -> None:
+def test_external_skill_offers_no_revert(client: TestClient) -> None:
     html = client.get("/skills").text
-    assert "live-skill" in html and "drifted-skill" in html
-    assert ">live<" in html and ">orphaned<" in html
+    assert 'action="/skills/gone-skill/revert"' in html, "missing NB skill must offer revert"
+    # neither the external skill nor the live NB skill exposes a revert form
+    assert 'action="/skills/my-external-tool/revert"' not in html
+    assert 'action="/skills/nb-skill/revert"' not in html
 
 
-def test_live_skill_has_no_revert_button(client: TestClient) -> None:
-    html = client.get("/skills").text
-    assert 'action="/skills/drifted-skill/revert"' in html, "the drifted skill must offer revert"
-    assert 'action="/skills/live-skill/revert"' not in html, "a live skill must NOT offer revert"
-
-
-def test_revert_repairs_the_drifted_skill(
+def test_revert_repairs_a_missing_skill(
     client: TestClient, app: Starlette, store_root: Path
 ) -> None:
     r = client.post(
-        "/skills/drifted-skill/revert",
+        "/skills/gone-skill/revert",
         data={CSRF_FORM_FIELD: app.state.csrf_token},
         headers={"origin": str(client.base_url)},
         follow_redirects=False,
     )
     assert r.status_code == 303
-    assert _read_status(store_root, "drifted-skill") == "proposed"
+    assert _read_status(store_root, "gone-skill") == "proposed"
 
 
 def test_revert_of_a_live_skill_is_refused(
     client: TestClient, app: Starlette, store_root: Path
 ) -> None:
-    """The load-bearing ADR-0020 guard: even a well-formed, CSRF-valid POST must
-    NOT revert a live artifact — revert_proposal re-checks liveness at write time
-    and 409s, so the proposal stays accepted."""
+    """The ADR-0020 guard: a crafted, CSRF-valid POST must not revert a skill
+    that is live on disk — revert_proposal 409s at write time."""
     r = client.post(
-        "/skills/live-skill/revert",
+        "/skills/nb-skill/revert",
         data={CSRF_FORM_FIELD: app.state.csrf_token},
         headers={"origin": str(client.base_url)},
     )
     assert r.status_code == 409
-    assert _read_status(store_root, "live-skill") == "accepted", "a live skill was reverted"
+    assert _read_status(store_root, "nb-skill") == "accepted", "a live skill was reverted"
 
 
-def test_revert_without_csrf_is_rejected_and_writes_nothing(
-    client: TestClient, store_root: Path
-) -> None:
-    r = client.post("/skills/drifted-skill/revert", data={})
+def test_revert_without_csrf_is_rejected(client: TestClient, store_root: Path) -> None:
+    r = client.post("/skills/gone-skill/revert", data={})
     assert r.status_code == 403
-    assert _read_status(store_root, "drifted-skill") == "accepted", "a CSRF-less POST mutated state"
+    assert _read_status(store_root, "gone-skill") == "accepted", "a CSRF-less POST mutated state"
+
+
+def test_discover_skills_tags_managed_vs_external(store_root: Path) -> None:
+    """The discovery module directly: the on-disk NB skill is tagged managed with
+    its nb_slug; the external one is not."""
+    from neurobase.core.store_handle import StoreMode, open_store
+
+    found = {s.slug: s for s in skills_scan.discover_skills(open_store(store_root, StoreMode.READ))}
+    assert found["nb-skill"].managed is True
+    assert found["nb-skill"].nb_slug == "nb-skill"
+    assert found["my-external-tool"].managed is False
+    assert found["my-external-tool"].nb_slug is None
+    assert "gone-skill" not in found  # removed from disk

@@ -5,49 +5,48 @@
 <div class="hero">
   <div>
     <h1>Skills</h1>
-    <p class="hero-sub">Accepted proposals, installed as managed skills and rules on disk.</p>
+    <p class="hero-sub">Every skill on this machine — installed by Neurobase or authored by hand.</p>
   </div>
   <div class="hero-pills">
-    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ skills | length }} installed</span>
-    <span class="hero-pill">{{ live }} live</span>
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ counts.total }} skills</span>
+    <span class="hero-pill">{{ counts.neurobase }} Neurobase</span>
+    <span class="hero-pill">{{ counts.external }} external</span>
   </div>
 </div>
 
-{% if not skills %}
+{% if not cards %}
 <section class="card">
-  <p>No skills installed yet. Accept a <a href="/suggestions">suggestion</a> to install one.</p>
+  <p>No skills found on this machine. Skills live under <code class="mono">~/.claude/skills</code> and each
+    project's <code class="mono">.claude/skills</code>; accept a <a href="/suggestions">suggestion</a> to install one.</p>
 </section>
 {% else %}
 <div class="gallery">
-  {% for s in skills %}
+  {% for c in cards %}
   <section class="card skill">
     <div class="card-head">
       <div>
-        <h2><a class="mono" href="/suggestions/{{ s.slug }}">{{ s.slug }}</a></h2>
-        <p>{{ s.type or "skill" }}{% if s.project %} · {{ s.project }}{% endif %}</p>
+        <h2>{% if c.nb_slug %}<a class="mono" href="/suggestions/{{ c.nb_slug }}">{{ c.name }}</a>{% else %}<span class="mono">{{ c.name }}</span>{% endif %}</h2>
+        <p>{{ c.description or "—" }}</p>
       </div>
-      <div class="right"><span class="status-chip {{ s.chip }}">{{ s.state }}</span></div>
+      <div class="right"><span class="status-chip {{ 'accepted' if c.source == 'neurobase' else 'superseded' }}">{{ c.source }}</span></div>
     </div>
     <div class="skill-meta">
-      <div><span class="k">Target</span><span class="v mono" title="{{ s.target }}">{{ s.target or "—" }}</span></div>
-      <div><span class="k">Installed at</span><span class="v mono" title="{{ s.installed_path }}">{{ s.installed_path or "—" }}</span></div>
-      <div><span class="k">Accepted</span><span class="v">{{ s.accepted_at | humandate }}</span></div>
-      <div><span class="k">Score</span><span class="v mono">{{ s.score }}</span></div>
+      <div><span class="k">Scope</span><span class="v">{{ c.scope }}{% if c.project %} · {{ c.project }}{% endif %}</span></div>
+      <div><span class="k">State</span><span class="v">{{ c.state }}</span></div>
+      <div class="wide2"><span class="k">Path</span><span class="v mono" title="{{ c.path }}">{{ c.path }}</span></div>
     </div>
+    {% if c.revertable %}
     <div class="skill-actions">
-      {% if s.revertable %}
-      <form method="post" action="/skills/{{ s.slug }}/revert"
-            onsubmit="return confirm('Revert {{ s.slug }} to proposed? Its managed artifact is already {{ s.state }} on disk — this repairs the record, it does not delete anything.');">
-        <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}">
+      <form method="post" action="/skills/{{ c.nb_slug }}/revert"
+            onsubmit="return confirm('Revert {{ c.name }} to proposed? Its managed artifact is {{ c.state }} on disk — this repairs the record, it does not delete anything.');">
+        <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
         <button type="submit" class="btn danger">Revert drift</button>
       </form>
-      <span class="hint">{{ s.state }} on disk — the record can be repaired</span>
-      {% elif s.state == "live" %}
-      <span class="hint">Live on disk — remove the managed block by hand first to retire it</span>
-      {% else %}
-      <span class="hint">Target unresolvable — revert refused (fail-closed)</span>
-      {% endif %}
+      <span class="hint">{{ c.state }} — the record can be repaired</span>
     </div>
+    {% elif c.source == "external" %}
+    <div class="skill-actions"><span class="hint">External skill — Neurobase doesn't manage this one.</span></div>
+    {% endif %}
   </section>
   {% endfor %}
 </div>

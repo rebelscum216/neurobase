@@ -32,6 +32,7 @@ from neurobase.core.store_handle import StoreMode, open_store
 from neurobase.recommender import corpus as recommend_corpus
 from neurobase.recommender import install, proposals
 from neurobase.recommender import metrics as recommend_metrics
+from neurobase.webui import skills_scan
 
 # Statuses `edit`/`accept` must never operate on (mirrors `recommend edit`'s
 # and `install.prepare_install`'s own guards — re-checked here so a stale
@@ -737,7 +738,7 @@ async def _search(request: Request) -> Response:
     return _templates(request).TemplateResponse(request, "search_results.html", context)
 
 
-# --- Skills gallery + revert (Phase S) --------------------------------------
+# --- Skills gallery (every skill on the machine) + revert -------------------
 
 # artifact_state → the status-chip class the design system already ships.
 _STATE_CHIP = {
@@ -748,38 +749,63 @@ _STATE_CHIP = {
 }
 
 
-def _skill_row(root: Path, doc: store.Document) -> dict[str, Any]:
+def _discovered_card(skill: skills_scan.InstalledSkill) -> dict[str, Any]:
+    """A SKILL.md found on disk — Neurobase-managed (carries our frontmatter) or
+    external (hand-authored / from elsewhere). It's present, so nothing to revert."""
+    return {
+        "name": skill.name,
+        "description": skill.description,
+        "scope": skill.scope,
+        "project": skill.project,
+        "path": skill.path,
+        "source": "neurobase" if skill.managed else "external",
+        "nb_slug": skill.nb_slug,
+        "state": "installed",
+        "chip": "accepted" if skill.managed else "superseded",
+        "revertable": False,
+    }
+
+
+def _missing_skill_card(root: Path, doc: store.Document) -> dict[str, Any]:
+    """A Neurobase skill proposal accepted but whose SKILL.md wasn't found on this
+    machine — drift. Kept visible and revertable (ADR-0020 liveness guard)."""
     slug = str(doc.get("name") or doc.file_path.stem)
     state = proposals.artifact_state(root, doc, slug)
-    accepted = proposals.latest_accepted_event(root, slug)
-    scores = doc.get("scores") if isinstance(doc.get("scores"), dict) else {}
     return {
-        "slug": slug,
-        "type": doc.get("type"),
-        "target": doc.get("target"),
-        "installed_path": doc.get("installed_path"),
+        "name": slug,
+        "description": str(doc.get("candidate_type") or ""),
+        "scope": "user" if doc.get("target") == "user-skill" else "project",
         "project": doc.get("project"),
+        "path": doc.get("installed_path") or "—",
+        "source": "neurobase",
+        "nb_slug": slug,
         "state": state,
         "chip": _STATE_CHIP.get(state, "superseded"),
-        # Offer revert only when the liveness guard would allow it (missing/orphaned)
-        # — the same check `revert_proposal` re-runs at write time (ADR-0020).
         "revertable": proposals.revert_refusal(slug, doc, state) is None,
-        "accepted_at": accepted.get("at") if accepted else None,
-        "score": scores.get("total", 0),
     }
 
 
 async def _skills_gallery(request: Request) -> Response:
     root = _root(request)
-    skills = [
-        _skill_row(root, doc)
-        for doc in proposals.load_all_proposals(root)
-        if str(doc.get("status") or "") == "accepted"
-    ]
-    skills.sort(key=lambda s: str(s["accepted_at"] or ""), reverse=True)
-    live = sum(1 for s in skills if s["state"] == proposals.ARTIFACT_LIVE)
+    handle = open_store(root, StoreMode.READ)
+    discovered = skills_scan.discover_skills(handle)
+    present_nb = {s.nb_slug for s in discovered if s.nb_slug}
+    cards = [_discovered_card(s) for s in discovered]
+    # Neurobase skill proposals accepted but not found on disk here → show them as
+    # drift so they stay visible and revertable (artifact gone, or on another Mac).
+    for doc in proposals.load_all_proposals(root):
+        if str(doc.get("status")) != "accepted" or str(doc.get("type")) != "skill":
+            continue
+        if str(doc.get("name") or doc.file_path.stem) in present_nb:
+            continue
+        cards.append(_missing_skill_card(root, doc))
+    counts = {
+        "total": len(cards),
+        "neurobase": sum(1 for c in cards if c["source"] == "neurobase"),
+        "external": sum(1 for c in cards if c["source"] == "external"),
+    }
     # _base_context supplies the CSRF token the revert form needs.
-    context = {**_base_context(request), "skills": skills, "live": live}
+    context = {**_base_context(request), "cards": cards, "counts": counts}
     return _templates(request).TemplateResponse(request, "skills_list.html", context)
 
 

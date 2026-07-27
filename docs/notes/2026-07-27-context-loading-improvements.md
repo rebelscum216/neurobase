@@ -882,7 +882,7 @@ The work is complete when:
 > | R2-F1 · major | Version/module check as the recurrence control → same-version stale builds pass it | Claude |
 > | R2-F2 · minor | "Current source has never been exercised by a live hook" → too absolute; the 07-20 spikes did run dev-checkout hooks | Claude |
 > | R2-F3 · minor | "1–11 passes/day baseline" → drawn from a histogram truncated to 8 days, hiding the 07-16 runaway | Claude |
-> | R2-F3 · minor | Independent synthesis defect, withdrawn entirely | Claude |
+> | R2 · Q-H by agreement | Independent synthesis defect, withdrawn entirely | Claude |
 > | R2-F4 · minor | ccgolf pair as a *contradiction* fixture → the two facts agree; it is a transition | Claude |
 > | R3-F1 · major | Version-ordering criterion surviving in the definition of done, contradicting [R2] | Claude |
 > | R1 · by agreement | Phase 2's regenerate-before-injection | Codex |

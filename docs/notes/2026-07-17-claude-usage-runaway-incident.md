@@ -705,3 +705,116 @@ unbounded, failure-tolerant distill pass. Disabling `SessionStart` is the correc
 temporary containment. The durable repair requires reentrancy exclusion,
 single-flight curation, hard call budgets, and systemic-failure backoff before
 automatic startup curation can be safely re-enabled.
+
+---
+
+# Recurrence: 2026-07-27 — version skew
+
+_Appended 2026-07-27. This is the same incident class recurring ten days later,
+recorded here rather than in a new note so the history stays in one place
+(agreed in the Claude ⇄ Codex relay, `docs/reviews/2026-07-27-context-loading-review.md`)._
+
+## What happened
+
+The user asked for Neurobase to be enabled across `~/Projects`. Claude ran
+`neurobase init --agent claude --user` and `--agent codex --user`, reinstating
+both `SessionStart` hooks, and set `auto_enable_roots = ["~/Projects"]` in
+`~/.config/neurobase/config.toml`. **The standing instruction in this note —
+that `SessionStart` must remain disabled until the code is hardened — was not
+read before that change.**
+
+Four minutes later a runaway began. At containment it had reached **125
+concurrent `neurobase curate` processes and 39 concurrent `claude -p`
+processes**. The `neurobase` curator log grew by 1,327 entries between two
+samples minutes apart, closing the day at 2,028 passes against a post-containment
+07-17 → 07-23 baseline of 1–11 per day.
+
+Containment (identical in shape to 2026-07-17): remove both `SessionStart`
+hooks, kill the process trees. `SessionEnd` / `Stop` capture hooks were left
+installed and verified quiet afterwards.
+
+## Root cause: the hooks were not running the hardened code
+
+The durable repairs this note called for had all landed in `src/`. **None of them
+were in the artifact the hooks actually executed.** Both hooks invoked
+`/Users/andrewsmith/.local/share/uv/tools/neurobase-cli/bin/neurobase`:
+
+| | Before | After |
+|---|---|---|
+| Installed version | `0.1.0.dev0`, built **2026-07-09** | `0.1.0`, built 2026-07-27 |
+| `core/locks.py` | **absent** | present |
+| `core/process_guard.py` | **absent** | present |
+| `curator/budget.py` | **absent** | present |
+
+The single-flight lock, the reentrancy guard, the ADR-0023 store lock and the
+automatic-pass budgets were read from source and assumed live. The shim predated
+every one of them. `neurobase doctor` reported all-green throughout, because it
+verifies that the hook command *string* matches the shim path and never that the
+shim contains the safety code it depends on.
+
+**This is the durable lesson: source-tree hardening is not deployed hardening.**
+A diagnostic that cannot tell them apart will certify an unsafe install as
+healthy.
+
+## Verification after upgrade (items 0 / 0b)
+
+`uv tool install --force .` from the repo, then:
+
+- **Reentrancy guard, behavioral:** `NEUROBASE_INTERNAL_CALL=1 neurobase hook
+  claude session-start` emits nothing and exits 0.
+- **Single-flight under real contention:** 30 concurrent
+  `neurobase hook claude session-start` invocations against an isolated store and
+  a throwaway git repo, seeded with 3 stale unconsumed raws so the winner would
+  reach the brain.
+
+| t | `neurobase curate` procs | `claude -p` procs |
+|---|---|---|
+| 1s | **30** | 0 |
+| 2s | **1** | **1** |
+| 4s | 0 | 0 |
+
+Exactly **one** pass reached the curator log. Twenty-nine lost the
+`try_curate_lock` and exited before the staleness check and before
+`resolve_brain` — the lock is taken at `cli/__init__.py:228`, ahead of both. On
+the 2026-07-09 artifact this shape produced one `claude -p` per spawned curator.
+
+Note that spawn-side behaviour is unchanged: all 30 hooks still `Popen` a
+detached curator, because `spawn_curate_if_stale` has no debounce. That is an
+efficiency concern, not a correctness one — the lock is the boundary. A debounce
+remains worth adding to avoid the process churn.
+
+## Consequence: subscription quota exhausted
+
+The single uncontended pass in the regression above still failed with
+`claude -p exited 1:` (empty stderr). Direct invocation explains it:
+
+```
+$ claude -p "reply with exactly: OK"
+You've hit your weekly limit · resets 1pm (America/New_York)
+```
+
+**The user's Claude weekly limit is exhausted**, consistent with 39 concurrent
+`claude -p` processes during the burst. Two consequences:
+
+1. The `claude -p exited 1:` errors dominating the curator log (1,282 occurrences)
+   are consistent with provider quota exhaustion rather than a code defect. This
+   supports the relay's decision to withdraw any claim of an independent
+   synthesis defect.
+2. **A clean diagnostic curate pass is blocked until the quota resets.** No code
+   change advances it; the only input is time.
+
+## Remaining unsafe / open
+
+- `doctor` still has **no build-capability check** and **no curate-health check**.
+  Until the first exists, nothing prevents a stale shim from being certified
+  healthy again. Design agreed in the relay: a versioned safety-capability
+  profile naming behavioral invariants rather than modules, checked against the
+  **diagnosing build's** manifest — never the executable under test, which cannot
+  know what it lacks.
+- Both `SessionStart` hooks remain **disabled**. Items 0 and 0b now pass, so
+  re-enabling is defensible on the evidence; doing so before the quota resets
+  would only produce lock-serialized failing passes.
+- `auto_enable_roots = ["~/Projects"]` remains set. It is inert for spawning
+  (only the capture path auto-enables, and that path never spawns a curator), but
+  it widens the blast radius the moment `SessionStart` returns.
+- The raw-store pollution from **both** incidents is still uncleaned.

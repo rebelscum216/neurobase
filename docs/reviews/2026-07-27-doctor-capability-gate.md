@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -202,3 +202,57 @@ store-chokepoint, and 1,510 tests with 92.11% coverage.
 contract, can execute hooks that are not enabled, can miss a stale executable
 that is enabled alongside a current one, and the health check misreports valid
 or unreadable log states.
+
+---
+
+## Author resolutions — round 1  _(Claude)_
+
+All four findings reproduced and accepted; no pushback. Commit `f6f7ec9`.
+
+- **F1 (blocker) — doctor executed a configured command: `resolved`.**
+  Reproduced exactly as reported: an unwired repo-local `.codex/hooks.json`
+  naming `/usr/bin/touch` was collected, executed, and left a file in the
+  worktree. My "the agent runs it anyway" defence was **wrong** — Codex never
+  discovers an unwired project hooks file, so nothing else would ever run it,
+  and post-hoc validation cannot undo a side effect.
+
+  Redesigned rather than patched, along the suggested line: capability evidence
+  is now a static `capability_manifest.json` read from the install's package
+  directory, resolved from the executable path. `subprocess` is gone from
+  `diagnostics.py` entirely. Collection additionally requires the installers'
+  own ownership predicate — made public as `is_owned_command` on both adapters
+  so doctor applies the same rule rather than a lookalike — and, for Codex
+  project hooks, that `~/.codex/config.toml` genuinely wires *and* trusts them.
+  The original repro now collects nothing and executes nothing.
+
+- **F2 (major) — one entry per agent hid a stale executable: `resolved`.**
+  `_startup_hook_executables` now returns `(scope label, executable)` per scope
+  and `_capability_checks` dedupes by resolved executable, reporting each
+  distinct install separately. Regression added with a current project-scope
+  hook beside a stale user-scope one; it fails on the old keying.
+
+- **F3 (major) — the curator's status vocabulary: `resolved`.**
+  Confirmed against `curator/engine.py`: it emits `ok`, `partial`, `resynth`,
+  `noop`, `error`, `dry-run`, `skipped-locked`, and the live store already
+  contains `noop` and 41 `partial`. Now classified explicitly — `ok`/`resynth`
+  succeed, `error`/`partial` fail, `noop`/`skipped-locked`/`dry-run` are
+  neutral. Unknown statuses from a future engine are treated as neutral so a
+  newer producer cannot make an older doctor cry wolf. `partial` is deliberately
+  a failure: it consumes raws then dies before synthesis, which is exactly the
+  shape that freezes a node. Regressions cover noop-after-ok, resynth-as-
+  recovery, skipped-locked, trailing-noop-masking-the-reason, and partial.
+
+- **F4 (major) — unknown history read as healthy: `resolved`.**
+  `_read_curator_log` returns `(entries, LogState)`. Missing ⇒ ok; unreadable ⇒
+  warn; exists-but-no-parseable-records ⇒ warn; a torn trailing line stays
+  fail-soft. The unreadable regression substitutes a directory for the log so it
+  raises `OSError` on POSIX and Windows alike, keeping the Windows CI leg honest.
+
+**Note for this round.** The currently-installed shim reports *no* capabilities,
+because it was built from `main` and the manifest ships on this branch. That is
+the gate behaving correctly, and it means the shim must be reinstalled after this
+lands before `SessionStart` can be re-enabled anywhere.
+
+`make ci`: 1520 passed, 92.10% coverage (floor 90.5).
+
+**Author status:** `awaiting-review` — round 2.

@@ -414,12 +414,21 @@ def test_wholly_unparseable_log_warns(tmp_path: Path) -> None:
 
 
 def test_torn_trailing_line_stays_fail_soft(tmp_path: Path) -> None:
-    """The writer appends, so the last line can be mid-write. That single torn
-    record must not turn a healthy history into a warning."""
-    root, repo = _store(tmp_path, [{"at": "2026-07-27T10:00:00Z", "status": "ok"}])
+    """The writer appends record-and-newline in one write, so an interrupted
+    append ends **without** a trailing newline. That single torn record must not
+    turn a healthy history into a warning.
+
+    Note the fixture deliberately omits the trailing newline. An earlier version
+    wrote a truncated record *followed by* `\\n`, which no single-write producer
+    can emit — and under the round-4 byte-level rule that shape is correctly
+    read as damage rather than a torn write.
+    """
+    root, repo = _store(
+        tmp_path, [{"at": "2026-07-27T10:00:00Z", "status": "ok", "node_refreshed": True}]
+    )
     log = root / "projects" / "p" / "memory" / ".curator-log.jsonl"
     with log.open("a", encoding="utf-8") as fh:
-        fh.write('{"at": "2026-07-27T11:00:00Z", "stat\n')
+        fh.write('{"at": "2026-07-27T11:00:00Z", "stat')
     assert diagnostics._curate_health_check(root, repo).status == "ok"
 
 
@@ -493,8 +502,12 @@ def test_fifo_manifest_does_not_block(tmp_path: Path) -> None:
         pytest.skip("mkfifo unavailable")
     root = tmp_path / "fifo-install"
     (root / "bin").mkdir(parents=True)
+    (root / "bin" / "python").write_text("", encoding="utf-8")
     executable = root / "bin" / "neurobase"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    # A shebang the binding *accepts*, so the read actually reaches the FIFO —
+    # with `#!/bin/sh` the root check rejected first and this test passed even
+    # with the bounded-read guard removed (review round 4, F4).
+    executable.write_text(f"#!{root / 'bin' / 'python'}\n", encoding="utf-8")
     package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
     package.mkdir(parents=True)
     os.mkfifo(package / capabilities.MANIFEST_NAME)
@@ -505,8 +518,11 @@ def test_fifo_manifest_does_not_block(tmp_path: Path) -> None:
 def test_oversized_manifest_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "big"
     (root / "bin").mkdir(parents=True)
+    (root / "bin" / "python").write_text("", encoding="utf-8")
     executable = root / "bin" / "neurobase"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    # See the FIFO test: the shebang must be accepted for the size cap to be
+    # what rejects this (review round 4, F4).
+    executable.write_text(f"#!{root / 'bin' / 'python'}\n", encoding="utf-8")
     package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
     package.mkdir(parents=True)
     (package / capabilities.MANIFEST_NAME).write_text(
@@ -712,3 +728,73 @@ def test_record_missing_required_fields_cannot_prove_health(tmp_path: Path) -> N
     check = diagnostics._curate_health_check(root, repo)
     assert check.status == "warn"
     assert "None" not in check.detail
+
+
+@pytest.mark.parametrize("interpreter", ["sh", "bash", "ruby", "python-not-really"])
+def test_same_root_non_python_shebang_is_refused(tmp_path: Path, interpreter: str) -> None:
+    """**Round-4 F1 regression.**
+
+    The root check alone accepted any absolute interpreter whose `parent.parent`
+    matched, so `#!<env>/bin/sh` beside a planted manifest was certified. The
+    binding is to *the Python that imports the attesting package*; another
+    interpreter says nothing about that.
+    """
+    root = tmp_path / f"nonpy-{interpreter}"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / interpreter).write_text("", encoding="utf-8")
+    executable = root / "bin" / "neurobase"
+    executable.write_text(f"#!{root / 'bin' / interpreter}\n", encoding="utf-8")
+    package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    (package / capabilities.MANIFEST_NAME).write_text(
+        json.dumps({"profile": capabilities.PROFILE, "provides": sorted(capabilities.PROVIDES)}),
+        encoding="utf-8",
+    )
+
+    assert capabilities.provided_by(executable) == frozenset()
+
+
+def test_complete_garbage_final_line_is_damage_not_a_torn_write(tmp_path: Path) -> None:
+    """**Round-4 F2 regression.**
+
+    Excusing "the last line failed to parse" let a *complete* garbage line read
+    as healthy. The torn-append signature is a missing trailing newline, not a
+    parse failure — the producer writes record and newline in one append.
+    """
+    root, repo = _store(tmp_path, [])
+    log = root / "projects" / "p" / "memory" / ".curator-log.jsonl"
+    log.write_text(
+        json.dumps({"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True})
+        + "\ncomplete garbage\n",
+        encoding="utf-8",
+    )
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "warn"
+    assert "malformed" in check.detail
+
+
+def test_truncated_utf8_in_a_torn_append_does_not_abort_doctor(tmp_path: Path) -> None:
+    """**Round-4 F2 regression.** A multi-byte character cut mid-sequence raised
+    `UnicodeDecodeError` out of the reader, aborting doctor rather than
+    reporting. A diagnostic must degrade, never crash."""
+    root, repo = _store(tmp_path, [])
+    log = root / "projects" / "p" / "memory" / ".curator-log.jsonl"
+    good = json.dumps({"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True})
+    # No trailing newline: an interrupted append, ending mid-UTF-8-sequence.
+    log.write_bytes(good.encode() + b'\n{"at": "2026-07-21T10:00:00Z", "note": "caf\xc3')
+
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "ok"  # torn tail is excused; the history is intact
+
+
+def test_truncated_utf8_mid_history_is_damage(tmp_path: Path) -> None:
+    """The same damage anywhere but the final append is not excusable."""
+    root, repo = _store(tmp_path, [])
+    log = root / "projects" / "p" / "memory" / ".curator-log.jsonl"
+    good = json.dumps({"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True})
+    later = json.dumps({"at": "2026-07-22T10:00:00Z", "status": "noop"})
+    log.write_bytes(good.encode() + b'\n{"note": "caf\xc3\n' + later.encode() + b"\n")
+
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "warn"
+    assert "malformed" in check.detail

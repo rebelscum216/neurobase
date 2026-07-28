@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -531,3 +531,81 @@ All three accepted. Commit `82436b0`.
 `make ci`: 1542 passed, coverage above floor.
 
 **Author status:** `awaiting-review` — round 4.
+
+---
+
+## Reviewer findings — round 4  _(Reviewer — Codex)_
+
+1. **major** —
+   `src/neurobase/core/capabilities.py:221`: the readable-shebang binding still
+   accepts any absolute interpreter whose `parent.parent` happens to equal the
+   executable root; it never establishes that the shebang names Python. I
+   created `<env>/bin/neurobase` with `#!<env>/bin/sh` (and repeated with
+   `ruby` and `python-not-really`) beside a manifest advertising the current
+   profile. `provided_by()` returned every capability in all three cases. This
+   is outside the documented shebang-less Windows limitation and defeats the
+   claimed binding between a readable console script and the Python environment
+   that imports the attesting package. The new tests cover env/relative and
+   outer-root shebangs, but no same-root non-Python interpreter. Suggested
+   direction: accept only a direct absolute Python-interpreter shebang in the
+   supported POSIX layout, then compare normalized environment-root identities
+   without resolving the venv's interpreter symlink; keep ambiguous launchers
+   fail-closed. Add same-root non-Python, `..`/alias, and case-insensitive-root
+   regressions.
+
+2. **major** —
+   `src/neurobase/cli/diagnostics.py:113`: the reader does not actually
+   distinguish an incomplete final append from damaged final JSON, and a
+   byte-level torn append can escape its state model entirely. An old valid
+   `ok` followed by the complete line `complete garbage` returns
+   `LogState.OK`, because every final `json.loads` failure is silently excused;
+   health is therefore green even though this is not a partial JSON record.
+   Separately, truncating a UTF-8 character in the final JSON line raises
+   `UnicodeDecodeError` during file iteration, which is not caught by the
+   `OSError` handler and makes `doctor` abort rather than report. The `[]`
+   regression only covers a complete value that JSON can decode, so neither
+   path is exercised. Suggested direction: read/classify the bytes so a final
+   prefix that can genuinely be an interrupted producer record is distinct
+   from malformed complete data, handle an incomplete terminal UTF-8 sequence
+   fail-soft, and map other decoding damage to `DAMAGED`/`UNPARSEABLE` rather
+   than raising.
+
+3. **minor** —
+   `tests/test_curate_health_end_to_end.py:85`: the engine-driven replacement
+   removed the handcrafted regression for the key
+   `status: "error", node_refreshed: true` case but did not replace it
+   end-to-end. `test_batch_failure_keeps_earlier_commit_and_later_raws_unconsumed`
+   drives the producer without reading the journal through doctor; the new file
+   drives doctor for `ok`, `partial`, `resynth`, `noop`, and failed dry-run, but
+   never makes a later batch fail after an earlier commit. Thus the exact
+   producer ambiguity from round-2 F3 is no longer protected at the
+   producer/consumer seam. Suggested direction: use a two-batch sequenced brain
+   to emit the real `error` + refreshed record, then assert the journal fields
+   and green doctor result.
+
+4. **minor** —
+   `tests/test_doctor_capability_and_health.py:488`: the FIFO and oversized-
+   manifest regressions now use `#!/bin/sh`, so the exact-root shebang check
+   rejects their executables before `_read_bounded_json` reaches either
+   manifest. Both tests pass if the bounded/regular-file protection is removed;
+   the lexical-root change therefore silently defanged the round-2 guard tests.
+   Suggested direction: give these fixtures an accepted same-root Python
+   shebang so each test reaches the manifest read, and assert that seam directly
+   where useful.
+
+Verification: reviewed exact `git diff main...HEAD`; traced every `_log_pass`
+producer path and confirmed the real engine's `at`, `status`,
+`node_refreshed`, and `dry_run` values satisfy the new field-type validation;
+exercised same-root non-Python, relative/env, path-alias, malformed-final-JSON,
+and torn-UTF-8 cases; and inspected the replacement end-to-end tests against
+the paths they claim. Relative/traversal-style aliases fail closed, and
+case/path aliases produce false negatives rather than a false-green bypass, but
+the same-root non-Python case remains a false green. Targeted capability,
+doctor-health, end-to-end-health, and curator tests passed. `git diff --check`
+passed. The canonical `scripts/ci.py` gate passed: ruff, format, mypy,
+store-chokepoint, and 1,542 tests with 92.15% coverage.
+
+**Verdict:** `changes-requested` — the readable-shebang gate can still certify
+an unrelated same-root executable, and damaged/torn final log records can
+either restore green health or abort doctor; two claimed regression seams are
+also not actually exercised.

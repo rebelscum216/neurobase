@@ -43,6 +43,7 @@ the minimum safe contract, add its name to ``capability_manifest.json``, bump
 from __future__ import annotations
 
 import json
+import re
 import sys
 from enum import Enum
 from importlib.resources import files
@@ -148,6 +149,17 @@ def _site_packages_candidates(executable: Path) -> list[Path]:
     return candidates
 
 
+#: Interpreter basenames we accept as "this is a Python". Deliberately a shape
+#: match rather than a fixed list, so `python3.15` works the day it exists, but
+#: narrow enough that `sh`, `ruby`, or `python-not-really` do not qualify.
+_PYTHON_NAME = re.compile(r"^python(?:w)?(?:\d+(?:\.\d+)*)?(?:\.exe)?$", re.IGNORECASE)
+
+
+def _is_python_interpreter(name: str) -> bool:
+    """Does this basename name a CPython console interpreter?"""
+    return bool(_PYTHON_NAME.match(name))
+
+
 class _Shebang(Enum):
     """What a console script's first line told us about its environment."""
 
@@ -197,6 +209,12 @@ def _interpreter_root(executable: Path) -> Path | _Shebang:
     # Python it selects depends on PATH at run time, so `/usr/bin` is not an
     # environment root and treating it as one would certify anything under /usr.
     if interpreter.name == "env":
+        return _Shebang.AMBIGUOUS
+    # The shebang must name a *Python*. Without this, `#!<env>/bin/sh` beside a
+    # planted manifest passed the root check and was certified — the binding is
+    # to "the Python that imports the attesting package", and any other
+    # interpreter tells us nothing about that (review round 4, F1).
+    if not _is_python_interpreter(interpreter.name):
         return _Shebang.AMBIGUOUS
     return interpreter.parent.parent
 

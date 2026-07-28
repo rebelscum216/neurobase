@@ -180,3 +180,67 @@ def test_skipped_locked_never_reaches_the_journal(project: tuple[Path, Path]) ->
 
     assert summary["status"] == "skipped-locked"
     assert all(record["status"] != "skipped-locked" for record in _journal(root))
+
+
+class _SequencedBrain(_Brain):
+    """Plans returned in order, so a *later* batch can fail after an earlier one
+    has already committed — the producer shape round-2 F3 was about."""
+
+    def __init__(self, plans: list[Any], node_text: Any = "# Status\n\nbody") -> None:
+        super().__init__(node_text=node_text)
+        self._plans = iter(plans)
+
+    def plan_json(self, system: str, user: str) -> dict:
+        plan = next(self._plans)
+        if isinstance(plan, Exception):
+            raise plan
+        return plan
+
+
+def test_later_batch_failure_journals_error_with_a_refreshed_node(
+    project: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**Round-4 F3 regression — the producer/consumer seam.**
+
+    When a later batch fails, the engine still synthesizes from the batches that
+    committed and *then* logs `error`. Classifying on `status` alone called that
+    a frozen node. This drives the real engine into that state and asserts both
+    the journal fields and doctor's verdict, so producer and consumer cannot
+    drift apart silently.
+    """
+    root, repo = project
+    _write_raw(root, "r1.md")
+    _write_raw(root, "r2.md")
+    # Force one raw per plan batch so the second call is a separate batch.
+    monkeypatch.setattr(engine, "_next_plan_batch", _one_raw_per_batch(engine._next_plan_batch))
+
+    engine.curate(
+        root,
+        "repo",
+        _SequencedBrain(
+            [
+                {
+                    "upserts": [{"slug": "landed", "body": "yes", "from_raw": ["r1.md"]}],
+                    "tombstones": [],
+                },
+                BrainError("batch two failed"),
+            ]
+        ),
+    )
+
+    record = _journal(root)[-1]
+    assert record["status"] == "error"
+    assert record["node_refreshed"] is True, "synthesis ran over the committed batch"
+
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "ok", "a refreshed node is not frozen, whatever `status` says"
+
+
+def _one_raw_per_batch(original):
+    """Wrap `_next_plan_batch` so each batch carries exactly one raw."""
+
+    def _wrapped(curated, remaining, max_bytes):
+        docs, payload = original(curated, remaining[:1], max_bytes)
+        return docs, payload
+
+    return _wrapped

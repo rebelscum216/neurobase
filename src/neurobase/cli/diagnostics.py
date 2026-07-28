@@ -108,34 +108,50 @@ def _read_curator_log(path: Path) -> tuple[list[dict], LogState]:
     value that is not a well-formed record (``[]``, or a dict missing ``at``)
     cannot be a half-written dict, so it does not qualify (round 3, F2).
     """
-    lines: list[str] = []
     try:
-        with path.open(encoding="utf-8") as fh:
-            lines = [line.strip() for line in fh]
+        raw = path.read_bytes()
     except FileNotFoundError:
         return [], LogState.MISSING
     except OSError:
         return [], LogState.UNREADABLE
 
-    populated = [line for line in lines if line]
-    if not populated:
+    if not raw.strip():
         return [], LogState.EMPTY
+
+    # The producer appends `json.dumps(...) + "\n"` as one write, so a **missing
+    # trailing newline** is the byte-level signature of an interrupted append —
+    # and the only thing that earns the fail-soft exception. Excusing "the last
+    # line failed to parse" instead let a complete garbage line read as healthy
+    # (review round 4, F2).
+    torn_tail = not raw.endswith(b"\n")
+    byte_lines = [line for line in raw.split(b"\n") if line.strip()]
 
     entries: list[dict] = []
     damaged = False
-    last_index = len(populated) - 1
-    for index, line in enumerate(populated):
+    last_index = len(byte_lines) - 1
+    for index, blob in enumerate(byte_lines):
+        excusable = torn_tail and index == last_index
+        try:
+            line = blob.decode("utf-8")
+        except UnicodeDecodeError:
+            # A multi-byte character cut mid-sequence by an interrupted write is
+            # the same torn-append case; anywhere else it is damage. Either way
+            # doctor reports — decoding must never abort a diagnostic.
+            if not excusable:
+                damaged = True
+            continue
         try:
             parsed = json.loads(line)
         except ValueError:
-            # Only an unterminated *final* line is the torn-write case.
-            if index != last_index:
+            if not excusable:
                 damaged = True
             continue
         if _is_wellformed_record(parsed):
-            entries.append(parsed)  # type: ignore[arg-type]
+            entries.append(parsed)
         else:
-            damaged = True  # complete but not a record — never a partial append
+            # Complete, decodable, well-formed JSON that is not one of our
+            # records cannot be a half-written dict — never excusable.
+            damaged = True
 
     if not entries:
         return [], LogState.UNPARSEABLE

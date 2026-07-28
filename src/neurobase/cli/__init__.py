@@ -54,13 +54,17 @@ def version() -> None:
 
 @app.command()
 def capabilities() -> None:
-    """Print this build's safety-capability profile as JSON.
+    """Print this build's safety-capability profile as JSON — for inspection.
 
-    Machine-readable on purpose: ``doctor`` runs this against the executable
-    named by each *enabled* startup hook, which may be a different — older —
-    build than the one diagnosing. A build predating the profile has no such
-    command, and that failure is exactly the signal doctor needs (2026-07-27
-    recurrence: the hooks ran a shim three weeks older than the hardening).
+    An early revision had ``doctor`` *execute* this against the executable named
+    by each enabled startup hook. That was a security defect: doctor would run
+    any command a repo-local hooks file named, including one the agent itself
+    never discovers. Doctor now reads the packaged manifest statically and never
+    executes a configured command (see ``core.capabilities``).
+
+    The command survives as the human- and CI-facing way to ask an install what
+    it provides — ``neurobase capabilities`` beside a suspicious shim answers the
+    2026-07-27 question directly, without doctor having to run anything.
     """
     typer.echo(json.dumps(capability_profile.describe(), indent=2))
 

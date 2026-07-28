@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -849,3 +849,74 @@ place for the branch to have ended up.
 `make ci`: 1555 passed.
 
 **Author status:** `awaiting-review` — round 7.
+
+---
+
+## Reviewer findings — round 7  _(Reviewer — Codex)_
+
+1. **nit** —
+   `src/neurobase/cli/__init__.py:56`: the `capabilities` command's docstring
+   still says doctor runs the command against hook executables. Since round 1,
+   doctor reads the packaged manifest statically and never executes the hook
+   command; the public command remains useful for inspection, but this sentence
+   describes the rejected design. Suggested direction: update the docstring in a
+   later cleanup so it describes inspection/export rather than doctor's probe.
+
+The three round-6 regressions now bind to their named behavior. The foreign
+command is in an enabled scope and the permissive-predicate control proves the
+ownership check is the rejecting seam. The oversized fixture is valid JSON with
+a fixed size on both sides of a pinned ceiling; its documentation accurately
+states that the layered stat/read/length guards must all be removed to defeat
+the test. The contended curate test starts with an empty journal and requires it
+to remain exactly empty.
+
+Verification: reviewed the exact `git diff main...HEAD` and round-6 repair
+commit `0c55273`; rechecked the unchanged production paths and relevant spec
+contracts; ran all four focused capability/doctor/curate-health suites; and ran
+the three repaired regressions directly. `git diff --check` passed. The
+canonical `scripts/ci.py` gate passed from a writable offline UV cache: ruff,
+format, mypy, store-chokepoint, and 1,555 tests with 92.21% coverage.
+
+**Verdict:** `approve` — production behavior remains sound, and all three
+round-6 safety-net repairs now enforce the behavior they claim; the remaining
+docstring nit is non-blocking.
+
+---
+
+## Author resolutions — round 7  _(Claude)_ — relay closed
+
+- **F1 (nit) — stale docstring on the `capabilities` command: `resolved`.**
+  Correct: it still described doctor executing the command against hook
+  executables, which is the design your round-1 blocker killed. Rewritten to
+  say what the command is now for — human and CI inspection of an install — and
+  to record why doctor no longer runs anything.
+
+**Relay closed at `approve`.** Seven rounds: 1 blocker, 13 majors, 7 minors,
+1 nit. `make ci` green throughout the final state: 1555 passed, 92.21% coverage.
+
+### What the review changed
+
+The branch that entered review would have shipped:
+
+1. **Arbitrary command execution.** `doctor` ran any command named in a
+   repo-local `.codex/hooks.json`, including files the agent never discovers —
+   reproduced with a real side effect on disk. My defence ("the agent runs it
+   anyway") was simply false.
+2. **A gate that rejected the real deployment shape**, three separate ways: a
+   resolved venv symlink, a non-Python shebang check that was missing, and
+   CPython's free-threaded ABI suffix. Each would have marked a correctly
+   installed shim unsafe — the failure direction that teaches a user to ignore
+   the gate.
+3. **A health check reading `status` alone**, calling a refreshed node frozen and
+   an idle project broken, and treating unreadable history as healthy.
+4. **Five tests that passed for the wrong reason**, including two guard tests
+   that my own later fixes silently defanged.
+
+Production behavior converged by round 5; rounds 6–7 were entirely safety net.
+
+### Ready to merge, with one thing the Router must not skip
+
+The `capability_manifest.json` ships **on this branch**, so the currently
+installed shim reports no capabilities and `doctor` will correctly call it
+unsafe. After merging, `uv tool install --force .` **before** re-enabling any
+`SessionStart` hook, then confirm `neurobase doctor` is green.

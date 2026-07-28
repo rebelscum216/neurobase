@@ -1,0 +1,131 @@
+---
+slug: doctor-capability-gate
+status: awaiting-review
+author: claude
+reviewer: codex
+branch: feat/doctor-capability-and-curate-health
+diff: git diff main...HEAD
+created: 2026-07-27
+---
+
+# Review: doctor safety-capability gate + curate-health check
+
+## Brief  _(Author — Claude)_
+
+**Intent.** Implements **item 1** of the resequencing agreed in
+`docs/reviews/2026-07-27-context-loading-review.md` (approved after six rounds).
+Two new `doctor` checks, both motivated by the same failure: on 2026-07-27
+`doctor` reported all-green while both `SessionStart` hooks invoked a shim built
+2026-07-09 containing none of the automatic-curation guards, and while two status
+nodes had been frozen for 7 and 11 days with every failure recorded only in
+`.curator-log.jsonl`, which nothing read.
+
+This is the first code on this thread — the six prior rounds produced only
+documents.
+
+**Scope.** Branch `feat/doctor-capability-and-curate-health`, `git diff main...HEAD`.
++818 / −2 across six files:
+
+- `src/neurobase/core/capabilities.py` — **new.** Versioned profile
+  `automatic-curation-safety-v1`; four behavioral-invariant names; `describe()`;
+  `missing_for_startup_hook()`.
+- `src/neurobase/cli/__init__.py` — new `capabilities` command (JSON).
+- `src/neurobase/cli/diagnostics.py` — `_startup_hook_executables`,
+  `_probe_capabilities`, `_capability_checks`, `_curate_health_check`,
+  `_read_curator_log`; both wired into `collect_checks`.
+- `tests/test_capabilities.py` — **new**, 13 tests.
+- `tests/test_doctor_capability_and_health.py` — **new**, 16 tests.
+- `tests/test_cli_doctor.py` — 2 new end-to-end tests; **7 existing tests
+  modified** (see focus area 1).
+
+**Focus areas.** Ranked by where I think this is most likely to be wrong.
+
+1. **I changed seven existing tests to make them pass — audit that.** They point
+   `SessionStart` at `SHIM = "/usr/local/bin/neurobase"`, a fixture path that
+   does not exist, so the new gate correctly marks them unsafe and `doctor` now
+   exits 1. I added `_patch_capability_probe` to their shared `_patch_tools`
+   fixture rather than weakening the check. **"Make the failing tests pass" is
+   exactly where a real gate gets quietly defanged** — please check I stubbed at
+   the right seam and did not blunt the gate for cases that should still fail.
+
+2. **`doctor` now executes a binary path read from user config.**
+   `_probe_capabilities` runs `subprocess.run([executable, "capabilities"])`
+   where `executable` comes from `~/.claude/settings.json` or
+   `~/.codex/hooks.json`. My reasoning: that path is already executed by the
+   agent on every session start, so doctor is not widening the trust boundary —
+   it runs what the hook would run. **If you disagree, this is a blocker.**
+   Related: is a 10s timeout with `check=False` sufficient, and is doctor still
+   honestly "read-only" (spec §6) when it spawns a subprocess?
+
+3. **The self-attestation hole I could not close.** If `doctor` *itself* is the
+   stale binary, its `REQUIRED_FOR_STARTUP_HOOK` is also stale, and it will
+   certify a stale hook as fine. Round 3 of the prior relay named this
+   ("never equate self-attestation by the same stale binary with proof that it is
+   current"). I take the requirement from the diagnosing build and print the
+   profile name in the detail line so the source is visible — but I have not
+   solved it. Is there a construction that does, short of a network call (which
+   principle #5 forbids)?
+
+4. **Two judgment calls worth challenging.**
+   - `_CURATE_FAILURE_ERROR_THRESHOLD = 3` — warn below, error at/above. Arbitrary.
+   - Capability failure is `error` (doctor non-green), not `warn`. I argue a
+     warning would have been ignored exactly as the all-green was. Q-F of the
+     prior relay agreed, but that was about a design sketch, not this code.
+
+5. **Parsing.** `_startup_hook_executables` splits the hook command on `" hook "`
+   rather than whitespace so a shim path containing a space still resolves. Is
+   there a hook-command shape in the wild this mis-parses? It also
+   `setdefault`s project scope over user scope — check that precedence matches
+   how the hooks actually resolve.
+
+**Known risks / tradeoffs.**
+
+- **Spawn-side debounce is still absent**, deliberately. The prior relay
+  established the single-flight lock is the correctness boundary and debounce is
+  efficiency only; the 0b regression confirmed 30 hooks → 30 spawns → 1 pass.
+  Out of scope here, but say if you think this branch should carry it.
+- `PROVIDES` is a hand-maintained literal. Each name has a behavioral test, but
+  nothing forces a *new* guard to be added to the set. I could not think of a
+  non-brittle way to enforce that; suggestions welcome.
+- The profile string is unversioned within itself (`-v1` is by convention). If
+  that should be structured, better to say so before anything depends on it.
+- Coverage of `_probe_capabilities`'s failure branches is via injected fakes, not
+  real subprocesses. Deliberate (hermetic, fast), but it means the real
+  `subprocess.run` call path is only exercised by the live check below.
+
+**How to verify.**
+
+```bash
+git diff main...HEAD
+make ci                                   # 1510 passed, 92.11% (floor 90.5)
+uv run python -m neurobase capabilities   # the JSON doctor probes for
+uv run python -m neurobase doctor         # live: reports 2056 failed passes since 2026-07-16
+uv run python -m pytest tests/test_capabilities.py tests/test_doctor_capability_and_health.py -q
+```
+
+Live evidence this works, from the reporting machine:
+
+```
+✗ curate health: 'neurobase': 2056 failed pass(es) since 2026-07-16T17:20:22.704433Z
+                 — last: claude -p exited 1:
+✓ hook capabilities: no startup hooks enabled — automatic-curation-safety-v1 not required
+```
+
+**Out of scope.**
+
+- The stale-shim upgrade, the 30-way concurrency regression, and the incident-note
+  append (items 0/0b/0c) — done, on `ops/item-0-shim-evidence`.
+- Re-enabling `SessionStart`. Still disabled for both agents; that is the user's call.
+- Item 3 (clean diagnostic curate pass) — blocked until the Claude weekly quota
+  resets; unrelated to this diff.
+- The `claude -p exited 1` failures themselves. Now understood to be quota
+  exhaustion, not a code defect.
+
+---
+
+## Reviewer findings  _(Reviewer — Codex)_
+
+> Run the diff and review the actual code. One entry per finding.
+> Focus areas 1 and 2 are where I most expect to be wrong.
+
+**Verdict:** _(pending)_

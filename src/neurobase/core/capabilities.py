@@ -149,10 +149,22 @@ def _site_packages_candidates(executable: Path) -> list[Path]:
     return candidates
 
 
-#: Interpreter basenames we accept as "this is a Python". Deliberately a shape
-#: match rather than a fixed list, so `python3.15` works the day it exists, but
-#: narrow enough that `sh`, `ruby`, or `python-not-really` do not qualify.
-_PYTHON_NAME = re.compile(r"^python(?:w)?(?:\d+(?:\.\d+)*)?(?:\.exe)?$", re.IGNORECASE)
+#: Interpreter basenames we accept as "this is a Python", modelling CPython's
+#: real executable grammar: ``python`` + optional ``w`` (the Windows GUI
+#: launcher) + optional version + optional **ABI flags** + optional ``.exe``.
+#:
+#: The ABI flags matter. Free-threaded builds (PEP 703, CPython 3.13+) install as
+#: ``python3.14t``, and debug builds as ``python3.14d``; omitting them rejected a
+#: genuine supported install and reported it unsafe — the same class of false
+#: negative as the resolved-symlink bug in round 3 (review round 5, F1).
+#:
+#: Deliberately a shape match rather than a fixed list, so `python3.15` works the
+#: day it ships, but narrow enough that `sh`, `ruby`, and `python-not-really` do
+#: not qualify.
+_PYTHON_NAME = re.compile(
+    r"^python(?:w)?(?:\d+(?:\.\d+)*)?[td]{0,2}(?:\.exe)?$",
+    re.IGNORECASE,
+)
 
 
 def _is_python_interpreter(name: str) -> bool:

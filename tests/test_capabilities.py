@@ -63,12 +63,43 @@ def test_capabilities_command_emits_the_profile() -> None:
 
 def test_hook_reentrancy_suppression_is_real(monkeypatch, capsys) -> None:
     """`hook-reentrancy-suppression`: a hook invoked from inside Neurobase's own
-    subprocess must do nothing at all."""
+    subprocess returns *before doing any work at all*.
+
+    Asserts the early-return **seam**, not a side effect. An earlier version
+    checked only that stdout was empty — which the ordinary hook path also
+    produces under this fixture's empty store, so the test passed with the guard
+    disabled and proved nothing (review round 5, F2). Tripwires on stdin reading
+    and on the session-start handler make "never reached" the actual assertion.
+    """
+    import neurobase.cli as cli_module
     from neurobase.cli import run_hook
+
+    reached: list[str] = []
+
+    # A recorder rather than a raise: `run_hook` is fail-safe by contract and
+    # swallows every exception, so a tripwire that raises would be silently
+    # eaten and the test would pass either way — the exact failure mode this
+    # rewrite is fixing.
+    def _record_stdin() -> dict:
+        reached.append("stdin")
+        return {}
+
+    def _record_handler(*_a: object, **_k: object) -> None:
+        reached.append("handler")
+
+    monkeypatch.setattr(cli_module, "_read_stdin_json", _record_stdin)
+    monkeypatch.setattr(cli_module, "_hook_claude_session_start", _record_handler)
 
     monkeypatch.setenv("NEUROBASE_INTERNAL_CALL", "1")
     run_hook(["claude", "session-start"])
+    assert reached == [], "the guard let execution past its early return"
     assert capsys.readouterr().out == ""
+
+    # The recorder must genuinely fire with the guard off, or the assertion above
+    # proves nothing — which is how the previous version of this test passed.
+    monkeypatch.delenv("NEUROBASE_INTERNAL_CALL", raising=False)
+    run_hook(["claude", "session-start"])
+    assert reached, "tripwire never fires — the assertion above is vacuous"
 
 
 def test_curate_single_flight_is_real(tmp_path) -> None:

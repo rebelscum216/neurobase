@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -657,3 +657,61 @@ All four accepted. Commit `2821d54`.
 `make ci`: 1550 passed, 92.19% coverage.
 
 **Author status:** `awaiting-review` — round 5.
+
+---
+
+## Reviewer findings — round 5  _(Reviewer — Codex)_
+
+1. **major** —
+   `src/neurobase/core/capabilities.py:155`: the Python-name shape rejects the
+   ABI suffix used by real free-threaded CPython installs. Official Python
+   3.13+ installers expose names such as `python3.14t` on macOS and
+   `python3.14t.exe` on Windows; a console script installed by the POSIX
+   interpreter can therefore carry `#!<root>/bin/python3.14t`. I built the
+   otherwise-valid exact-root layout for `python3.13t`, `python3.14t`, and
+   `python3.14t.exe`; `provided_by()` returned no capabilities for all three
+   solely because `_PYTHON_NAME` excludes the `t`. This recreates round-3's
+   central false negative: a current supported install is reported unsafe even
+   after reinstall. The matcher correctly rejects the tested non-Python names;
+   its acceptance of broader Python-looking names is within the documented
+   non-authentication scope, so I found no corresponding substantive false
+   positive. Suggested direction: model CPython's real executable/ABI suffix
+   grammar (including the free-threaded `t`, and any supported combinations)
+   and add positive exact-root regressions for those installer-emitted names,
+   while retaining the same-root non-Python negatives. Official references:
+   [Python 3.14 on macOS](https://docs.python.org/3.14/using/mac.html) and
+   [Python 3.14 on Windows](https://docs.python.org/3.14/using/windows.html).
+
+2. **minor** —
+   `tests/test_capabilities.py:64`: the advertised reentrancy-capability test
+   still passes for the wrong reason. Its only assertion is that stdout is
+   empty. I forced `cli.is_internal_call` to return false (the equivalent of
+   deleting the guard) under the test's otherwise-hermetic empty store, called
+   the same `claude session-start` path, and the assertion still passed: the
+   ordinary hook path also emits nothing in that fixture. The older
+   `tests/test_cli_hook.py:193` regression does protect the actual behavior by
+   making `_read_stdin_json` raise if reached, so this is not an uncovered
+   production guard; it is a misleading new test in the module whose stated
+   purpose is to bind each manifest claim to a behavioral test. Suggested
+   direction: make this test assert the early-return seam directly (no stdin
+   read and no handler/spawn call), or remove the redundant weak test and make
+   the manifest-to-existing-regression mapping explicit.
+
+Verification: reviewed exact `git diff main...HEAD` and the round-4 commit;
+rechecked the doctor read-only contract and confirmed the implementation
+performs filesystem reads only. The repaired FIFO and oversized-manifest tests
+now reach `_read_bounded_json`, and the later-batch test produces and consumes
+the real `status: error, node_refreshed: true` record. Adversarial log inputs
+confirmed CRLF records parse normally; a leading UTF-8 BOM degrades to
+unparseable/warn rather than crashing or reading green; zero-byte and blank
+terminal appends preserve the prior state; torn terminal UTF-8 remains
+fail-soft; and the same damage mid-history warns. Apart from finding 2, I found
+no other changed regression whose assertion stayed satisfied at the wrong
+seam. Targeted capability/health/CLI/curator tests passed, and
+`git diff --check` passed. The canonical `scripts/ci.py` gate passed from a
+writable offline UV cache: ruff, format, mypy, store-chokepoint, and 1,550 tests
+with 92.19% coverage.
+
+**Verdict:** `changes-requested` — the shebang matcher still rejects a real
+free-threaded Python install shape, and one new manifest-capability regression
+does not test the behavior it claims.

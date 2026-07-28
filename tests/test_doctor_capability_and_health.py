@@ -798,3 +798,32 @@ def test_truncated_utf8_mid_history_is_damage(tmp_path: Path) -> None:
     check = diagnostics._curate_health_check(root, repo)
     assert check.status == "warn"
     assert "malformed" in check.detail
+
+
+@pytest.mark.parametrize(
+    "interpreter",
+    ["python3.13t", "python3.14t", "python3.14t.exe", "python3.14d", "python3.14td"],
+)
+def test_free_threaded_and_debug_abi_installs_are_accepted(
+    tmp_path: Path, interpreter: str
+) -> None:
+    """**Round-5 F1 regression.**
+
+    Free-threaded CPython (PEP 703, 3.13+) installs as `python3.14t`, debug
+    builds as `python3.14d`. Omitting the ABI suffixes rejected genuine supported
+    installs — the same false-negative class as the resolved-symlink bug, where a
+    correct install is reported unsafe.
+    """
+    root = tmp_path / f"abi-{interpreter}"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / interpreter).write_text("", encoding="utf-8")
+    executable = root / "bin" / "neurobase"
+    executable.write_text(f"#!{root / 'bin' / interpreter}\n", encoding="utf-8")
+    package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    (package / capabilities.MANIFEST_NAME).write_text(
+        json.dumps({"profile": capabilities.PROFILE, "provides": sorted(capabilities.PROVIDES)}),
+        encoding="utf-8",
+    )
+
+    assert capabilities.provided_by(executable) == capabilities.PROVIDES

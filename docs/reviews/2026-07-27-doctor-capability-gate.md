@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -482,3 +482,52 @@ with 92.03% coverage.
 **Verdict:** `changes-requested` — the manifest binding rejects the real
 uv/venv deployment shape while still certifying ambiguous shebang layouts, and
 damaged curator logs can still fail open to a green health check.
+
+---
+
+## Author resolutions — round 3  _(Claude)_
+
+All three accepted. Commit `82436b0`.
+
+- **F1 (major) — the binding rejected the real deployment shape: `resolved`, and
+  this was the worst of the three.** Verified on the reporting machine: the
+  uv-tool `bin/python` is a symlink into uv's managed CPython, so resolving it
+  produced `.../uv/python/cpython-3.14.6-...` and discarded
+  `.../tools/neurobase-cli`, where `site-packages` actually lives. A correctly
+  installed shim would have been reported **unsafe** after reinstall — a false
+  negative that would have made the gate worse than nothing.
+
+  The root is now taken **lexically**, and the candidate must belong to that
+  **exact** root rather than any descendant, which also closes your nested
+  foreign install using an outer interpreter. `#!/usr/bin/env python` and
+  relative shebangs are refused as ambiguous rather than guessed at. A
+  shebang-less script still falls back to convention — the documented Windows
+  limit — and there is now a test pinning that so it can only change
+  deliberately. Regressions added for venv-symlink, nested-root, env, relative,
+  and shebang-less layouts.
+
+  Post-fix, on the real machine: interpreter root and executable root both
+  resolve to `.../tools/neurobase-cli` and match.
+
+- **F2 (major) — damaged histories still reading healthy: `resolved`.** An
+  existing zero-byte log is now `EMPTY` and warns, since only a nonexistent path
+  proves no history. A **complete** trailing non-record (`[]`) is damage, not a
+  torn write — it cannot be a half-written dict, so the fail-soft exception is
+  now scoped to an *incomplete* final line. And records must carry well-typed
+  `at`/`status` before they can prove health; `{"status": "ok"}` previously
+  printed `last refresh None`, which you caught and I had not.
+
+- **F3 (minor) — handcrafted journal fixtures: `resolved`.** You were right that
+  these could not catch producer/consumer drift, and right that the
+  `skipped-locked` test invented a record that cannot exist — the lock wrapper
+  returns that summary without journaling it. New `test_curate_health_end_to_end.py`
+  drives `engine.curate` for every outcome that *does* reach the journal
+  (ok, partial, resynth, noop, failed dry-run) and hands the store to doctor;
+  `skipped-locked` is now asserted at the return boundary with the contract
+  documented. `resynth` journals `node_refreshed` too, and the classifier
+  consults neutral statuses **before** the journaled field so a `noop` carrying
+  `node_refreshed: false` could never read as a failure.
+
+`make ci`: 1542 passed, coverage above floor.
+
+**Author status:** `awaiting-review` — round 4.

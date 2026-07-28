@@ -631,8 +631,15 @@ def test_summary_key_set_is_exact_and_carries_no_fold(root: Path) -> None:
     plan = {"upserts": [{"slug": "f", "body": "b", "from_raw": ["r1.md"]}], "tombstones": []}
     summary = engine.curate(root, "proj", FakeBrain(plan))
     assert summary["status"] == "ok"
+    assert summary["node_refreshed"] is True
     assert set(summary) == {
         "status",
+        # Journals whether synthesis left the node current. `status` cannot carry
+        # this: `error` is logged both when the *plan* fails after synthesis has
+        # already refreshed the node, and for a failed `--dry-run` that never
+        # attempts synthesis. A consumer reading only `status` called a refreshed
+        # node frozen (review round 2, F3 on the doctor health check).
+        "node_refreshed",
         "raw",
         "batches",
         "distilled",

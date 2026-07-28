@@ -44,34 +44,45 @@ _CURATE_SUCCESS = frozenset({"ok", "resynth"})
 #: the user asked for a plan and no write.
 _CURATE_NEUTRAL = frozenset({"noop", "skipped-locked", "dry-run"})
 
-#: A pass that meant to produce a node and did not. `partial` belongs here: raws
-#: are consumed and facts upserted, then synthesis dies — which is precisely the
-#: shape that leaves a node frozen while curated facts move on.
+#: A pass that meant to produce a node and did not.
+#:
+#: `status` alone is not sufficient here and must not be used alone: the engine
+#: logs `error` for a *plan* failure, after synthesis has already refreshed the
+#: node from whatever committed, and for a failed `--dry-run`, which never
+#: attempts synthesis at all. Records carrying `node_refreshed` are classified on
+#: that journaled fact; this set is the fallback for records written before the
+#: field existed (review round 2, F3).
 _CURATE_FAILURE = frozenset({"error", "partial"})
 
 
 class LogState(Enum):
     """Why a curator-log read produced the entries it did.
 
-    Kept separate from the entries themselves because *no history* and
-    *unreadable history* are different diagnoses that an earlier revision
-    collapsed into one cheerful "no curate passes recorded". A permissions
-    failure could therefore restore the all-green blindness this check exists to
-    prevent.
+    Kept separate from the entries themselves because *no history* and *history
+    we cannot vouch for* are different diagnoses. An earlier revision collapsed
+    them into one cheerful "no curate passes recorded", so a permissions failure
+    restored exactly the all-green blindness this check exists to prevent.
     """
 
     MISSING = "missing"
     UNREADABLE = "unreadable"
     UNPARSEABLE = "unparseable"
+    #: Readable, but some record in the middle of the history is malformed. Only
+    #: the *final* line may be torn (the writer appends), so damage anywhere else
+    #: means the history is incomplete in a way we cannot characterize.
+    DAMAGED = "damaged"
     OK = "ok"
 
 
 def _read_curator_log(path: Path) -> tuple[list[dict], LogState]:
     """Curator-log entries plus the state of the read.
 
-    A torn trailing line stays fail-soft — the writer appends, so the last line
-    can be mid-write — but a log that exists, holds bytes, and yields no records
-    at all is reported as unparseable rather than as an empty history.
+    A torn **trailing** line stays fail-soft: the writer appends, so the last
+    record can legitimately be mid-write. Every other malformed line makes the
+    history ``DAMAGED`` — an earlier revision skipped them all silently, which
+    meant an old success followed by a corrupt record and a later append read as
+    healthy, and that is the durable shape after a torn write is appended to
+    (review round 2, F4).
     """
     lines: list[str] = []
     try:
@@ -83,18 +94,28 @@ def _read_curator_log(path: Path) -> tuple[list[dict], LogState]:
         return [], LogState.UNREADABLE
 
     populated = [line for line in lines if line]
+    if not populated:
+        return [], LogState.MISSING
+
     entries: list[dict] = []
-    for line in populated:
+    damaged = False
+    last_index = len(populated) - 1
+    for index, line in enumerate(populated):
         try:
             parsed = json.loads(line)
         except ValueError:
+            if index != last_index:
+                damaged = True
             continue
         if isinstance(parsed, dict):
             entries.append(parsed)
-    if populated and not entries:
+        elif index != last_index:
+            damaged = True
+
+    if not entries:
         return [], LogState.UNPARSEABLE
-    if not populated:
-        return [], LogState.MISSING
+    if damaged:
+        return entries, LogState.DAMAGED
     return entries, LogState.OK
 
 
@@ -571,13 +592,19 @@ def _startup_hook_executables(cwd: Path) -> list[tuple[str, str]]:
             if sep and head:
                 found.append((label, head))
 
+    # Resolve the project root once and use it for *both* agents' project scope.
+    # Claude project settings live at `<repo>/.claude/settings.json`, so keying
+    # them off the literal cwd let an enabled repo-root hook escape the gate
+    # whenever doctor ran from a subdirectory (review round 2, F2).
+    project_root = projects.git_common_root(cwd) or cwd
+
     for user_scope in (False, True):
         scope = "user" if user_scope else "project"
-        doc, error = _read_json(claude_install.settings_path(user=user_scope, cwd=cwd))
+        base = cwd if user_scope else project_root
+        doc, error = _read_json(claude_install.settings_path(user=user_scope, cwd=base))
         if error is None:
             _collect(f"claude SessionStart ({scope})", doc, claude_install.is_owned_command)
 
-    project_root = projects.git_common_root(cwd) or cwd
     doc, error = _read_json(codex_install.hooks_json_path(user=True, cwd=project_root))
     if error is None:
         _collect("codex SessionStart (user)", doc, codex_install.is_owned_command)
@@ -641,27 +668,67 @@ def _capability_checks(cwd: Path) -> list[Check]:
     return checks
 
 
-def _classify_curate_history(entries: list[dict]) -> tuple[dict | None, int, dict | None]:
-    """``(last success, failures since it, last failing entry)``.
+def _refreshed_the_node(entry: dict) -> bool | None:
+    """Did this pass leave the status node current? ``None`` ⇒ cannot tell.
 
-    Neutral outcomes (``noop``, ``skipped-locked``, ``dry-run``) are skipped in
-    both directions: they neither prove health nor count against it, and an
-    earlier revision counting them as failures reported an idle project as
-    broken. Unknown statuses from a future engine are treated as neutral rather
-    than as failures — a newer producer must not make an older doctor cry wolf.
+    Prefers the journaled ``node_refreshed`` fact over inferring from ``status``,
+    because ``status`` is overloaded: ``error`` covers both a plan failure *after*
+    synthesis refreshed the node and a failed ``--dry-run`` that never attempted
+    it (review round 2, F3). Records predating the field fall back to the status
+    sets, and a status this build does not recognize returns ``None`` so the
+    caller can say "unknown" rather than guess in either direction.
     """
-    last_success = next((e for e in reversed(entries) if e.get("status") in _CURATE_SUCCESS), None)
+    refreshed = entry.get("node_refreshed")
+    if isinstance(refreshed, bool):
+        # A failed preview changes nothing at all — neither refreshes nor freezes.
+        if entry.get("dry_run") is True:
+            return None
+        return refreshed
+    status = entry.get("status")
+    if status in _CURATE_SUCCESS:
+        return True
+    if status in _CURATE_FAILURE:
+        return False
+    if status in _CURATE_NEUTRAL:
+        return None
+    return None
+
+
+def _classify_curate_history(
+    entries: list[dict],
+) -> tuple[dict | None, int, dict | None, bool]:
+    """``(last refreshing pass, failures since it, last failing entry, saw unknown)``.
+
+    Neutral outcomes are skipped in both directions: they neither prove health
+    nor count against it, and an earlier revision counting them as failures
+    reported an idle project as broken.
+
+    An **unrecognized** status is different from a neutral one and is reported
+    separately. An older doctor genuinely cannot tell whether a newer engine's
+    status denotes a synthesis failure, so treating it as healthy would restore
+    the "unknown history reads as green" hole; the caller downgrades to a warning
+    instead (review round 2, F4).
+    """
+    last_refresh: dict | None = None
     failures = 0
     last_failure: dict | None = None
+    saw_unknown = False
+
     for entry in reversed(entries):
-        status = entry.get("status")
-        if status in _CURATE_SUCCESS:
+        verdict = _refreshed_the_node(entry)
+        if verdict is True:
+            last_refresh = entry
             break
-        if status in _CURATE_FAILURE:
+        if verdict is False:
             failures += 1
             if last_failure is None:
                 last_failure = entry
-    return last_success, failures, last_failure
+        elif entry.get("status") not in _CURATE_NEUTRAL and entry.get("dry_run") is not True:
+            saw_unknown = True
+
+    if last_refresh is None:
+        last_refresh = next((e for e in reversed(entries) if _refreshed_the_node(e) is True), None)
+    return last_refresh, failures, last_failure, saw_unknown
 
 
 def _curate_health_check(root: Path, cwd: Path) -> Check:
@@ -703,33 +770,50 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
     if state is LogState.MISSING or not entries:
         return _check("curate health", "ok", f"no curate passes recorded for {project!r} yet")
 
-    last_success, failures, last_failure = _classify_curate_history(entries)
+    last_refresh, failures, last_failure, saw_unknown = _classify_curate_history(entries)
 
-    if last_success is None and failures:
+    if last_refresh is None and failures:
         return _check(
             "curate health",
             "error",
-            f"{project!r}: no curate pass has ever succeeded ({failures} failed)",
+            f"{project!r}: no curate pass has ever refreshed the node ({failures} failed)",
             "Run `neurobase curate` and read the error it reports.",
         )
-    if last_success is None:
-        return _check(
-            "curate health",
-            "ok",
-            f"{project!r}: no pass has attempted synthesis yet",
-        )
-    if failures:
+    if failures and last_refresh is not None:
         entry = last_failure or {}
         reason = str(entry.get("error") or entry.get("status") or "unknown")
         return _check(
             "curate health",
             "error" if failures >= _CURATE_FAILURE_ERROR_THRESHOLD else "warn",
-            f"{project!r}: {failures} failed pass(es) since {last_success.get('at')}"
+            f"{project!r}: {failures} failed pass(es) since {last_refresh.get('at')}"
             f" — last: {reason[:120]}",
-            "The status node stays frozen at that last success until this clears; "
+            "The status node stays frozen at that last refresh until this clears; "
             "run `neurobase curate` to see the failure directly.",
         )
-    return _check("curate health", "ok", f"{project!r}: last success {last_success.get('at')}")
+
+    # Damage or an unrecognized status means the history cannot be vouched for.
+    # Reported *after* real failures, which are the more specific diagnosis, but
+    # never suppressed into a green check (review round 2, F4).
+    if state is LogState.DAMAGED:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history has malformed records — health unknown",
+            "Only a torn final line is expected; earlier damage means the history "
+            "is incomplete. `neurobase curate` will append a fresh record.",
+        )
+    if saw_unknown:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history has outcomes this build does not recognize "
+            "— health unknown",
+            "The store was likely written by a newer Neurobase; upgrade this "
+            "install so doctor can classify its records.",
+        )
+    if last_refresh is None:
+        return _check("curate health", "ok", f"{project!r}: no pass has attempted synthesis yet")
+    return _check("curate health", "ok", f"{project!r}: last refresh {last_refresh.get('at')}")
 
 
 def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:

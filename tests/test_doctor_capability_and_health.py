@@ -342,16 +342,25 @@ def test_partial_is_a_failure(tmp_path: Path) -> None:
     assert "1 failed pass" in check.detail
 
 
-def test_unknown_future_status_is_neutral(tmp_path: Path) -> None:
-    """A newer engine's status must not make an older doctor cry wolf."""
+def test_unknown_future_status_is_unknown_not_healthy(tmp_path: Path) -> None:
+    """**Round-2 F4 regression.**
+
+    An earlier revision treated an unrecognized status as neutral and returned
+    green. That is fail-open: an older doctor cannot know whether a newer
+    engine's outcome denotes a synthesis failure, and reporting it healthy
+    restores the "unknown history reads as green" hole this check exists to
+    close. Warn instead — cry "I can't tell", not "wolf" and not "fine".
+    """
     root, repo = _store(
         tmp_path,
         [
-            {"at": "2026-07-20T10:00:00Z", "status": "ok"},
+            {"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True},
             {"at": "2026-07-21T10:00:00Z", "status": "some-future-outcome"},
         ],
     )
-    assert diagnostics._curate_health_check(root, repo).status == "ok"
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "warn"
+    assert "does not recognize" in check.detail
 
 
 def test_three_failures_since_success_is_an_error(tmp_path: Path) -> None:
@@ -372,7 +381,7 @@ def test_never_succeeded_is_an_error(tmp_path: Path) -> None:
     root, repo = _store(tmp_path, [{"at": "2026-07-27T10:00:00Z", "status": "error", "error": "x"}])
     check = diagnostics._curate_health_check(root, repo)
     assert check.status == "error"
-    assert "has ever succeeded" in check.detail
+    assert "has ever refreshed the node" in check.detail
 
 
 def test_only_noops_ever_is_not_an_error(tmp_path: Path) -> None:
@@ -434,3 +443,188 @@ def test_unenabled_project_is_not_a_curate_problem(tmp_path: Path) -> None:
     check = diagnostics._curate_health_check(root, elsewhere)
     assert check.status == "ok"
     assert "not an enabled project" in check.detail
+
+
+# --- round-2 regressions ----------------------------------------------------
+
+
+def test_planted_manifest_beside_a_foreign_binary_is_rejected(tmp_path: Path) -> None:
+    """**Round-2 F1 regression.**
+
+    A foreign script named `neurobase`, with a manifest planted in the
+    conventional sibling directory, claimed every capability and passed. The
+    shebang now binds the evidence: the manifest must live under the interpreter
+    the script actually runs, so a planted one beside an unrelated binary is not
+    believed.
+    """
+    root = tmp_path / "foreign"
+    (root / "bin").mkdir(parents=True)
+    executable = root / "bin" / "neurobase"
+    # Shebang points at a system interpreter, i.e. *not* this install root.
+    executable.write_text("#!/usr/bin/python3\nprint('hi')\n", encoding="utf-8")
+    executable.chmod(0o755)
+    package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    (package / capabilities.MANIFEST_NAME).write_text(
+        json.dumps({"profile": capabilities.PROFILE, "provides": sorted(capabilities.PROVIDES)}),
+        encoding="utf-8",
+    )
+
+    assert capabilities.provided_by(executable) == frozenset()
+
+
+def test_manifest_is_accepted_when_the_shebang_matches_the_install(tmp_path: Path) -> None:
+    """The counterpart: a real console script whose interpreter lives in the same
+    install root is exactly what a genuine uv/venv/pipx layout looks like."""
+    root = tmp_path / "genuine"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "python").write_text("", encoding="utf-8")
+    executable = root / "bin" / "neurobase"
+    executable.write_text(f"#!{root / 'bin' / 'python'}\n", encoding="utf-8")
+    executable.chmod(0o755)
+    package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    (package / capabilities.MANIFEST_NAME).write_text(
+        json.dumps({"profile": capabilities.PROFILE, "provides": sorted(capabilities.PROVIDES)}),
+        encoding="utf-8",
+    )
+
+    assert capabilities.provided_by(executable) == capabilities.PROVIDES
+
+
+def test_fifo_manifest_does_not_block(tmp_path: Path) -> None:
+    """**Round-2 F1 regression.** A FIFO at the manifest path made the read block
+    forever, turning a read-only diagnostic into blocking IPC."""
+    os = pytest.importorskip("os")
+    if not hasattr(os, "mkfifo"):  # pragma: no cover - POSIX only
+        pytest.skip("mkfifo unavailable")
+    root = tmp_path / "fifo-install"
+    (root / "bin").mkdir(parents=True)
+    executable = root / "bin" / "neurobase"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    os.mkfifo(package / capabilities.MANIFEST_NAME)
+
+    assert capabilities.provided_by(executable) == frozenset()
+
+
+def test_oversized_manifest_is_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "big"
+    (root / "bin").mkdir(parents=True)
+    executable = root / "bin" / "neurobase"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    (package / capabilities.MANIFEST_NAME).write_text(
+        " " * (capabilities.MAX_MANIFEST_BYTES + 1), encoding="utf-8"
+    )
+
+    assert capabilities.provided_by(executable) == frozenset()
+
+
+def test_claude_project_hook_is_found_from_a_nested_cwd(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**Round-2 F2 regression.**
+
+    Claude project settings were resolved from the literal cwd, so an enabled
+    repo-root hook escaped the gate whenever doctor ran from a subdirectory.
+    """
+    repo = tmp_path / "repo"
+    nested = repo / "src" / "deep"
+    nested.mkdir(parents=True)
+    monkeypatch.setattr(diagnostics.projects, "git_common_root", lambda _cwd: repo)
+
+    stale = _stale_install(tmp_path)
+    _write_claude_hook(home, stale, user=False, repo=repo)
+
+    from_root = diagnostics._startup_hook_executables(repo)
+    from_nested = diagnostics._startup_hook_executables(nested)
+    assert [e for _l, e in from_nested] == [stale]
+    assert from_nested == from_root
+    assert [c.status for c in diagnostics._capability_checks(nested)] == ["error"]
+
+
+def test_plan_failure_after_synthesis_is_not_a_frozen_node(tmp_path: Path) -> None:
+    """**Round-2 F3 regression.**
+
+    The engine logs `error` when the *plan* fails, after synthesis has already
+    refreshed the node from the committed batches. Classifying on `status` alone
+    called that a frozen node.
+    """
+    root, repo = _store(
+        tmp_path,
+        [
+            {"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True},
+            {
+                "at": "2026-07-21T10:00:00Z",
+                "status": "error",
+                "node_refreshed": True,
+                "error": "batch two failed",
+            },
+        ],
+    )
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "ok"
+    assert "2026-07-21T10:00:00Z" in check.detail
+
+
+def test_failed_dry_run_is_not_a_failed_pass(tmp_path: Path) -> None:
+    """**Round-2 F3 regression.** A failed preview logs `error` but never attempts
+    synthesis and changes nothing."""
+    root, repo = _store(
+        tmp_path,
+        [{"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True}]
+        + [
+            {
+                "at": f"2026-07-2{d}T10:00:00Z",
+                "status": "error",
+                "dry_run": True,
+                "node_refreshed": False,
+                "error": "plan failed",
+            }
+            for d in range(1, 4)
+        ],
+    )
+    assert diagnostics._curate_health_check(root, repo).status == "ok"
+
+
+def test_partial_still_reads_as_a_frozen_node(tmp_path: Path) -> None:
+    """The converse of the two above: `partial` is where synthesis actually died."""
+    root, repo = _store(
+        tmp_path,
+        [
+            {"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True},
+            {
+                "at": "2026-07-21T10:00:00Z",
+                "status": "partial",
+                "node_refreshed": False,
+                "error": "synthesis failed",
+            },
+        ],
+    )
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "warn"
+    assert "1 failed pass" in check.detail
+
+
+def test_corrupt_non_trailing_record_is_not_healthy(tmp_path: Path) -> None:
+    """**Round-2 F4 regression.**
+
+    An old success, a corrupt record, then a later append read as green — and
+    that is the durable shape once a torn write is appended to, so the fail-soft
+    exception for the *current* trailing line cannot cover it.
+    """
+    root, repo = _store(tmp_path, [])
+    log = root / "projects" / "p" / "memory" / ".curator-log.jsonl"
+    log.write_text(
+        json.dumps({"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True})
+        + "\n{ torn mid-writ\n"
+        + json.dumps({"at": "2026-07-22T10:00:00Z", "status": "noop"})
+        + "\n",
+        encoding="utf-8",
+    )
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "warn"
+    assert "malformed" in check.detail

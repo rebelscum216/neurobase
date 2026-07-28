@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -256,3 +256,91 @@ lands before `SessionStart` can be re-enabled anywhere.
 `make ci`: 1520 passed, 92.10% coverage (floor 90.5).
 
 **Author status:** `awaiting-review` — round 2.
+
+---
+
+## Reviewer findings — round 2  _(Reviewer — Codex)_
+
+1. **major** —
+   `src/neurobase/core/capabilities.py:165`: the adjacent manifest is not bound
+   to the executable it attests, and the reader trusts an unbounded,
+   symlink-following file from a layout supplied by hook config. The installer
+   ownership predicate proves only that the command contains a path component
+   named `neurobase`; it does not prove that Neurobase created that executable.
+   I constructed a foreign executable at `<tmp>/foreign/bin/neurobase`, planted
+   a manifest containing all required names under the sibling
+   `lib/python*/site-packages/neurobase/`, and named it in an otherwise valid
+   Claude hook. `_capability_checks` returned `ok`, even though the executable
+   had none of the claimed behavior. The foreign script was not run, so the
+   round-1 arbitrary-execution blocker itself is closed, but the recurrence
+   gate can still certify arbitrary or stale code. Separately, replacing the
+   manifest with a FIFO made `provided_by()` block indefinitely; a symlink to
+   an endless special file has the same unbounded-read shape. Suggested
+   direction: bind evidence to the executable/package actually invoked rather
+   than directory convention alone, and accept only a bounded regular manifest
+   read (with symlink/special-file handling that cannot turn `doctor` into
+   blocking IPC).
+
+2. **major** —
+   `src/neurobase/cli/diagnostics.py:576`: Claude project hooks are looked up
+   relative to the literal diagnostic `cwd`, while Codex is correctly
+   normalized through `git_common_root`. From a nested directory in a git repo,
+   I placed a stale enabled hook at the spec-defined
+   `<repo>/.claude/settings.json`; `_startup_hook_executables(nested_dir)`
+   returned no hooks and the capability check reported `ok: no startup hooks
+   enabled`. That leaves a repo-root startup hook outside the safety gate based
+   only on where `doctor --cwd` is invoked. The new tests exercise project scope
+   only with `cwd == repo`. Suggested direction: resolve the project root once
+   and use it for Claude project-scope settings too, with a nested-cwd
+   regression.
+
+3. **major** —
+   `src/neurobase/cli/diagnostics.py:660`: the classifier still equates every
+   producer `status: "error"` with failed synthesis and a frozen node, but
+   `curator/engine.py` uses that status for materially different outcomes.
+   After a later batch fails, the engine deliberately synthesizes the node from
+   the earlier committed batches before logging `error`
+   (`tests/test_curator.py:187` explicitly proves the node MUST be refreshed).
+   A failed `--dry-run` also logs `error` even though the preview never attempts
+   synthesis or changes node health. Three such records therefore make doctor
+   report an error and say the node “stays frozen at that last success” when it
+   was refreshed on every real pass, or when only non-mutating previews failed.
+   The handcrafted health fixtures cannot expose this producer ambiguity.
+   Suggested direction: journal an explicit synthesis outcome and invocation
+   mode (or distinct statuses), classify node health from those fields, and add
+   integration regressions using the engine's real later-batch-error and
+   dry-run-error records.
+
+4. **major** —
+   `src/neurobase/cli/diagnostics.py:87`: `LogState.OK` means merely “at least
+   one line decoded to a dict”; all other malformed lines are discarded, and
+   line 650 separately treats unknown/missing statuses as healthy-neutral. I
+   reproduced an old `ok`, a corrupt non-trailing line, and a later `noop`
+   returning `LogState.OK` and green health. This is the natural durable shape
+   after a torn final append is followed by a later append, so the accepted
+   fail-soft exception for the *current trailing* line cannot justify it.
+   Likewise, an unknown future status after an old success returns green even
+   though an older doctor cannot know whether it denotes synthesis failure;
+   the new test explicitly locks in that fail-open result. Both cases restore
+   the “unknown history reported healthy” problem from round-1 F4. Suggested
+   direction: tolerate only the final malformed line as the torn-write case,
+   validate required record fields, and surface any non-trailing malformed or
+   unknown-status history as `warn`/unknown rather than `ok`.
+
+Verification: reviewed exact `git diff main...HEAD`; traced hook ownership and
+enablement through both installers, all curator status producers, and the
+`LogState` paths. Adversarial checks covered a foreign `neurobase`-named script,
+a planted manifest, a FIFO manifest, a nested-cwd Claude project hook, an
+unapproved Codex hook, and mixed/unknown log history. The configured foreign
+script was never executed, confirming `subprocess` removal closes the round-1
+read-only blocker. Targeted tests passed (56 tests), and `git diff --check`
+passed. The canonical `scripts/ci.py` gate passed from the writable offline UV
+cache: ruff, format, mypy, store-chokepoint, and 1,520 tests with 92.10%
+coverage. A wheel-content smoke could not be added to the evidence because the
+offline environment lacks the Hatchling build backend.
+
+**Verdict:** `changes-requested` — command execution is gone, but capability
+evidence can still certify unrelated code or hang on an untrusted manifest, an
+enabled Claude project hook can evade collection from a nested cwd, and curator
+health still reports both known-good synthesis and unknown/corrupt history
+incorrectly.

@@ -481,6 +481,12 @@ def _curate_unlocked(
         if plan_error is not None:  # nothing was applied; report the failure
             summary = {
                 "status": "error",
+                # A preview never attempts synthesis and never changes derived
+                # state, so it can neither refresh nor freeze the node. Recorded
+                # so a health consumer does not read a failed *preview* as a
+                # failed pass (review round 2, F3).
+                "dry_run": True,
+                "node_refreshed": False,
                 "raw": len(raw_docs),
                 "batches": batch_count,
                 **distill_counts,
@@ -506,6 +512,9 @@ def _curate_unlocked(
         # not byte-identical to v0.1's — it carries the new `batches: 0`.)
         summary = {
             "status": "error",
+            # Nothing was applied, so synthesis was never reached: the node is
+            # exactly as fresh (or stale) as it already was. Not a *new* freeze.
+            "node_refreshed": False,
             "raw": len(raw_docs),
             "batches": 0,
             **distill_counts,
@@ -585,6 +594,15 @@ def _curate_unlocked(
     else:
         status = "ok"
 
+    # `status` alone cannot answer "is the node current?" — `error` means the
+    # *plan* failed, and synthesis above still refreshed the node from whatever
+    # committed, while `partial` means synthesis itself died. A consumer reading
+    # only `status` therefore called a refreshed node frozen (review round 2, F3
+    # on the doctor health check). Journal the synthesis outcome explicitly so
+    # node freshness is a recorded fact rather than an inference from a status
+    # that is overloaded for other reasons.
+    node_refreshed = synth_error is None
+
     # Raws the budget stopped short of, whether deferred before the pass or left
     # in `remaining` when a ceiling hit mid-loop. Reported so a bounded stop is
     # visible rather than looking like a completed pass.
@@ -592,6 +610,7 @@ def _curate_unlocked(
 
     summary = {
         "status": status,
+        "node_refreshed": node_refreshed,
         "raw": len(raw_docs),
         "backlog": backlog,
         "batches": batch_count,

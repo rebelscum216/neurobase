@@ -127,6 +127,12 @@ def describe() -> dict[str, Any]:
     return {"profile": PROFILE, "version": __version__, "provides": sorted(PROVIDES)}
 
 
+#: Hard ceiling on a manifest read. The file this build ships is ~200 bytes; a
+#: generous multiple still refuses to stream something unbounded that happens to
+#: sit at the manifest path.
+MAX_MANIFEST_BYTES = 64 * 1024
+
+
 def _site_packages_candidates(executable: Path) -> list[Path]:
     """Plausible ``neurobase/`` package directories for a console script.
 
@@ -141,31 +147,106 @@ def _site_packages_candidates(executable: Path) -> list[Path]:
     return candidates
 
 
+def _interpreter_root(executable: Path) -> Path | None:
+    """The install root named by a console script's shebang, if it has one.
+
+    pip and uv write ``#!<install>/bin/python`` at the top of every console
+    script, so the shebang says which interpreter — and therefore which
+    ``site-packages`` — actually backs this command. Comparing it to the manifest's
+    location raises the bar from "a directory next to the file is named
+    ``neurobase``" to "the interpreter this script runs imports from there".
+
+    ``None`` when the script has no readable shebang, which includes Windows,
+    where console scripts are ``.exe`` wrappers. See :func:`read_manifest` for
+    what that costs.
+    """
+    try:
+        with executable.open("rb") as fh:
+            first = fh.readline(512)
+    except OSError:
+        return None
+    if not first.startswith(b"#!"):
+        return None
+    try:
+        interpreter = Path(first[2:].strip().split(b" ")[0].decode()).resolve()
+    except (OSError, RuntimeError, UnicodeDecodeError, ValueError):
+        return None
+    return interpreter.parent.parent
+
+
+def _read_bounded_json(path: Path) -> dict[str, Any] | None:
+    """Parse ``path`` as a JSON object, refusing anything that is not a bounded
+    regular file.
+
+    ``is_file()`` follows symlinks — which is wanted, a packaged manifest may
+    legitimately be one — but rejects a FIFO, device, or directory. Without that
+    check a FIFO at the manifest path blocks ``doctor`` forever, turning a
+    read-only diagnostic into blocking IPC (review round 2, F1).
+    """
+    try:
+        if not path.is_file():
+            return None
+        if path.stat().st_size > MAX_MANIFEST_BYTES:
+            return None
+        with path.open("rb") as fh:
+            raw = fh.read(MAX_MANIFEST_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MAX_MANIFEST_BYTES:
+        return None
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def read_manifest(executable: str | Path) -> dict[str, Any] | None:
     """The capability manifest of the install that ``executable`` belongs to.
 
     ``None`` means *no evidence of safety*: the path is missing, its package
-    directory cannot be located, or it ships no manifest (every build predating
-    the profile). Callers must treat ``None`` as unsafe rather than unknown.
+    directory cannot be located, it ships no manifest (every build predating the
+    profile), or the manifest is not a bounded regular file. Callers must treat
+    ``None`` as unsafe rather than unknown.
 
-    Purely a filesystem read — resolving symlinks, globbing, and parsing JSON.
-    It never imports or executes the target install, which is the whole point:
-    the executable named in a hook file is not necessarily trustworthy, and a
-    subprocess's side effects land before any validation could reject them.
+    Purely a filesystem read — no import, no subprocess. The executable named in
+    a hook file is not necessarily trustworthy, and a subprocess's side effects
+    land before any validation could reject them (round-1 blocker).
+
+    .. rubric:: What this does and does not prove
+
+    **This is a staleness gate, not a security boundary.** It answers "is the
+    install behind this hook new enough to be safe to run automatically?" — the
+    2026-07-09-shim question. It does **not** authenticate the install:
+
+    * When the console script has a shebang, the manifest must live under the
+      interpreter's own root, so a manifest planted beside an unrelated binary
+      named ``neurobase`` is rejected.
+    * When it does not — a Windows ``.exe`` wrapper, or a script whose shebang is
+      unreadable — directory convention is the only available evidence, and a
+      planted manifest would be believed.
+
+    Closing that fully needs signing, and it would buy little: anyone able to
+    write ``~/.claude/settings.json`` already has arbitrary code execution the
+    next time an agent starts a session, whatever ``doctor`` reports. The gate
+    exists to catch a stale install, and it should not imply more than it can
+    deliver (review round 2, F1; user decision 2026-07-27).
     """
     try:
         resolved = Path(executable).resolve()
     except (OSError, RuntimeError):
         return None
-    if not resolved.exists():
+    if not resolved.is_file():
         return None
+    interpreter_root = _interpreter_root(resolved)
     for package_dir in _site_packages_candidates(resolved):
-        manifest = package_dir / MANIFEST_NAME
-        try:
-            parsed = json.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(parsed, dict):
+        if interpreter_root is not None:
+            try:
+                package_dir.resolve().relative_to(interpreter_root)
+            except (ValueError, OSError):
+                continue  # not the install this script actually imports from
+        parsed = _read_bounded_json(package_dir / MANIFEST_NAME)
+        if parsed is not None:
             return parsed
     return None
 

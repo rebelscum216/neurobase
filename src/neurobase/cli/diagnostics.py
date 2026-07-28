@@ -8,20 +8,56 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Protocol
 
 from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.codex import install as codex_install
 from neurobase.brain import resolve_brain
 from neurobase.brain import select as brain_select
-from neurobase.core import projects, store
+from neurobase.core import capabilities, projects, store
 from neurobase.core.config import Config
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
 Status = str
+
+#: Consecutive failed passes at which curate health stops being a warning. Three
+#: is the point where "the provider hiccuped" stops explaining it and the node is
+#: reliably frozen.
+_CURATE_FAILURE_ERROR_THRESHOLD = 3
+
+
+class Runner(Protocol):
+    """The ``subprocess.run`` shape ``_probe_capabilities`` needs, so tests can
+    substitute one without patching the module global."""
+
+    def __call__(self, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]: ...
+
+
+def _read_curator_log(path: Path) -> list[dict]:
+    """Curator-log entries, skipping unparseable lines. A missing or unreadable
+    log is an empty history, never an error — doctor stays read-only and must
+    report on a half-written store rather than crash on one."""
+    entries: list[dict] = []
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    parsed = json.loads(text)
+                except ValueError:
+                    continue
+                if isinstance(parsed, dict):
+                    entries.append(parsed)
+    except OSError:
+        return []
+    return entries
 
 
 @dataclass(frozen=True)
@@ -442,17 +478,185 @@ def _codex_mcp_check(shim: str) -> Check:
     )
 
 
+def _startup_hook_executables(cwd: Path) -> dict[str, str]:
+    """The executable named by each **enabled** Neurobase startup hook.
+
+    Keyed by a human label (``"claude SessionStart"``) so doctor can name which
+    hook is unsafe. Only startup hooks are collected: they are the sole surface
+    that spawns a curator with no human in the loop. ``SessionEnd``/``Stop``
+    capture hooks never spawn one, so they carry no capability gate.
+
+    The executable is the command text left of ``" hook "`` — split there rather
+    than on whitespace so a shim path containing spaces still resolves.
+    """
+    found: dict[str, str] = {}
+
+    def _collect(label: str, doc: object, marker: str) -> None:
+        for command in _commands_for_event(doc, "SessionStart"):
+            head, sep, tail = command.partition(" hook ")
+            if sep and tail.startswith(marker) and head:
+                found.setdefault(label, head)
+
+    for user_scope in (False, True):
+        doc, error = _read_json(claude_install.settings_path(user=user_scope, cwd=cwd))
+        if error is None:
+            _collect("claude SessionStart", doc, "claude session-start")
+
+    project_root = projects.git_common_root(cwd) or cwd
+    for user_scope in (False, True):
+        doc, error = _read_json(codex_install.hooks_json_path(user=user_scope, cwd=project_root))
+        if error is None:
+            _collect("codex SessionStart", doc, "codex session-start")
+
+    return found
+
+
+def _probe_capabilities(executable: str, run: Runner | None = None) -> set[str]:
+    """What ``executable`` *claims* to provide, or an empty set.
+
+    Empty is the honest answer for every failure mode — missing binary, no
+    ``capabilities`` subcommand (any build predating the profile), non-zero exit,
+    unparseable output, or a hang. All of them mean *this build cannot confirm
+    that executable is safe*, and doctor treats that as unsafe rather than
+    unknown. The asymmetry is deliberate: absence cannot be faked in the
+    dangerous direction, which is precisely how a 2026-07-09 shim would now be
+    caught.
+    """
+    runner = run if run is not None else subprocess.run
+    try:
+        completed = runner(
+            [executable, "capabilities"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if completed.returncode != 0:
+        return set()
+    try:
+        payload = json.loads(completed.stdout or "")
+    except ValueError:
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    provides = payload.get("provides")
+    if not isinstance(provides, list):
+        return set()
+    return {item for item in provides if isinstance(item, str)}
+
+
+def _capability_checks(cwd: Path, run: Runner | None = None) -> list[Check]:
+    """Does each enabled startup hook's executable satisfy *this* build's profile?
+
+    The requirement side is always
+    :data:`capabilities.REQUIRED_FOR_STARTUP_HOOK` from the diagnosing build —
+    never the executable under test, which cannot report a guard it has never
+    heard of. The detail line names the profile so the requirement's source is
+    visible in the output rather than implied.
+    """
+    hooks = _startup_hook_executables(cwd)
+    if not hooks:
+        return [
+            _check(
+                "hook capabilities",
+                "ok",
+                f"no startup hooks enabled — {capabilities.PROFILE} not required",
+            )
+        ]
+    checks: list[Check] = []
+    for label in sorted(hooks):
+        executable = hooks[label]
+        missing = capabilities.missing_for_startup_hook(_probe_capabilities(executable, run))
+        if not missing:
+            checks.append(
+                _check(
+                    "hook capabilities",
+                    "ok",
+                    f"{label} → {executable} satisfies {capabilities.PROFILE}",
+                )
+            )
+            continue
+        checks.append(
+            _check(
+                "hook capabilities",
+                "error",
+                f"{label} → {executable} is missing {', '.join(missing)} "
+                f"(required by {capabilities.PROFILE})",
+                "That executable predates the automatic-curation safety guards. "
+                "Reinstall it (`uv tool install --force .`), then re-run doctor "
+                "before enabling startup hooks.",
+            )
+        )
+    return checks
+
+
+def _curate_health_check(root: Path, cwd: Path) -> Check:
+    """Has synthesis actually succeeded lately, or is the node quietly frozen?
+
+    Before this check, a node could be weeks stale while every user-facing
+    surface reported healthy: failures land only in ``.curator-log.jsonl``, which
+    nothing read. Both stale nodes on the reporting machine went unnoticed for 7
+    and 11 days (2026-07-27 review, [C-10]).
+    """
+    try:
+        handle = open_store(root, StoreMode.DOCTOR)
+    except store.UnsupportedSchemaError:
+        return _check("curate health", "warn", "store is unreadable")
+    if handle.schema is None:
+        return _check("curate health", "ok", "store is not initialized yet")
+    try:
+        project = handle.resolve_project(cwd)
+    except (OSError, tomllib.TOMLDecodeError):
+        return _check("curate health", "warn", "registry is unreadable")
+    if project is None:
+        return _check("curate health", "ok", "not an enabled project — nothing to curate")
+
+    entries = _read_curator_log(handle.memory_dir(project) / store.CURATOR_LOG)
+    if not entries:
+        return _check("curate health", "ok", f"no curate passes recorded for {project!r} yet")
+
+    trailing_failures = 0
+    for entry in reversed(entries):
+        if entry.get("status") == "ok":
+            break
+        trailing_failures += 1
+    last_ok = next((e for e in reversed(entries) if e.get("status") == "ok"), None)
+
+    if last_ok is None:
+        return _check(
+            "curate health",
+            "error",
+            f"{project!r}: no curate pass has ever succeeded ({len(entries)} attempted)",
+            "Run `neurobase curate` and read the error it reports.",
+        )
+    if trailing_failures:
+        reason = str(entries[-1].get("error") or entries[-1].get("status") or "unknown")
+        return _check(
+            "curate health",
+            "error" if trailing_failures >= _CURATE_FAILURE_ERROR_THRESHOLD else "warn",
+            f"{project!r}: {trailing_failures} failed pass(es) since {last_ok.get('at')}"
+            f" — last: {reason[:120]}",
+            "The status node stays frozen at that last success until this clears; "
+            "run `neurobase curate` to see the failure directly.",
+        )
+    return _check("curate health", "ok", f"{project!r}: last success {last_ok.get('at')}")
+
+
 def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
     which = shutil.which
     shim = claude_install.shim_path()
     return [
         _shim_check(which),
         *_store_checks(root, cwd),
+        _curate_health_check(root, cwd),
         _brain_check(config),
         _agent_check("claude", which),
         _agent_check("codex", which),
         _claude_hook_check(cwd, shim),
         *_codex_hook_checks(cwd, shim),
+        *_capability_checks(cwd),
         _claude_mcp_check(shim),
         _codex_mcp_check(shim),
     ]

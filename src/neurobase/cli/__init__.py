@@ -27,6 +27,7 @@ from neurobase.adapters.codex import scribe as codex_scribe
 from neurobase.brain import resolve_brain
 from neurobase.cli import diagnostics
 from neurobase.core import backups, locks, projects, store
+from neurobase.core import capabilities as capability_profile
 from neurobase.core.config import load_config
 from neurobase.core.process_guard import is_internal_call
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
@@ -49,6 +50,19 @@ app = typer.Typer(
 def version() -> None:
     """Print the installed Neurobase version."""
     typer.echo(__version__)
+
+
+@app.command()
+def capabilities() -> None:
+    """Print this build's safety-capability profile as JSON.
+
+    Machine-readable on purpose: ``doctor`` runs this against the executable
+    named by each *enabled* startup hook, which may be a different — older —
+    build than the one diagnosing. A build predating the profile has no such
+    command, and that failure is exactly the signal doctor needs (2026-07-27
+    recurrence: the hooks ran a shim three weeks older than the hardening).
+    """
+    typer.echo(json.dumps(capability_profile.describe(), indent=2))
 
 
 def _open_store_or_exit(root: Path, mode: StoreMode) -> StoreHandle:

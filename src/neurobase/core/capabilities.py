@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import sys
+from enum import Enum
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -147,30 +148,56 @@ def _site_packages_candidates(executable: Path) -> list[Path]:
     return candidates
 
 
-def _interpreter_root(executable: Path) -> Path | None:
-    """The install root named by a console script's shebang, if it has one.
+class _Shebang(Enum):
+    """What a console script's first line told us about its environment."""
 
-    pip and uv write ``#!<install>/bin/python`` at the top of every console
-    script, so the shebang says which interpreter — and therefore which
-    ``site-packages`` — actually backs this command. Comparing it to the manifest's
-    location raises the bar from "a directory next to the file is named
-    ``neurobase``" to "the interpreter this script runs imports from there".
+    #: No shebang to read — a Windows ``.exe`` wrapper, or an unreadable file.
+    #: Directory convention is the only evidence available; see `read_manifest`.
+    ABSENT = "absent"
+    #: A shebang we cannot resolve to an environment without running something
+    #: (``#!/usr/bin/env python``, a relative path). Refused rather than guessed.
+    AMBIGUOUS = "ambiguous"
 
-    ``None`` when the script has no readable shebang, which includes Windows,
-    where console scripts are ``.exe`` wrappers. See :func:`read_manifest` for
-    what that costs.
+
+def _interpreter_root(executable: Path) -> Path | _Shebang:
+    """The environment root named by a console script's shebang.
+
+    pip and uv write ``#!<env>/bin/python`` atop every console script, so the
+    shebang says which environment — and therefore which ``site-packages`` —
+    backs this command.
+
+    The root is taken **lexically**, without resolving symlinks. That is not a
+    shortcut, it is the whole point: a venv's ``bin/python`` is normally a
+    symlink to some base interpreter, so resolving it discards the venv root
+    whose ``site-packages`` is actually imported. Resolving here rejected the
+    ordinary uv-tool layout — `…/tools/<name>/bin/python` → uv's managed CPython —
+    and marked a correctly installed shim unsafe (review round 3, F1).
+
+    Returns :attr:`_Shebang.AMBIGUOUS` for a shebang that cannot be tied to an
+    environment without executing something, and :attr:`_Shebang.ABSENT` when
+    there is no shebang at all. The two are distinct because only the first is a
+    reason to withhold evidence: an absent shebang is the documented Windows
+    case, while an ambiguous one is a layout we decline to vouch for.
     """
     try:
         with executable.open("rb") as fh:
             first = fh.readline(512)
     except OSError:
-        return None
+        return _Shebang.ABSENT
     if not first.startswith(b"#!"):
-        return None
+        return _Shebang.ABSENT
     try:
-        interpreter = Path(first[2:].strip().split(b" ")[0].decode()).resolve()
-    except (OSError, RuntimeError, UnicodeDecodeError, ValueError):
-        return None
+        raw = first[2:].strip().split()[0].decode()
+    except (IndexError, UnicodeDecodeError):
+        return _Shebang.AMBIGUOUS
+    interpreter = Path(raw)
+    if not interpreter.is_absolute():
+        return _Shebang.AMBIGUOUS
+    # `#!/usr/bin/env python` names the *launcher*, not the interpreter: which
+    # Python it selects depends on PATH at run time, so `/usr/bin` is not an
+    # environment root and treating it as one would certify anything under /usr.
+    if interpreter.name == "env":
+        return _Shebang.AMBIGUOUS
     return interpreter.parent.parent
 
 
@@ -238,13 +265,17 @@ def read_manifest(executable: str | Path) -> dict[str, Any] | None:
         return None
     if not resolved.is_file():
         return None
+
     interpreter_root = _interpreter_root(resolved)
+    if interpreter_root is _Shebang.AMBIGUOUS:
+        return None  # a layout we decline to vouch for; see _interpreter_root
+    # Exact identity, not containment. "Somewhere beneath the claimed root"
+    # certified a nested foreign install whose interpreter imports from the
+    # *outer* environment (review round 3, F1).
+    if isinstance(interpreter_root, Path) and resolved.parent.parent != interpreter_root:
+        return None
+
     for package_dir in _site_packages_candidates(resolved):
-        if interpreter_root is not None:
-            try:
-                package_dir.resolve().relative_to(interpreter_root)
-            except (ValueError, OSError):
-                continue  # not the install this script actually imports from
         parsed = _read_bounded_json(package_dir / MANIFEST_NAME)
         if parsed is not None:
             return parsed

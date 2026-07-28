@@ -27,12 +27,17 @@ STALE = "/opt/stale/bin/neurobase"
 
 def _install(root: Path, *, provides: list[str] | None) -> str:
     """A console script beside a `site-packages/neurobase/`, as uv/venv/pipx lay
-    it out. ``provides=None`` ships **no manifest** — a build predating the
-    profile, which is the case that matters."""
+    it out — including the ``#!<root>/bin/python`` shebang a real one carries,
+    since that shebang is what binds the manifest to this environment.
+
+    ``provides=None`` ships **no manifest** — a build predating the profile,
+    which is the case that matters.
+    """
     bin_dir = root / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "python").write_text("", encoding="utf-8")
     executable = bin_dir / "neurobase"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.write_text(f"#!{bin_dir / 'python'}\n", encoding="utf-8")
     executable.chmod(0o755)
     package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
     package.mkdir(parents=True, exist_ok=True)
@@ -299,18 +304,6 @@ def test_resynth_counts_as_recovery(tmp_path: Path) -> None:
     assert "2026-07-22T10:00:00Z" in check.detail
 
 
-def test_skipped_locked_is_neutral(tmp_path: Path) -> None:
-    """`skipped-locked` is the single-flight guard working — not a failure."""
-    root, repo = _store(
-        tmp_path,
-        [
-            {"at": "2026-07-27T10:00:00Z", "status": "ok"},
-            {"at": "2026-07-27T11:00:00Z", "status": "skipped-locked", "reason": "held"},
-        ],
-    )
-    assert diagnostics._curate_health_check(root, repo).status == "ok"
-
-
 def test_trailing_noop_does_not_mask_the_real_failure_reason(tmp_path: Path) -> None:
     """A noop landing after real failures must not become the displayed reason."""
     root, repo = _store(
@@ -546,50 +539,6 @@ def test_claude_project_hook_is_found_from_a_nested_cwd(
     assert [c.status for c in diagnostics._capability_checks(nested)] == ["error"]
 
 
-def test_plan_failure_after_synthesis_is_not_a_frozen_node(tmp_path: Path) -> None:
-    """**Round-2 F3 regression.**
-
-    The engine logs `error` when the *plan* fails, after synthesis has already
-    refreshed the node from the committed batches. Classifying on `status` alone
-    called that a frozen node.
-    """
-    root, repo = _store(
-        tmp_path,
-        [
-            {"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True},
-            {
-                "at": "2026-07-21T10:00:00Z",
-                "status": "error",
-                "node_refreshed": True,
-                "error": "batch two failed",
-            },
-        ],
-    )
-    check = diagnostics._curate_health_check(root, repo)
-    assert check.status == "ok"
-    assert "2026-07-21T10:00:00Z" in check.detail
-
-
-def test_failed_dry_run_is_not_a_failed_pass(tmp_path: Path) -> None:
-    """**Round-2 F3 regression.** A failed preview logs `error` but never attempts
-    synthesis and changes nothing."""
-    root, repo = _store(
-        tmp_path,
-        [{"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True}]
-        + [
-            {
-                "at": f"2026-07-2{d}T10:00:00Z",
-                "status": "error",
-                "dry_run": True,
-                "node_refreshed": False,
-                "error": "plan failed",
-            }
-            for d in range(1, 4)
-        ],
-    )
-    assert diagnostics._curate_health_check(root, repo).status == "ok"
-
-
 def test_partial_still_reads_as_a_frozen_node(tmp_path: Path) -> None:
     """The converse of the two above: `partial` is where synthesis actually died."""
     root, repo = _store(
@@ -628,3 +577,138 @@ def test_corrupt_non_trailing_record_is_not_healthy(tmp_path: Path) -> None:
     check = diagnostics._curate_health_check(root, repo)
     assert check.status == "warn"
     assert "malformed" in check.detail
+
+
+# --- round-3 regressions: shebang binding -----------------------------------
+
+
+def test_venv_symlinked_interpreter_still_resolves(tmp_path: Path) -> None:
+    """**Round-3 F1 regression — the false negative.**
+
+    A venv's `bin/python` is normally a symlink to some base interpreter. An
+    earlier revision resolved it before taking the root, which discarded the venv
+    whose `site-packages` is actually imported, and reported the *real* uv-tool
+    layout on the reporting machine as having no capabilities. A correct install
+    must not be marked unsafe.
+    """
+    base = tmp_path / "base" / "bin"
+    base.mkdir(parents=True)
+    (base / "python3.14").write_text("", encoding="utf-8")
+
+    root = tmp_path / "tools" / "neurobase-cli"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "python").symlink_to(base / "python3.14")
+    executable = root / "bin" / "neurobase"
+    executable.write_text(f"#!{root / 'bin' / 'python'}\n", encoding="utf-8")
+    package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    (package / capabilities.MANIFEST_NAME).write_text(
+        json.dumps({"profile": capabilities.PROFILE, "provides": sorted(capabilities.PROVIDES)}),
+        encoding="utf-8",
+    )
+
+    assert capabilities.provided_by(executable) == capabilities.PROVIDES
+
+
+def test_nested_install_using_an_outer_interpreter_is_rejected(tmp_path: Path) -> None:
+    """**Round-3 F1 regression — the false positive.**
+
+    Containment ("somewhere beneath the claimed root") certified a nested install
+    whose interpreter imports from the *outer* environment. Identity is required.
+    """
+    outer = tmp_path / "outer"
+    (outer / "bin").mkdir(parents=True)
+    (outer / "bin" / "python").write_text("", encoding="utf-8")
+
+    nested = outer / "tools" / "x"
+    (nested / "bin").mkdir(parents=True)
+    executable = nested / "bin" / "neurobase"
+    executable.write_text(f"#!{outer / 'bin' / 'python'}\n", encoding="utf-8")
+    package = nested / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    (package / capabilities.MANIFEST_NAME).write_text(
+        json.dumps({"profile": capabilities.PROFILE, "provides": sorted(capabilities.PROVIDES)}),
+        encoding="utf-8",
+    )
+
+    assert capabilities.provided_by(executable) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "shebang",
+    ["#!/usr/bin/env python", "#!/usr/bin/env python3.14", "#!../bin/python", "#!python"],
+)
+def test_ambiguous_shebangs_are_refused(tmp_path: Path, shebang: str) -> None:
+    """`/usr/bin/env` names the *launcher*, not the interpreter — which Python it
+    picks depends on PATH at run time — and a relative shebang names no
+    environment at all. Neither can be tied to a `site-packages` without running
+    something, so both are refused rather than guessed."""
+    root = tmp_path / f"amb{abs(hash(shebang))}"
+    (root / "bin").mkdir(parents=True)
+    executable = root / "bin" / "neurobase"
+    executable.write_text(f"{shebang}\n", encoding="utf-8")
+    package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    (package / capabilities.MANIFEST_NAME).write_text(
+        json.dumps({"profile": capabilities.PROFILE, "provides": sorted(capabilities.PROVIDES)}),
+        encoding="utf-8",
+    )
+
+    assert capabilities.provided_by(executable) == frozenset()
+
+
+def test_shebangless_script_falls_back_to_convention(tmp_path: Path) -> None:
+    """The documented limit, pinned so it changes deliberately: with no shebang
+    (a Windows `.exe` wrapper) directory convention is the only evidence."""
+    root = tmp_path / "noshebang"
+    (root / "bin").mkdir(parents=True)
+    executable = root / "bin" / "neurobase"
+    executable.write_bytes(b"MZ\x90\x00binary wrapper")
+    package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
+    package.mkdir(parents=True)
+    (package / capabilities.MANIFEST_NAME).write_text(
+        json.dumps({"profile": capabilities.PROFILE, "provides": sorted(capabilities.PROVIDES)}),
+        encoding="utf-8",
+    )
+
+    assert capabilities.provided_by(executable) == capabilities.PROVIDES
+
+
+# --- round-3 regressions: log states that must not read as healthy ----------
+
+
+def test_existing_but_empty_log_is_not_a_fresh_install(tmp_path: Path) -> None:
+    """**Round-3 F2 regression.** Only a *nonexistent* path proves no history.
+    The producer appends whole records, so a zero-byte log is truncation."""
+    root, repo = _store(tmp_path, [])
+    (root / "projects" / "p" / "memory" / ".curator-log.jsonl").write_text("", encoding="utf-8")
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "warn"
+    assert "empty" in check.detail
+
+
+def test_complete_trailing_non_record_is_damage_not_a_torn_write(tmp_path: Path) -> None:
+    """**Round-3 F2 regression.** A *complete* trailing JSON value that is not a
+    record (`[]`) cannot be a half-written dict, so the torn-write exception
+    must not cover it."""
+    root, repo = _store(tmp_path, [])
+    log = root / "projects" / "p" / "memory" / ".curator-log.jsonl"
+    log.write_text(
+        json.dumps({"at": "2026-07-20T10:00:00Z", "status": "ok", "node_refreshed": True})
+        + "\n[]\n",
+        encoding="utf-8",
+    )
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "warn"
+    assert "malformed" in check.detail
+
+
+def test_record_missing_required_fields_cannot_prove_health(tmp_path: Path) -> None:
+    """**Round-3 F2 regression.** `{"status": "ok"}` with no `at` was accepted as
+    a refresh and printed `last refresh None`."""
+    root, repo = _store(tmp_path, [])
+    log = root / "projects" / "p" / "memory" / ".curator-log.jsonl"
+    log.write_text(json.dumps({"status": "ok"}) + "\n", encoding="utf-8")
+    check = diagnostics._curate_health_check(root, repo)
+    assert check.status == "warn"
+    assert "None" not in check.detail

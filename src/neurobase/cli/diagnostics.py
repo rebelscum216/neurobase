@@ -64,25 +64,49 @@ class LogState(Enum):
     restored exactly the all-green blindness this check exists to prevent.
     """
 
+    #: No file at all — the only state that *proves* nothing has ever run.
     MISSING = "missing"
+    #: The file exists but holds nothing. The producer only ever appends whole
+    #: records, so an empty log is truncation, not a fresh install (round 3, F2).
+    EMPTY = "empty"
     UNREADABLE = "unreadable"
     UNPARSEABLE = "unparseable"
-    #: Readable, but some record in the middle of the history is malformed. Only
-    #: the *final* line may be torn (the writer appends), so damage anywhere else
-    #: means the history is incomplete in a way we cannot characterize.
+    #: Readable, but some record we cannot excuse is malformed. Only an
+    #: *incomplete* final line may be torn (the writer appends), so anything else
+    #: means the history is damaged in a way we cannot characterize.
     DAMAGED = "damaged"
     OK = "ok"
+
+
+def _is_wellformed_record(entry: object) -> bool:
+    """Does this decode to a record doctor can reason about?
+
+    Container type alone is not enough: ``{"status": "ok"}`` with no ``at`` was
+    accepted as proof of a refresh and printed ``last refresh None`` (round 3,
+    F2). The producer always writes both fields, so a record missing either is
+    not one of ours.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if not isinstance(entry.get("status"), str):
+        return False
+    if not isinstance(entry.get("at"), str):
+        return False
+    for optional, expected in (("node_refreshed", bool), ("dry_run", bool)):
+        value = entry.get(optional)
+        if value is not None and not isinstance(value, expected):
+            return False
+    return True
 
 
 def _read_curator_log(path: Path) -> tuple[list[dict], LogState]:
     """Curator-log entries plus the state of the read.
 
-    A torn **trailing** line stays fail-soft: the writer appends, so the last
-    record can legitimately be mid-write. Every other malformed line makes the
-    history ``DAMAGED`` — an earlier revision skipped them all silently, which
-    meant an old success followed by a corrupt record and a later append read as
-    healthy, and that is the durable shape after a torn write is appended to
-    (review round 2, F4).
+    An **incomplete** trailing line stays fail-soft: the writer appends, so the
+    last record can legitimately be mid-write. Everything else is damage. Note
+    the exception is narrower than "the last line" — a *complete* trailing JSON
+    value that is not a well-formed record (``[]``, or a dict missing ``at``)
+    cannot be a half-written dict, so it does not qualify (round 3, F2).
     """
     lines: list[str] = []
     try:
@@ -95,7 +119,7 @@ def _read_curator_log(path: Path) -> tuple[list[dict], LogState]:
 
     populated = [line for line in lines if line]
     if not populated:
-        return [], LogState.MISSING
+        return [], LogState.EMPTY
 
     entries: list[dict] = []
     damaged = False
@@ -104,13 +128,14 @@ def _read_curator_log(path: Path) -> tuple[list[dict], LogState]:
         try:
             parsed = json.loads(line)
         except ValueError:
+            # Only an unterminated *final* line is the torn-write case.
             if index != last_index:
                 damaged = True
             continue
-        if isinstance(parsed, dict):
-            entries.append(parsed)
-        elif index != last_index:
-            damaged = True
+        if _is_wellformed_record(parsed):
+            entries.append(parsed)  # type: ignore[arg-type]
+        else:
+            damaged = True  # complete but not a record — never a partial append
 
     if not entries:
         return [], LogState.UNPARSEABLE
@@ -678,19 +703,23 @@ def _refreshed_the_node(entry: dict) -> bool | None:
     sets, and a status this build does not recognize returns ``None`` so the
     caller can say "unknown" rather than guess in either direction.
     """
+    status = entry.get("status")
+    # Neutral outcomes are decided by status *first*. A `noop` attempts no
+    # synthesis, so a journaled `node_refreshed: false` on one would otherwise
+    # read as a failed pass — the field answers "did synthesis leave the node
+    # current", not "was anything wrong".
+    if status in _CURATE_NEUTRAL:
+        return None
+    # A failed preview changes nothing at all — neither refreshes nor freezes.
+    if entry.get("dry_run") is True:
+        return None
     refreshed = entry.get("node_refreshed")
     if isinstance(refreshed, bool):
-        # A failed preview changes nothing at all — neither refreshes nor freezes.
-        if entry.get("dry_run") is True:
-            return None
         return refreshed
-    status = entry.get("status")
     if status in _CURATE_SUCCESS:
         return True
     if status in _CURATE_FAILURE:
         return False
-    if status in _CURATE_NEUTRAL:
-        return None
     return None
 
 
@@ -766,6 +795,14 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
             "warn",
             f"{project!r}: curate history holds no readable records — health unknown",
             "The log may be corrupt; `neurobase curate` will append a fresh record.",
+        )
+    if state is LogState.EMPTY:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history exists but is empty — health unknown",
+            "The producer only appends whole records, so an empty log means it "
+            "was truncated; `neurobase curate` will append a fresh record.",
         )
     if state is LogState.MISSING or not entries:
         return _check("curate health", "ok", f"no curate passes recorded for {project!r} yet")

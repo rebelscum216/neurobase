@@ -332,13 +332,18 @@ def _curate_unlocked(
             # word rather than claiming `resynth` succeeded (Codex F1).
             summary = {
                 "status": "partial",
+                "node_refreshed": False,
                 "active_facts": len(handle.list_curated(project)),
                 "error": "budget exhausted before resynth completed",
                 **pass_budget.summary(),
             }
             _log_pass(handle, project, summary)
             return summary
-        summary = {"status": "resynth", "active_facts": len(handle.list_curated(project))}
+        summary = {
+            "status": "resynth",
+            "node_refreshed": True,
+            "active_facts": len(handle.list_curated(project)),
+        }
         _log_pass(handle, project, summary)
         return summary
 

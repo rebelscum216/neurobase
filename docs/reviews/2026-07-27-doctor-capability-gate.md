@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -403,3 +403,82 @@ All four reproduced and accepted. Commit `3355a36`.
 `make ci`: 1529 passed, 92.03% coverage (floor 90.5).
 
 **Author status:** `awaiting-review` — round 3.
+
+---
+
+## Reviewer findings — round 3  _(Reviewer — Codex)_
+
+1. **major** —
+   `src/neurobase/core/capabilities.py:171`: the shebang binding both rejects a
+   standard supported install and remains bypassable for other readable
+   shebangs. `_interpreter_root` resolves the interpreter path before taking its
+   parent root. A uv/venv `bin/python` is normally a symlink to the base Python,
+   so resolving it discards the venv root whose `site-packages` the interpreter
+   actually uses. The reporting machine has exactly that uv-tool layout
+   (`.../tools/neurobase-cli/bin/python` symlinks into uv's managed Python);
+   a synthetic install with that layout and a valid adjacent manifest returned
+   no capabilities. A reinstall would therefore leave the enabled hook red.
+   Conversely, line 245 checks only that the candidate is somewhere *beneath*
+   the claimed root. I reproduced a foreign nested
+   `<outer>/tools/x/bin/neurobase` using `<outer>/bin/python` and a planted
+   nested manifest being certified, although that interpreter imports from
+   the outer environment. An `#!/usr/bin/env python` shebang has the same
+   structural problem: `/usr/bin/env`, not the Python selected from `PATH`,
+   becomes the interpreter, and `/usr/local/...` candidates pass the `/usr`
+   containment test. These are readable-shebang bugs, not the documented
+   shebang-less Windows limitation. Suggested direction: bind direct absolute
+   Python shebangs to the lexical environment root (preserving venv identity
+   across a symlinked interpreter), require the candidate to belong to that
+   exact root rather than any descendant, and reject env/relative/otherwise
+   ambiguous shebangs as unsafe unless they can be resolved without execution.
+   Add real venv-symlink, env, relative, and nested-root regressions.
+
+2. **major** —
+   `src/neurobase/cli/diagnostics.py:96`: `LogState` still accepts several
+   damaged histories as healthy. An existing zero-byte/whitespace-only log is
+   returned as `MISSING`, although only a nonexistent path proves that no
+   history exists. A complete trailing JSON value that is not a dict (for
+   example, an old `ok` followed by `[]`) is silently ignored and returns
+   `OK`; unlike a JSON parse error, that complete value cannot be an in-progress
+   dict append. Finally, a dict is never validated beyond its container type,
+   so `{"status":"ok"}` is accepted as a refresh and doctor prints
+   `last refresh None`. I reproduced the first two reader states as `missing`
+   and `ok`, respectively, and `_classify_curate_history` accepted the
+   missing-`at` success. All can restore the all-green diagnosis after truncated
+   or malformed history. The new regression covers only invalid JSON in a
+   non-trailing line, while the unknown-status test supplies an otherwise valid
+   record. Suggested direction: distinguish an absent file from an existing
+   empty one, limit the torn-write exception to an actually incomplete final
+   JSON record, and validate the producer's required `at`/`status` fields plus
+   the types of optional classification fields before a record can prove
+   health.
+
+3. **minor** —
+   `tests/test_doctor_capability_and_health.py:549`: the regressions for the
+   round-2 producer ambiguity handcraft journal dicts instead of running the
+   engine, so they cannot catch the producer and consumer drifting apart. The
+   same is true of `skipped-locked`, whose test invents a journal record even
+   though `curator/engine.py:690` returns that summary without logging it.
+   Tracing the current producer shows the main committed/error/partial and
+   failed-dry-run paths carry the fields doctor needs; successful and
+   budget-exhausted resynth plus noop rely on the legacy status fallback, and
+   skipped-locked never reaches the journal. Those current classifications are
+   sound, but the claimed journaling contract is not protected by these tests.
+   Suggested direction: generate and read real journal records for
+   plan-error-after-synthesis, failed dry-run, resynth, and noop; either document
+   skipped-locked as an unjournaled return or test it only at the return
+   boundary.
+
+Verification: reviewed exact `git diff main...HEAD`; re-ran the round-2 planted
+manifest and FIFO cases; exercised direct, symlinked, env-launcher, relative,
+and nested-root shebang reasoning; enumerated every curator summary/log path;
+and adversarially checked empty, non-dict, damaged, missing-field, and unknown
+records. The round-2 direct foreign-script and FIFO cases are closed, and
+doctor remains read-only. Targeted capability/doctor/curator tests passed.
+`git diff --check` passed. The canonical `scripts/ci.py` gate passed from a
+writable offline UV cache: ruff, format, mypy, store-chokepoint, and 1,529 tests
+with 92.03% coverage.
+
+**Verdict:** `changes-requested` — the manifest binding rejects the real
+uv/venv deployment shape while still certifying ambiguous shebang layouts, and
+damaged curator logs can still fail open to a green health check.

@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -753,3 +753,61 @@ Both accepted. Commit `e2a707a`.
 `make ci`: 1555 passed.
 
 **Author status:** `awaiting-review` — round 6.
+
+---
+
+## Reviewer findings — round 6  _(Reviewer — Codex)_
+
+1. **minor** —
+   `tests/test_doctor_capability_and_health.py:130`: the named ownership
+   regression still passes when the collector's ownership check is disabled.
+   Its foreign command lives only in an *unwired* Codex project hooks file, so
+   `_codex_project_hooks_are_wired` excludes the entire file before
+   `is_owned_command` can matter. I forced the ownership predicate to return
+   true and both assertions remained satisfied. The adjacent test already
+   covers the unwired-file filter, but no test makes a foreign command reachable
+   through an enabled user or wired project scope and proves the ownership
+   filter rejects it. Suggested direction: put the foreign command in an
+   enabled scope and add a control showing the same command is collected when
+   the ownership predicate is deliberately made permissive.
+
+2. **minor** —
+   `tests/test_doctor_capability_and_health.py:518`: the oversized-manifest
+   regression is rejected for malformed JSON even when the size ceiling is
+   effectively disabled. The fixture is 65 KiB of spaces, so an unbounded reader
+   still returns no capabilities at JSON parsing; raising
+   `MAX_MANIFEST_BYTES` above the fixture size left the assertion green. This
+   means the regular-file test now reaches its intended seam, but the paired
+   size-limit test from round 4 still does not. Suggested direction: use a valid
+   manifest larger than the ceiling (for example, a current profile plus a large
+   ignored field), and include a bounded valid-manifest control so parsing
+   cannot be the rejecting behavior.
+
+3. **minor** —
+   `tests/test_curate_health_end_to_end.py:182`: the test says a contended
+   `skipped-locked` invocation never reaches the journal, but
+   `all(record["status"] != "skipped-locked" ...)` only proves that no record
+   uses that one status. A regression that journals `noop`, `error`, or any
+   other record on the early-return path still satisfies the assertion. The
+   fixture starts with no journal history, so the intended contract has a
+   direct observable. Suggested direction: assert that the journal remains
+   exactly empty after the contended invocation (while retaining the returned
+   `skipped-locked` assertion).
+
+Verification: reviewed exact `git diff main...HEAD`; swept every changed test
+for assertions that can stay green after the named seam is removed; and
+rechecked the round-5 reentrancy control. The reentrancy test is now
+non-vacuous: forcing the guard off reaches its recorders, while forcing it
+permanently on fails the guard-off control. CPython 3.14 constructs ABI flags in
+the order `t` then `d`; the matcher accepts the real empty/`t`/`d`/`td` forms.
+It also accepts Python-looking invalid spellings such as `dt`, `tt`, and `dd`,
+but under this branch's explicit shape-only, non-authentication boundary that
+does not add a substantive false-positive category: a same-root planted
+manifest can already use a valid Python-shaped name. Doctor remains filesystem-
+read-only. Targeted changed tests passed, `git diff --check` passed, and the
+canonical `make ci` gate passed: ruff, format, mypy, store-chokepoint, and 1,555
+tests with 92.19% coverage.
+
+**Verdict:** `changes-requested` — production behavior is sound, but three
+regressions in the branch's claimed safety net still pass when the behavior
+they name is bypassed or replaced.

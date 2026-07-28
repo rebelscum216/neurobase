@@ -165,21 +165,29 @@ def test_failed_dry_run_is_journaled_as_a_non_pass(project: tuple[Path, Path]) -
     assert diagnostics._curate_health_check(root, repo).status == "ok"
 
 
-def test_skipped_locked_never_reaches_the_journal(project: tuple[Path, Path]) -> None:
-    """Documents the contract round 3 corrected: `skipped-locked` is returned by
-    the lock wrapper and never logged, so no journal record can carry it."""
+def test_skipped_locked_writes_nothing_to_the_journal(project: tuple[Path, Path]) -> None:
+    """Documents the contract round 3 corrected: a contended pass returns
+    `skipped-locked` from the lock wrapper and journals **nothing at all**.
+
+    Asserts the journal stays exactly empty rather than merely lacking that one
+    status — a regression that logged `noop` (or anything else) on the
+    early-return path would satisfy the weaker check while breaking the contract
+    (review round 6, F3). The fixture starts with no history, so "empty" is a
+    direct observable.
+    """
     from neurobase.core import lock
     from neurobase.core.store_handle import StoreMode, open_store
 
     root, _repo = project
     _write_raw(root, "r1.md")
     handle = open_store(root, StoreMode.WRITE)
+    assert _journal(root) == [], "fixture must start with no history"
 
     with lock.project_lock(handle.memory_dir("repo"), blocking=True):
         summary = engine.curate(root, "repo", _Brain(), blocking_lock=False)
 
     assert summary["status"] == "skipped-locked"
-    assert all(record["status"] != "skipped-locked" for record in _journal(root))
+    assert _journal(root) == [], "the contended early return must journal nothing"
 
 
 class _SequencedBrain(_Brain):

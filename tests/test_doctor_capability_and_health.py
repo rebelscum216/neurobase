@@ -127,36 +127,39 @@ def test_malformed_manifest_provides_nothing(tmp_path: Path) -> None:
 # --- R1-F1 (blocker): doctor must never execute a configured command --------
 
 
-def test_foreign_command_is_never_collected(home: Path, repo: Path) -> None:
-    """**Round-1 blocker regression.**
-
-    An unwired, repo-local `.codex/hooks.json` naming an arbitrary binary was
-    collected and executed, creating a file on disk. It must now fail the
-    ownership predicate and never be inspected at all.
-    """
-    hooks = repo / ".codex" / "hooks.json"
-    hooks.parent.mkdir(parents=True)
-    hooks.write_text(
+def _write_claude_hook_command(home: Path, command: str) -> None:
+    """A user-scope Claude SessionStart hook with an arbitrary command string."""
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
         json.dumps(
-            {
-                "hooks": {
-                    "SessionStart": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": "/usr/bin/touch hook codex session-start",
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }
+            {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}}
         ),
         encoding="utf-8",
     )
+
+
+def test_foreign_command_in_an_enabled_scope_is_rejected_by_ownership(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**Round-1 blocker regression, made non-vacuous in round 6.**
+
+    An arbitrary binary named in hook config was collected and executed, creating
+    a file on disk. The command is placed in an **enabled** (user) scope here, so
+    the ownership predicate is genuinely the thing that must reject it — an
+    earlier version put it in an unwired Codex file, where the enablement filter
+    excluded it first and the test passed with ownership disabled.
+    """
+    _write_claude_hook_command(home, "/usr/bin/touch hook claude session-start")
+
     assert diagnostics._startup_hook_executables(repo) == []
     assert [c.status for c in diagnostics._capability_checks(repo)] == ["ok"]
+
+    # Control: with ownership made permissive the very same command *is*
+    # collected, proving the assertion above is the ownership filter's doing.
+    monkeypatch.setattr(diagnostics.claude_install, "is_owned_command", lambda _command: True)
+    collected = diagnostics._startup_hook_executables(repo)
+    assert [executable for _label, executable in collected] == ["/usr/bin/touch"]
 
 
 def test_unwired_codex_project_hooks_are_not_enabled(home: Path, repo: Path) -> None:
@@ -515,21 +518,44 @@ def test_fifo_manifest_does_not_block(tmp_path: Path) -> None:
     assert capabilities.provided_by(executable) == frozenset()
 
 
-def test_oversized_manifest_is_rejected(tmp_path: Path) -> None:
+def test_oversized_manifest_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**Round-4 F4 / round-6 F2.**
+
+    The manifest is *valid JSON advertising the full profile*, just over the
+    ceiling. Two earlier versions of this test could not fail: the first used
+    65 KiB of spaces, which an unbounded reader rejects at the JSON parse; the
+    second sized its padding *from* ``MAX_MANIFEST_BYTES``, so raising the
+    ceiling grew the fixture too and the mutation was invisible.
+
+    The ceiling is pinned to a small value here instead, so the fixture is fixed
+    and the size check is provably the rejecting behavior.
+    """
+    monkeypatch.setattr(capabilities, "MAX_MANIFEST_BYTES", 512)
+
     root = tmp_path / "big"
     (root / "bin").mkdir(parents=True)
     (root / "bin" / "python").write_text("", encoding="utf-8")
     executable = root / "bin" / "neurobase"
-    # See the FIFO test: the shebang must be accepted for the size cap to be
-    # what rejects this (review round 4, F4).
     executable.write_text(f"#!{root / 'bin' / 'python'}\n", encoding="utf-8")
     package = root / "lib" / "python3.14" / "site-packages" / "neurobase"
     package.mkdir(parents=True)
-    (package / capabilities.MANIFEST_NAME).write_text(
-        " " * (capabilities.MAX_MANIFEST_BYTES + 1), encoding="utf-8"
-    )
+    manifest = package / capabilities.MANIFEST_NAME
 
+    payload = {
+        "profile": capabilities.PROFILE,
+        "provides": sorted(capabilities.PROVIDES),
+        "padding": "x" * 2048,
+    }
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    assert manifest.stat().st_size > 512
     assert capabilities.provided_by(executable) == frozenset()
+
+    # Control: the same valid manifest under the ceiling is accepted, so JSON
+    # parsing cannot be what rejected the oversized one.
+    payload["padding"] = "x"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    assert manifest.stat().st_size < 512
+    assert capabilities.provided_by(executable) == capabilities.PROVIDES
 
 
 def test_claude_project_hook_is_found_from_a_nested_cwd(

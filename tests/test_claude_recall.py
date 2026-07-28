@@ -46,6 +46,25 @@ def test_builds_context_with_framing_header(enabled: tuple[Path, Path]) -> None:
     assert "The login bug is fixed." in ctx
 
 
+def test_header_instructs_search_fallback_when_a_fact_seems_absent(
+    enabled: tuple[Path, Path],
+) -> None:
+    """The injected header must tell the reading agent that absence from the
+    synthesized node is not proof the store lacks the fact, and name the tool to
+    escalate to (context-loading Phase 5 / C-11). Pinned because this is the
+    whole mechanism — there is no code path behind it to fail loudly."""
+    root, repo = enabled
+    store.write_node(root, "myrepo", "myrepo-status", "# Status\n\nbody")
+    ctx = recall.build_context(root, repo)
+    assert ctx is not None
+    assert "summary, not the whole store" in ctx
+    assert "memory_search" in ctx
+    # The escalation must be conditional on the tool existing: injection runs
+    # from the SessionStart hook whether or not the agent has the Neurobase MCP
+    # server wired.
+    assert "(when available)" in ctx
+
+
 def test_emit_shape(enabled: tuple[Path, Path]) -> None:
     root, repo = enabled
     store.write_node(root, "myrepo", "myrepo-status", "# Status\n\nbody")

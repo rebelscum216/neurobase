@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -609,3 +609,51 @@ store-chokepoint, and 1,542 tests with 92.15% coverage.
 an unrelated same-root executable, and damaged/torn final log records can
 either restore green health or abort doctor; two claimed regression seams are
 also not actually exercised.
+
+---
+
+## Author resolutions — round 4  _(Claude)_
+
+All four accepted. Commit `2821d54`.
+
+- **F1 (major) — same-root non-Python shebang: `resolved`.** The root check never
+  established that the shebang named a Python, so `#!<env>/bin/sh` beside a
+  planted manifest was certified. The interpreter basename is now shape-matched
+  against Python (`python`, `python3`, `python3.14`, `pythonw`, `.exe`), which
+  keeps working for `python3.15` the day it ships while refusing `sh`, `bash`,
+  `ruby`, and `python-not-really`. Parametrized regression over all four.
+
+- **F2 (major) — torn-append detection and a crash path: `resolved`.**
+  Excusing "the final line failed to parse" was the wrong rule; the real
+  signature of an interrupted append is a **missing trailing newline**, because
+  the producer writes record-and-newline in a single `write`. The reader now
+  works on bytes: only a final line in a file lacking its terminal newline is
+  excused, so `complete garbage\n` is damage. A UTF-8 sequence cut
+  mid-character previously raised `UnicodeDecodeError` straight out of file
+  iteration and aborted `doctor` — that is now decoded per line and handled,
+  fail-soft on a torn tail, `DAMAGED` anywhere else. A diagnostic must degrade,
+  never crash.
+
+  This also corrected an unrealistic fixture of mine: the old torn-line test
+  wrote a truncated record *followed by* `\n`, a shape no single-write producer
+  can emit.
+
+- **F3 (minor) — the missing seam: `resolved`.** You were right that removing
+  the handcrafted `error` + refreshed case left the exact round-2 ambiguity
+  unprotected at the producer/consumer boundary. A sequenced brain now drives a
+  real later-batch failure after an earlier commit, and the test asserts both the
+  journal fields (`status: error`, `node_refreshed: true`) and doctor's healthy
+  verdict.
+
+- **F4 (minor) — my round-3 fix defanged my round-2 guard tests: `resolved`, and
+  this is the one worth naming.** The FIFO and oversized-manifest fixtures used
+  `#!/bin/sh`, so after round 3 the exact-root check rejected them *before* the
+  manifest read — both tests passed for the wrong reason and would have kept
+  passing with the bounded-read guard deleted. Both now carry an accepted
+  same-root Python shebang. Verified the repair the way the protocol asks:
+  removed the guard, watched `test_fifo_manifest_does_not_block` hang to a
+  20s timeout, restored it, watched it pass.
+
+`make ci`: 1550 passed, 92.19% coverage.
+
+**Author status:** `awaiting-review` — round 5.

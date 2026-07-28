@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -128,4 +128,77 @@ Live evidence this works, from the reporting machine:
 > Run the diff and review the actual code. One entry per finding.
 > Focus areas 1 and 2 are where I most expect to be wrong.
 
-**Verdict:** _(pending)_
+1. **blocker** —
+   `src/neurobase/cli/diagnostics.py:527`: `doctor` now executes a command
+   derived from agent configuration, which violates its read-only contract; the
+   claim that the agent would run the same command is also false for paths this
+   collector reaches. `_startup_hook_executables` reads a project
+   `.codex/hooks.json` even when `~/.codex/config.toml` does not wire that file
+   (and therefore Codex never discovers it), does not check trust/disablement,
+   and does not require the command to pass the installers' Neurobase ownership
+   predicate. I reproduced this with an unwired project hook whose command was
+   `/usr/bin/touch hook codex session-start`: running the capability check
+   created a `capabilities` file even though no Codex config existed. The
+   timeout and output validation happen only after the child has had arbitrary
+   side effects, so they do not preserve read-only behavior. Suggested
+   direction: obtain capability evidence without executing configured hook
+   commands (for example, a static installed-build manifest that the diagnosing
+   build can read), and resolve actual enablement/ownership before inspecting a
+   hook artifact.
+
+2. **major** —
+   `src/neurobase/cli/diagnostics.py:498`: keying `found` only by
+   `"claude SessionStart"` / `"codex SessionStart"` and using `setdefault`
+   silently drops every later executable for that agent. Claude runs all
+   matching hooks from its user and project settings; those commands are only
+   deduplicated when identical. With a current project hook and a stale
+   user-scoped hook, I observed that `_capability_checks` probed only the current
+   path and returned `ok`, leaving the stale executable that also runs
+   uncertified. This defeats the recurrence gate's central promise to check each
+   enabled startup-hook executable. The new capability tests create only one
+   Claude user hook, while the shared doctor stub returns the current profile
+   for every argv, so neither suite can expose this false green. Suggested
+   direction: preserve one entry per scope/command (deduplicating by exact
+   executable only after resolving which hooks can run), and test mixed
+   current/stale commands across active scopes.
+
+3. **major** —
+   `src/neurobase/cli/diagnostics.py:620`: every log status other than `"ok"`
+   is counted as a failed pass, but the curator also durably logs successful
+   `"noop"` and `"resynth"` outcomes. I reproduced an `ok` followed by three
+   noops being reported as `3 failed pass(es)` with an error exit, even though
+   no pass failed; a trailing noop after a real partial/error also replaces the
+   displayed failure reason with `"noop"`. Conversely, a successful resynthesis
+   should clear stale-node health but is treated as another failure. Existing
+   tests handcraft only `ok` and `error` records, so they do not enforce the
+   producer's actual status vocabulary. Suggested direction: classify the
+   engine's complete status set explicitly: count only real failures, treat
+   successful resynthesis as recovery, and treat noops as neutral rather than
+   either failures or repairs; add mixed-status regressions from real summary
+   shapes.
+
+4. **major** —
+   `src/neurobase/cli/diagnostics.py:34`: `_read_curator_log` collapses a
+   missing log, an unreadable log, and a log with no parseable records to the
+   same empty list; `_curate_health_check` then reports that state as `ok` with
+   “no curate passes recorded.” A permission failure or fully corrupted log can
+   therefore restore the all-green diagnosis this feature is meant to prevent.
+   The corruption test appends one bad line after a valid `ok`, so it proves
+   only that a torn final append is ignored, not that unknown history is
+   surfaced honestly. Suggested direction: return parse/read state separately
+   from valid entries, keep a torn trailing line fail-soft, and report
+   unreadable or wholly unparseable history as unknown/warn rather than healthy.
+
+Verification: reviewed exact `git diff main...HEAD`; checked the doctor
+read-only/store contracts, hook installers and resolution semantics, curator
+producer statuses, the prior six-round design outcome, and the incident's Codex
+reentrancy guard. Targeted doctor/capability tests passed (45 tests).
+`git diff --check` passed. The canonical gate initially could not initialize
+the sandboxed default UV cache; rerunning the same `scripts/ci.py` gate with a
+writable offline UV cache passed all checks: ruff, format, mypy,
+store-chokepoint, and 1,510 tests with 92.11% coverage.
+
+**Verdict:** `changes-requested` — the probe breaks `doctor`'s read-only
+contract, can execute hooks that are not enabled, can miss a stale executable
+that is enabled alongside a current one, and the health check misreports valid
+or unreadable log states.

@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
 
 from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.codex import install as codex_install
@@ -30,34 +29,73 @@ Status = str
 #: reliably frozen.
 _CURATE_FAILURE_ERROR_THRESHOLD = 3
 
+# --- the curator's status vocabulary (curator/engine.py) --------------------
+# Classified explicitly rather than "anything that isn't ok is a failure": the
+# engine emits seven statuses, and three of them are *not* failures. Treating a
+# `noop` as a failed pass reported an idle project as broken.
 
-class Runner(Protocol):
-    """The ``subprocess.run`` shape ``_probe_capabilities`` needs, so tests can
-    substitute one without patching the module global."""
+#: Node was (re)generated. `resynth` is a successful regeneration from existing
+#: facts, so it clears node staleness exactly as `ok` does.
+_CURATE_SUCCESS = frozenset({"ok", "resynth"})
 
-    def __call__(self, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]: ...
+#: Nothing was attempted. Neither breaks a healthy streak nor counts against it:
+#: `noop` means no unconsumed raw, `skipped-locked` means another writer held the
+#: project lock (the single-flight guard working as designed), `dry-run` means
+#: the user asked for a plan and no write.
+_CURATE_NEUTRAL = frozenset({"noop", "skipped-locked", "dry-run"})
+
+#: A pass that meant to produce a node and did not. `partial` belongs here: raws
+#: are consumed and facts upserted, then synthesis dies — which is precisely the
+#: shape that leaves a node frozen while curated facts move on.
+_CURATE_FAILURE = frozenset({"error", "partial"})
 
 
-def _read_curator_log(path: Path) -> list[dict]:
-    """Curator-log entries, skipping unparseable lines. A missing or unreadable
-    log is an empty history, never an error — doctor stays read-only and must
-    report on a half-written store rather than crash on one."""
-    entries: list[dict] = []
+class LogState(Enum):
+    """Why a curator-log read produced the entries it did.
+
+    Kept separate from the entries themselves because *no history* and
+    *unreadable history* are different diagnoses that an earlier revision
+    collapsed into one cheerful "no curate passes recorded". A permissions
+    failure could therefore restore the all-green blindness this check exists to
+    prevent.
+    """
+
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+    UNPARSEABLE = "unparseable"
+    OK = "ok"
+
+
+def _read_curator_log(path: Path) -> tuple[list[dict], LogState]:
+    """Curator-log entries plus the state of the read.
+
+    A torn trailing line stays fail-soft — the writer appends, so the last line
+    can be mid-write — but a log that exists, holds bytes, and yields no records
+    at all is reported as unparseable rather than as an empty history.
+    """
+    lines: list[str] = []
     try:
         with path.open(encoding="utf-8") as fh:
-            for line in fh:
-                text = line.strip()
-                if not text:
-                    continue
-                try:
-                    parsed = json.loads(text)
-                except ValueError:
-                    continue
-                if isinstance(parsed, dict):
-                    entries.append(parsed)
+            lines = [line.strip() for line in fh]
+    except FileNotFoundError:
+        return [], LogState.MISSING
     except OSError:
-        return []
-    return entries
+        return [], LogState.UNREADABLE
+
+    populated = [line for line in lines if line]
+    entries: list[dict] = []
+    for line in populated:
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            entries.append(parsed)
+    if populated and not entries:
+        return [], LogState.UNPARSEABLE
+    if not populated:
+        return [], LogState.MISSING
+    return entries, LogState.OK
 
 
 @dataclass(frozen=True)
@@ -478,83 +516,89 @@ def _codex_mcp_check(shim: str) -> Check:
     )
 
 
-def _startup_hook_executables(cwd: Path) -> dict[str, str]:
-    """The executable named by each **enabled** Neurobase startup hook.
+def _codex_project_hooks_are_wired(project_root: Path) -> bool:
+    """Would Codex actually discover ``<project_root>/.codex/hooks.json``?
 
-    Keyed by a human label (``"claude SessionStart"``) so doctor can name which
-    hook is unsafe. Only startup hooks are collected: they are the sole surface
-    that spawns a curator with no human in the loop. ``SessionEnd``/``Stop``
-    capture hooks never spawn one, so they carry no capability gate.
-
-    The executable is the command text left of ``" hook "`` — split there rather
-    than on whitespace so a shim path containing spaces still resolves.
+    Codex only reads a project hooks file that ``~/.codex/config.toml`` wires *and*
+    marks trusted. A hooks file sitting in a repo with no such entry is inert — so
+    the capability gate must not treat it as an enabled hook. An earlier revision
+    did, which is how ``doctor`` came to inspect a command Codex would never run.
     """
-    found: dict[str, str] = {}
+    cfg_path = codex_install.config_path()
+    if not cfg_path.exists():
+        return False
+    parsed, error = _read_toml(cfg_path)
+    if error is not None or parsed is None:
+        return False
+    projects_doc = parsed.get("projects")
+    entry = projects_doc.get(str(project_root)) if isinstance(projects_doc, dict) else None
+    return (
+        isinstance(entry, dict)
+        and entry.get("hooks") == codex_install.PROJECT_HOOKS_REL
+        and entry.get("trust_level") == "trusted"
+    )
 
-    def _collect(label: str, doc: object, marker: str) -> None:
+
+def _startup_hook_executables(cwd: Path) -> list[tuple[str, str]]:
+    """``(scope label, executable)`` for every **enabled, Neurobase-owned**
+    startup hook, one entry per scope.
+
+    Three filters, each closing a hole found in review:
+
+    * **Ownership.** The command must satisfy the installer's own
+      ``is_owned_command`` predicate. A foreign command in a settings file is
+      untrusted input, not a hook of ours, and must never be inspected.
+    * **Enablement.** A Codex project hooks file counts only when
+      ``~/.codex/config.toml`` actually wires and trusts it; otherwise Codex
+      never runs it.
+    * **Every scope.** Claude runs matching hooks from *both* user and project
+      settings, so a stale user-scope hook alongside a current project-scope one
+      must be reported. Keying by agent alone hid the stale executable behind a
+      green check.
+
+    Only startup hooks are collected: they are the sole surface that spawns a
+    curator with no human in the loop. ``SessionEnd``/``Stop`` never spawn one.
+    """
+    found: list[tuple[str, str]] = []
+
+    def _collect(label: str, doc: object, owned: Callable[[str], bool]) -> None:
         for command in _commands_for_event(doc, "SessionStart"):
-            head, sep, tail = command.partition(" hook ")
-            if sep and tail.startswith(marker) and head:
-                found.setdefault(label, head)
+            if not owned(command):
+                continue
+            # Split on " hook " rather than whitespace so a shim path containing
+            # a space still resolves; ownership above already proved the shape.
+            head, sep, _tail = command.partition(" hook ")
+            if sep and head:
+                found.append((label, head))
 
     for user_scope in (False, True):
+        scope = "user" if user_scope else "project"
         doc, error = _read_json(claude_install.settings_path(user=user_scope, cwd=cwd))
         if error is None:
-            _collect("claude SessionStart", doc, "claude session-start")
+            _collect(f"claude SessionStart ({scope})", doc, claude_install.is_owned_command)
 
     project_root = projects.git_common_root(cwd) or cwd
-    for user_scope in (False, True):
-        doc, error = _read_json(codex_install.hooks_json_path(user=user_scope, cwd=project_root))
+    doc, error = _read_json(codex_install.hooks_json_path(user=True, cwd=project_root))
+    if error is None:
+        _collect("codex SessionStart (user)", doc, codex_install.is_owned_command)
+    if _codex_project_hooks_are_wired(project_root):
+        doc, error = _read_json(codex_install.hooks_json_path(user=False, cwd=project_root))
         if error is None:
-            _collect("codex SessionStart", doc, "codex session-start")
+            _collect("codex SessionStart (project)", doc, codex_install.is_owned_command)
 
     return found
 
 
-def _probe_capabilities(executable: str, run: Runner | None = None) -> set[str]:
-    """What ``executable`` *claims* to provide, or an empty set.
+def _capability_checks(cwd: Path) -> list[Check]:
+    """Does every enabled startup hook's install satisfy *this* build's profile?
 
-    Empty is the honest answer for every failure mode — missing binary, no
-    ``capabilities`` subcommand (any build predating the profile), non-zero exit,
-    unparseable output, or a hang. All of them mean *this build cannot confirm
-    that executable is safe*, and doctor treats that as unsafe rather than
-    unknown. The asymmetry is deliberate: absence cannot be faked in the
-    dangerous direction, which is precisely how a 2026-07-09 shim would now be
-    caught.
-    """
-    runner = run if run is not None else subprocess.run
-    try:
-        completed = runner(
-            [executable, "capabilities"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return set()
-    if completed.returncode != 0:
-        return set()
-    try:
-        payload = json.loads(completed.stdout or "")
-    except ValueError:
-        return set()
-    if not isinstance(payload, dict):
-        return set()
-    provides = payload.get("provides")
-    if not isinstance(provides, list):
-        return set()
-    return {item for item in provides if isinstance(item, str)}
+    The requirement is always :data:`capabilities.REQUIRED_FOR_STARTUP_HOOK` from
+    the diagnosing build — never the install under test, which cannot report a
+    guard it has never heard of. Evidence is read statically from that install's
+    packaged manifest; nothing is executed (see ``core.capabilities``).
 
-
-def _capability_checks(cwd: Path, run: Runner | None = None) -> list[Check]:
-    """Does each enabled startup hook's executable satisfy *this* build's profile?
-
-    The requirement side is always
-    :data:`capabilities.REQUIRED_FOR_STARTUP_HOOK` from the diagnosing build —
-    never the executable under test, which cannot report a guard it has never
-    heard of. The detail line names the profile so the requirement's source is
-    visible in the output rather than implied.
+    Distinct executables are reported separately, because two enabled hooks may
+    point at different installs and only one of them may be current.
     """
     hooks = _startup_hook_executables(cwd)
     if not hooks:
@@ -565,16 +609,21 @@ def _capability_checks(cwd: Path, run: Runner | None = None) -> list[Check]:
                 f"no startup hooks enabled — {capabilities.PROFILE} not required",
             )
         ]
+
+    by_executable: dict[str, list[str]] = {}
+    for label, executable in hooks:
+        by_executable.setdefault(executable, []).append(label)
+
     checks: list[Check] = []
-    for label in sorted(hooks):
-        executable = hooks[label]
-        missing = capabilities.missing_for_startup_hook(_probe_capabilities(executable, run))
+    for executable in sorted(by_executable):
+        where = ", ".join(sorted(by_executable[executable]))
+        missing = capabilities.missing_for_startup_hook(capabilities.provided_by(executable))
         if not missing:
             checks.append(
                 _check(
                     "hook capabilities",
                     "ok",
-                    f"{label} → {executable} satisfies {capabilities.PROFILE}",
+                    f"{executable} satisfies {capabilities.PROFILE} ({where})",
                 )
             )
             continue
@@ -582,14 +631,37 @@ def _capability_checks(cwd: Path, run: Runner | None = None) -> list[Check]:
             _check(
                 "hook capabilities",
                 "error",
-                f"{label} → {executable} is missing {', '.join(missing)} "
-                f"(required by {capabilities.PROFILE})",
-                "That executable predates the automatic-curation safety guards. "
+                f"{executable} is missing {', '.join(missing)} "
+                f"(required by {capabilities.PROFILE}; used by {where})",
+                "That install predates the automatic-curation safety guards. "
                 "Reinstall it (`uv tool install --force .`), then re-run doctor "
                 "before enabling startup hooks.",
             )
         )
     return checks
+
+
+def _classify_curate_history(entries: list[dict]) -> tuple[dict | None, int, dict | None]:
+    """``(last success, failures since it, last failing entry)``.
+
+    Neutral outcomes (``noop``, ``skipped-locked``, ``dry-run``) are skipped in
+    both directions: they neither prove health nor count against it, and an
+    earlier revision counting them as failures reported an idle project as
+    broken. Unknown statuses from a future engine are treated as neutral rather
+    than as failures — a newer producer must not make an older doctor cry wolf.
+    """
+    last_success = next((e for e in reversed(entries) if e.get("status") in _CURATE_SUCCESS), None)
+    failures = 0
+    last_failure: dict | None = None
+    for entry in reversed(entries):
+        status = entry.get("status")
+        if status in _CURATE_SUCCESS:
+            break
+        if status in _CURATE_FAILURE:
+            failures += 1
+            if last_failure is None:
+                last_failure = entry
+    return last_success, failures, last_failure
 
 
 def _curate_health_check(root: Path, cwd: Path) -> Check:
@@ -613,35 +685,51 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
     if project is None:
         return _check("curate health", "ok", "not an enabled project — nothing to curate")
 
-    entries = _read_curator_log(handle.memory_dir(project) / store.CURATOR_LOG)
-    if not entries:
+    entries, state = _read_curator_log(handle.memory_dir(project) / store.CURATOR_LOG)
+    if state is LogState.UNREADABLE:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history is unreadable — health unknown",
+            "Check permissions on the project's .curator-log.jsonl.",
+        )
+    if state is LogState.UNPARSEABLE:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history holds no readable records — health unknown",
+            "The log may be corrupt; `neurobase curate` will append a fresh record.",
+        )
+    if state is LogState.MISSING or not entries:
         return _check("curate health", "ok", f"no curate passes recorded for {project!r} yet")
 
-    trailing_failures = 0
-    for entry in reversed(entries):
-        if entry.get("status") == "ok":
-            break
-        trailing_failures += 1
-    last_ok = next((e for e in reversed(entries) if e.get("status") == "ok"), None)
+    last_success, failures, last_failure = _classify_curate_history(entries)
 
-    if last_ok is None:
+    if last_success is None and failures:
         return _check(
             "curate health",
             "error",
-            f"{project!r}: no curate pass has ever succeeded ({len(entries)} attempted)",
+            f"{project!r}: no curate pass has ever succeeded ({failures} failed)",
             "Run `neurobase curate` and read the error it reports.",
         )
-    if trailing_failures:
-        reason = str(entries[-1].get("error") or entries[-1].get("status") or "unknown")
+    if last_success is None:
         return _check(
             "curate health",
-            "error" if trailing_failures >= _CURATE_FAILURE_ERROR_THRESHOLD else "warn",
-            f"{project!r}: {trailing_failures} failed pass(es) since {last_ok.get('at')}"
+            "ok",
+            f"{project!r}: no pass has attempted synthesis yet",
+        )
+    if failures:
+        entry = last_failure or {}
+        reason = str(entry.get("error") or entry.get("status") or "unknown")
+        return _check(
+            "curate health",
+            "error" if failures >= _CURATE_FAILURE_ERROR_THRESHOLD else "warn",
+            f"{project!r}: {failures} failed pass(es) since {last_success.get('at')}"
             f" — last: {reason[:120]}",
             "The status node stays frozen at that last success until this clears; "
             "run `neurobase curate` to see the failure directly.",
         )
-    return _check("curate health", "ok", f"{project!r}: last success {last_ok.get('at')}")
+    return _check("curate health", "ok", f"{project!r}: last success {last_success.get('at')}")
 
 
 def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:

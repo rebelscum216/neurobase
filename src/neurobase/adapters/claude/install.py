@@ -66,11 +66,23 @@ def load_settings(path: Path) -> dict[str, Any]:
     return data
 
 
+def is_owned_command(command: str) -> bool:
+    """Is ``command`` a hook entry Neurobase created?
+
+    The public form of the ownership rule ``_OWNED_RE`` encodes, so callers
+    outside the installer — notably ``doctor``'s capability gate — apply exactly
+    this rule rather than a lookalike. A command failing it is not ours, and the
+    gate must not inspect it: a foreign command dropped into a settings file is
+    untrusted input, not a Neurobase hook.
+    """
+    return bool(_OWNED_RE.search(command))
+
+
 def _is_owned_group(group: Any) -> bool:
     if not isinstance(group, dict):
         return False
     for entry in group.get("hooks", []) or []:
-        if isinstance(entry, dict) and _OWNED_RE.search(str(entry.get("command", ""))):
+        if isinstance(entry, dict) and is_owned_command(str(entry.get("command", ""))):
             return True
     return False
 

@@ -1,0 +1,9 @@
+{
+  "profile": "automatic-curation-safety-v1",
+  "provides": [
+    "automatic-pass-budget",
+    "curate-single-flight",
+    "hook-reentrancy-suppression",
+    "project-store-write-lock"
+  ]
+}

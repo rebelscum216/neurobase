@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -48,21 +46,20 @@ def _which(name: str) -> str | None:
 
 
 def _patch_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Answer the hook-capability probe as a current build would.
+    """Make the capability *evidence source* answer as a current install would.
 
-    `SHIM` is a fixture path that does not exist, so the real probe fails and —
-    correctly — marks every enabled startup hook unsafe. These tests are about
-    hook *recognition*; the capability contract is owned by
-    ``test_doctor_capability_and_health.py``, including the case where a hook's
-    executable genuinely cannot be probed.
+    `SHIM` is a fixture path with no package behind it, so the real manifest read
+    finds nothing and — correctly — marks every enabled startup hook unsafe.
+    These tests are about hook *recognition*; the capability contract, including
+    installs that genuinely ship no manifest, is owned by
+    ``test_doctor_capability_and_health.py``.
+
+    Note this stubs where the evidence comes from, not the gate that judges it:
+    `missing_for_startup_hook` and the check's error path still run for real.
     """
-
-    def _run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=json.dumps(capabilities.describe()), stderr=""
-        )
-
-    monkeypatch.setattr(diagnostics.subprocess, "run", _run)
+    monkeypatch.setattr(
+        diagnostics.capabilities, "provided_by", lambda _executable: capabilities.PROVIDES
+    )
 
 
 def _patch_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -350,22 +347,17 @@ def test_doctor_exits_nonzero_when_a_startup_hook_shim_lacks_the_guards(
 
     On 2026-07-27 both `SessionStart` hooks invoked a shim built three weeks
     before the automatic-curation guards landed, and `doctor` reported all-green
-    the whole time because it only compared the hook command *string* to the
-    shim path. An enabled startup hook whose executable cannot demonstrate the
-    profile must now make doctor non-green — a warning would have been ignored
-    exactly as the all-green was.
+    the whole time because it only compared the hook command *string* to the shim
+    path. An enabled startup hook whose install cannot demonstrate the profile
+    must now make doctor non-green — a warning would have been ignored exactly as
+    the all-green was.
+
+    The evidence source is left real: the fixture SHIM has no package behind it,
+    which is precisely the shape of a pre-profile install.
     """
     monkeypatch.setattr(diagnostics.shutil, "which", _which)
     monkeypatch.setattr(select.shutil, "which", _which)
     monkeypatch.setattr(select, "_cli_version", lambda binary: f"{binary} 2.1.x")
-
-    def _pre_profile_build(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        # A build predating the profile has no `capabilities` command at all.
-        return subprocess.CompletedProcess(
-            args=[], returncode=2, stdout="", stderr="No such command 'capabilities'."
-        )
-
-    monkeypatch.setattr(diagnostics.subprocess, "run", _pre_profile_build)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -377,7 +369,7 @@ def test_doctor_exits_nonzero_when_a_startup_hook_shim_lacks_the_guards(
     result = runner.invoke(app, ["doctor", "--cwd", str(repo)])
 
     assert result.exit_code == 1
-    assert "✗ hook capabilities:" in result.output or "hook capabilities" in result.output
+    assert "hook capabilities" in result.output
     assert capabilities.PROFILE in result.output
     assert "uv tool install" in result.output
 

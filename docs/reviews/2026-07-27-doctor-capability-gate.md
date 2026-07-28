@@ -1,6 +1,6 @@
 ---
 slug: doctor-capability-gate
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/doctor-capability-and-curate-health
@@ -344,3 +344,62 @@ evidence can still certify unrelated code or hang on an untrusted manifest, an
 enabled Claude project hook can evade collection from a nested cwd, and curator
 health still reports both known-good synthesis and unknown/corrupt history
 incorrectly.
+
+---
+
+## Author resolutions — round 2  _(Claude)_
+
+All four reproduced and accepted. Commit `3355a36`.
+
+- **F1 (major) — evidence not bound to the executable, and an unbounded read:
+  `resolved`, per an explicit scope decision.**
+
+  *Unbounded read:* fixed outright. Manifest reads now require a bounded regular
+  file — `is_file()` rejects FIFOs, devices and directories, with a 64 KiB cap.
+  Your FIFO case re-run: rejected, no hang.
+
+  *Binding:* the manifest must now live under the root named by the console
+  script's **shebang**, so evidence follows the interpreter the script actually
+  imports from rather than directory convention. Your planted-manifest case
+  re-run: rejected.
+
+  *Scope decision (user, 2026-07-27):* this remains a **staleness gate, not a
+  security boundary**, and `read_manifest`'s docstring now says so in those
+  words. Where there is no shebang — a Windows `.exe` wrapper — convention is
+  the only available evidence and a planted manifest would still be believed.
+  Closing that needs signing, and it buys little: anyone able to write
+  `~/.claude/settings.json` already has arbitrary code execution at the next
+  session start whatever doctor reports. The gate's job is catching the
+  2026-07-09-shim case; it should not imply an authentication it cannot provide.
+  **If you think that framing is wrong, say so — it is the one deliberate
+  limitation in this branch.**
+
+- **F2 (major) — nested-cwd evasion: `resolved`.** Reproduced exactly: from the
+  repo root the stale hook was collected, from a nested directory it was not.
+  The project root is now resolved once via `git_common_root` and used for
+  Claude project settings as well as Codex's. Regression added from a nested cwd.
+
+- **F3 (major) — `status` is overloaded: `resolved` at the producer.**
+  Confirmed against `engine.py:581`: `error` is logged when the *plan* fails
+  after synthesis already refreshed the node, and for a failed `--dry-run` that
+  never attempts synthesis; `partial` is the one where synthesis died. Doctor
+  called all of them frozen.
+
+  Taken the suggested direction rather than patching the consumer: the engine now
+  journals **`node_refreshed`** on every logged summary, plus `dry_run` on the
+  preview path, and doctor classifies on that fact — falling back to the status
+  sets only for records written before the field existed. Regressions cover
+  plan-failure-after-synthesis, failed dry-run, and `partial`. The pinned
+  summary-key test in `test_curator.py` correctly caught the new key and was
+  updated deliberately.
+
+- **F4 (major) — `LogState.OK` too lenient, and my round-1 fail-open:
+  `resolved`.** Only the **final** line may be torn; malformed records anywhere
+  earlier now yield `DAMAGED` and a warning. And you were right that my round-1
+  "unknown status is neutral" fix re-created the very hole it followed — an
+  unrecognized status is now reported as *unknown* (warn), not green. That test
+  is inverted with the reasoning recorded in its docstring.
+
+`make ci`: 1529 passed, 92.03% coverage (floor 90.5).
+
+**Author status:** `awaiting-review` — round 3.

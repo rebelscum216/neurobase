@@ -100,11 +100,22 @@ def load_hooks(path: Path) -> dict[str, Any]:
     return data
 
 
+def is_owned_command(command: str) -> bool:
+    """Is ``command`` a Codex hook entry Neurobase created?
+
+    Public counterpart to the Claude installer's predicate, for callers outside
+    the installer — notably ``doctor``'s capability gate, which must never
+    inspect a command it does not own (a repo-local ``.codex/hooks.json`` is
+    untrusted input).
+    """
+    return bool(_OWNED_RE.search(command))
+
+
 def _is_owned_group(group: Any) -> bool:
     if not isinstance(group, dict):
         return False
     for entry in group.get("hooks", []) or []:
-        if isinstance(entry, dict) and _OWNED_RE.search(str(entry.get("command", ""))):
+        if isinstance(entry, dict) and is_owned_command(str(entry.get("command", ""))):
             return True
     return False
 

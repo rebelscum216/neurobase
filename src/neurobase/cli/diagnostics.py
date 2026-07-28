@@ -11,17 +11,153 @@ import shutil
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.codex import install as codex_install
 from neurobase.brain import resolve_brain
 from neurobase.brain import select as brain_select
-from neurobase.core import projects, store
+from neurobase.core import capabilities, projects, store
 from neurobase.core.config import Config
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
 Status = str
+
+#: Consecutive failed passes at which curate health stops being a warning. Three
+#: is the point where "the provider hiccuped" stops explaining it and the node is
+#: reliably frozen.
+_CURATE_FAILURE_ERROR_THRESHOLD = 3
+
+# --- the curator's status vocabulary (curator/engine.py) --------------------
+# Classified explicitly rather than "anything that isn't ok is a failure": the
+# engine emits seven statuses, and three of them are *not* failures. Treating a
+# `noop` as a failed pass reported an idle project as broken.
+
+#: Node was (re)generated. `resynth` is a successful regeneration from existing
+#: facts, so it clears node staleness exactly as `ok` does.
+_CURATE_SUCCESS = frozenset({"ok", "resynth"})
+
+#: Nothing was attempted. Neither breaks a healthy streak nor counts against it:
+#: `noop` means no unconsumed raw, `skipped-locked` means another writer held the
+#: project lock (the single-flight guard working as designed), `dry-run` means
+#: the user asked for a plan and no write.
+_CURATE_NEUTRAL = frozenset({"noop", "skipped-locked", "dry-run"})
+
+#: A pass that meant to produce a node and did not.
+#:
+#: `status` alone is not sufficient here and must not be used alone: the engine
+#: logs `error` for a *plan* failure, after synthesis has already refreshed the
+#: node from whatever committed, and for a failed `--dry-run`, which never
+#: attempts synthesis at all. Records carrying `node_refreshed` are classified on
+#: that journaled fact; this set is the fallback for records written before the
+#: field existed (review round 2, F3).
+_CURATE_FAILURE = frozenset({"error", "partial"})
+
+
+class LogState(Enum):
+    """Why a curator-log read produced the entries it did.
+
+    Kept separate from the entries themselves because *no history* and *history
+    we cannot vouch for* are different diagnoses. An earlier revision collapsed
+    them into one cheerful "no curate passes recorded", so a permissions failure
+    restored exactly the all-green blindness this check exists to prevent.
+    """
+
+    #: No file at all — the only state that *proves* nothing has ever run.
+    MISSING = "missing"
+    #: The file exists but holds nothing. The producer only ever appends whole
+    #: records, so an empty log is truncation, not a fresh install (round 3, F2).
+    EMPTY = "empty"
+    UNREADABLE = "unreadable"
+    UNPARSEABLE = "unparseable"
+    #: Readable, but some record we cannot excuse is malformed. Only an
+    #: *incomplete* final line may be torn (the writer appends), so anything else
+    #: means the history is damaged in a way we cannot characterize.
+    DAMAGED = "damaged"
+    OK = "ok"
+
+
+def _is_wellformed_record(entry: object) -> bool:
+    """Does this decode to a record doctor can reason about?
+
+    Container type alone is not enough: ``{"status": "ok"}`` with no ``at`` was
+    accepted as proof of a refresh and printed ``last refresh None`` (round 3,
+    F2). The producer always writes both fields, so a record missing either is
+    not one of ours.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if not isinstance(entry.get("status"), str):
+        return False
+    if not isinstance(entry.get("at"), str):
+        return False
+    for optional, expected in (("node_refreshed", bool), ("dry_run", bool)):
+        value = entry.get(optional)
+        if value is not None and not isinstance(value, expected):
+            return False
+    return True
+
+
+def _read_curator_log(path: Path) -> tuple[list[dict], LogState]:
+    """Curator-log entries plus the state of the read.
+
+    An **incomplete** trailing line stays fail-soft: the writer appends, so the
+    last record can legitimately be mid-write. Everything else is damage. Note
+    the exception is narrower than "the last line" — a *complete* trailing JSON
+    value that is not a well-formed record (``[]``, or a dict missing ``at``)
+    cannot be a half-written dict, so it does not qualify (round 3, F2).
+    """
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return [], LogState.MISSING
+    except OSError:
+        return [], LogState.UNREADABLE
+
+    if not raw.strip():
+        return [], LogState.EMPTY
+
+    # The producer appends `json.dumps(...) + "\n"` as one write, so a **missing
+    # trailing newline** is the byte-level signature of an interrupted append —
+    # and the only thing that earns the fail-soft exception. Excusing "the last
+    # line failed to parse" instead let a complete garbage line read as healthy
+    # (review round 4, F2).
+    torn_tail = not raw.endswith(b"\n")
+    byte_lines = [line for line in raw.split(b"\n") if line.strip()]
+
+    entries: list[dict] = []
+    damaged = False
+    last_index = len(byte_lines) - 1
+    for index, blob in enumerate(byte_lines):
+        excusable = torn_tail and index == last_index
+        try:
+            line = blob.decode("utf-8")
+        except UnicodeDecodeError:
+            # A multi-byte character cut mid-sequence by an interrupted write is
+            # the same torn-append case; anywhere else it is damage. Either way
+            # doctor reports — decoding must never abort a diagnostic.
+            if not excusable:
+                damaged = True
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            if not excusable:
+                damaged = True
+            continue
+        if _is_wellformed_record(parsed):
+            entries.append(parsed)
+        else:
+            # Complete, decodable, well-formed JSON that is not one of our
+            # records cannot be a half-written dict — never excusable.
+            damaged = True
+
+    if not entries:
+        return [], LogState.UNPARSEABLE
+    if damaged:
+        return entries, LogState.DAMAGED
+    return entries, LogState.OK
 
 
 @dataclass(frozen=True)
@@ -442,17 +578,310 @@ def _codex_mcp_check(shim: str) -> Check:
     )
 
 
+def _codex_project_hooks_are_wired(project_root: Path) -> bool:
+    """Would Codex actually discover ``<project_root>/.codex/hooks.json``?
+
+    Codex only reads a project hooks file that ``~/.codex/config.toml`` wires *and*
+    marks trusted. A hooks file sitting in a repo with no such entry is inert — so
+    the capability gate must not treat it as an enabled hook. An earlier revision
+    did, which is how ``doctor`` came to inspect a command Codex would never run.
+    """
+    cfg_path = codex_install.config_path()
+    if not cfg_path.exists():
+        return False
+    parsed, error = _read_toml(cfg_path)
+    if error is not None or parsed is None:
+        return False
+    projects_doc = parsed.get("projects")
+    entry = projects_doc.get(str(project_root)) if isinstance(projects_doc, dict) else None
+    return (
+        isinstance(entry, dict)
+        and entry.get("hooks") == codex_install.PROJECT_HOOKS_REL
+        and entry.get("trust_level") == "trusted"
+    )
+
+
+def _startup_hook_executables(cwd: Path) -> list[tuple[str, str]]:
+    """``(scope label, executable)`` for every **enabled, Neurobase-owned**
+    startup hook, one entry per scope.
+
+    Three filters, each closing a hole found in review:
+
+    * **Ownership.** The command must satisfy the installer's own
+      ``is_owned_command`` predicate. A foreign command in a settings file is
+      untrusted input, not a hook of ours, and must never be inspected.
+    * **Enablement.** A Codex project hooks file counts only when
+      ``~/.codex/config.toml`` actually wires and trusts it; otherwise Codex
+      never runs it.
+    * **Every scope.** Claude runs matching hooks from *both* user and project
+      settings, so a stale user-scope hook alongside a current project-scope one
+      must be reported. Keying by agent alone hid the stale executable behind a
+      green check.
+
+    Only startup hooks are collected: they are the sole surface that spawns a
+    curator with no human in the loop. ``SessionEnd``/``Stop`` never spawn one.
+    """
+    found: list[tuple[str, str]] = []
+
+    def _collect(label: str, doc: object, owned: Callable[[str], bool]) -> None:
+        for command in _commands_for_event(doc, "SessionStart"):
+            if not owned(command):
+                continue
+            # Split on " hook " rather than whitespace so a shim path containing
+            # a space still resolves; ownership above already proved the shape.
+            head, sep, _tail = command.partition(" hook ")
+            if sep and head:
+                found.append((label, head))
+
+    # Resolve the project root once and use it for *both* agents' project scope.
+    # Claude project settings live at `<repo>/.claude/settings.json`, so keying
+    # them off the literal cwd let an enabled repo-root hook escape the gate
+    # whenever doctor ran from a subdirectory (review round 2, F2).
+    project_root = projects.git_common_root(cwd) or cwd
+
+    for user_scope in (False, True):
+        scope = "user" if user_scope else "project"
+        base = cwd if user_scope else project_root
+        doc, error = _read_json(claude_install.settings_path(user=user_scope, cwd=base))
+        if error is None:
+            _collect(f"claude SessionStart ({scope})", doc, claude_install.is_owned_command)
+
+    doc, error = _read_json(codex_install.hooks_json_path(user=True, cwd=project_root))
+    if error is None:
+        _collect("codex SessionStart (user)", doc, codex_install.is_owned_command)
+    if _codex_project_hooks_are_wired(project_root):
+        doc, error = _read_json(codex_install.hooks_json_path(user=False, cwd=project_root))
+        if error is None:
+            _collect("codex SessionStart (project)", doc, codex_install.is_owned_command)
+
+    return found
+
+
+def _capability_checks(cwd: Path) -> list[Check]:
+    """Does every enabled startup hook's install satisfy *this* build's profile?
+
+    The requirement is always :data:`capabilities.REQUIRED_FOR_STARTUP_HOOK` from
+    the diagnosing build — never the install under test, which cannot report a
+    guard it has never heard of. Evidence is read statically from that install's
+    packaged manifest; nothing is executed (see ``core.capabilities``).
+
+    Distinct executables are reported separately, because two enabled hooks may
+    point at different installs and only one of them may be current.
+    """
+    hooks = _startup_hook_executables(cwd)
+    if not hooks:
+        return [
+            _check(
+                "hook capabilities",
+                "ok",
+                f"no startup hooks enabled — {capabilities.PROFILE} not required",
+            )
+        ]
+
+    by_executable: dict[str, list[str]] = {}
+    for label, executable in hooks:
+        by_executable.setdefault(executable, []).append(label)
+
+    checks: list[Check] = []
+    for executable in sorted(by_executable):
+        where = ", ".join(sorted(by_executable[executable]))
+        missing = capabilities.missing_for_startup_hook(capabilities.provided_by(executable))
+        if not missing:
+            checks.append(
+                _check(
+                    "hook capabilities",
+                    "ok",
+                    f"{executable} satisfies {capabilities.PROFILE} ({where})",
+                )
+            )
+            continue
+        checks.append(
+            _check(
+                "hook capabilities",
+                "error",
+                f"{executable} is missing {', '.join(missing)} "
+                f"(required by {capabilities.PROFILE}; used by {where})",
+                "That install predates the automatic-curation safety guards. "
+                "Reinstall it (`uv tool install --force .`), then re-run doctor "
+                "before enabling startup hooks.",
+            )
+        )
+    return checks
+
+
+def _refreshed_the_node(entry: dict) -> bool | None:
+    """Did this pass leave the status node current? ``None`` ⇒ cannot tell.
+
+    Prefers the journaled ``node_refreshed`` fact over inferring from ``status``,
+    because ``status`` is overloaded: ``error`` covers both a plan failure *after*
+    synthesis refreshed the node and a failed ``--dry-run`` that never attempted
+    it (review round 2, F3). Records predating the field fall back to the status
+    sets, and a status this build does not recognize returns ``None`` so the
+    caller can say "unknown" rather than guess in either direction.
+    """
+    status = entry.get("status")
+    # Neutral outcomes are decided by status *first*. A `noop` attempts no
+    # synthesis, so a journaled `node_refreshed: false` on one would otherwise
+    # read as a failed pass — the field answers "did synthesis leave the node
+    # current", not "was anything wrong".
+    if status in _CURATE_NEUTRAL:
+        return None
+    # A failed preview changes nothing at all — neither refreshes nor freezes.
+    if entry.get("dry_run") is True:
+        return None
+    refreshed = entry.get("node_refreshed")
+    if isinstance(refreshed, bool):
+        return refreshed
+    if status in _CURATE_SUCCESS:
+        return True
+    if status in _CURATE_FAILURE:
+        return False
+    return None
+
+
+def _classify_curate_history(
+    entries: list[dict],
+) -> tuple[dict | None, int, dict | None, bool]:
+    """``(last refreshing pass, failures since it, last failing entry, saw unknown)``.
+
+    Neutral outcomes are skipped in both directions: they neither prove health
+    nor count against it, and an earlier revision counting them as failures
+    reported an idle project as broken.
+
+    An **unrecognized** status is different from a neutral one and is reported
+    separately. An older doctor genuinely cannot tell whether a newer engine's
+    status denotes a synthesis failure, so treating it as healthy would restore
+    the "unknown history reads as green" hole; the caller downgrades to a warning
+    instead (review round 2, F4).
+    """
+    last_refresh: dict | None = None
+    failures = 0
+    last_failure: dict | None = None
+    saw_unknown = False
+
+    for entry in reversed(entries):
+        verdict = _refreshed_the_node(entry)
+        if verdict is True:
+            last_refresh = entry
+            break
+        if verdict is False:
+            failures += 1
+            if last_failure is None:
+                last_failure = entry
+        elif entry.get("status") not in _CURATE_NEUTRAL and entry.get("dry_run") is not True:
+            saw_unknown = True
+
+    if last_refresh is None:
+        last_refresh = next((e for e in reversed(entries) if _refreshed_the_node(e) is True), None)
+    return last_refresh, failures, last_failure, saw_unknown
+
+
+def _curate_health_check(root: Path, cwd: Path) -> Check:
+    """Has synthesis actually succeeded lately, or is the node quietly frozen?
+
+    Before this check, a node could be weeks stale while every user-facing
+    surface reported healthy: failures land only in ``.curator-log.jsonl``, which
+    nothing read. Both stale nodes on the reporting machine went unnoticed for 7
+    and 11 days (2026-07-27 review, [C-10]).
+    """
+    try:
+        handle = open_store(root, StoreMode.DOCTOR)
+    except store.UnsupportedSchemaError:
+        return _check("curate health", "warn", "store is unreadable")
+    if handle.schema is None:
+        return _check("curate health", "ok", "store is not initialized yet")
+    try:
+        project = handle.resolve_project(cwd)
+    except (OSError, tomllib.TOMLDecodeError):
+        return _check("curate health", "warn", "registry is unreadable")
+    if project is None:
+        return _check("curate health", "ok", "not an enabled project — nothing to curate")
+
+    entries, state = _read_curator_log(handle.memory_dir(project) / store.CURATOR_LOG)
+    if state is LogState.UNREADABLE:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history is unreadable — health unknown",
+            "Check permissions on the project's .curator-log.jsonl.",
+        )
+    if state is LogState.UNPARSEABLE:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history holds no readable records — health unknown",
+            "The log may be corrupt; `neurobase curate` will append a fresh record.",
+        )
+    if state is LogState.EMPTY:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history exists but is empty — health unknown",
+            "The producer only appends whole records, so an empty log means it "
+            "was truncated; `neurobase curate` will append a fresh record.",
+        )
+    if state is LogState.MISSING or not entries:
+        return _check("curate health", "ok", f"no curate passes recorded for {project!r} yet")
+
+    last_refresh, failures, last_failure, saw_unknown = _classify_curate_history(entries)
+
+    if last_refresh is None and failures:
+        return _check(
+            "curate health",
+            "error",
+            f"{project!r}: no curate pass has ever refreshed the node ({failures} failed)",
+            "Run `neurobase curate` and read the error it reports.",
+        )
+    if failures and last_refresh is not None:
+        entry = last_failure or {}
+        reason = str(entry.get("error") or entry.get("status") or "unknown")
+        return _check(
+            "curate health",
+            "error" if failures >= _CURATE_FAILURE_ERROR_THRESHOLD else "warn",
+            f"{project!r}: {failures} failed pass(es) since {last_refresh.get('at')}"
+            f" — last: {reason[:120]}",
+            "The status node stays frozen at that last refresh until this clears; "
+            "run `neurobase curate` to see the failure directly.",
+        )
+
+    # Damage or an unrecognized status means the history cannot be vouched for.
+    # Reported *after* real failures, which are the more specific diagnosis, but
+    # never suppressed into a green check (review round 2, F4).
+    if state is LogState.DAMAGED:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history has malformed records — health unknown",
+            "Only a torn final line is expected; earlier damage means the history "
+            "is incomplete. `neurobase curate` will append a fresh record.",
+        )
+    if saw_unknown:
+        return _check(
+            "curate health",
+            "warn",
+            f"{project!r}: curate history has outcomes this build does not recognize "
+            "— health unknown",
+            "The store was likely written by a newer Neurobase; upgrade this "
+            "install so doctor can classify its records.",
+        )
+    if last_refresh is None:
+        return _check("curate health", "ok", f"{project!r}: no pass has attempted synthesis yet")
+    return _check("curate health", "ok", f"{project!r}: last refresh {last_refresh.get('at')}")
+
+
 def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
     which = shutil.which
     shim = claude_install.shim_path()
     return [
         _shim_check(which),
         *_store_checks(root, cwd),
+        _curate_health_check(root, cwd),
         _brain_check(config),
         _agent_check("claude", which),
         _agent_check("codex", which),
         _claude_hook_check(cwd, shim),
         *_codex_hook_checks(cwd, shim),
+        *_capability_checks(cwd),
         _claude_mcp_check(shim),
         _codex_mcp_check(shim),
     ]

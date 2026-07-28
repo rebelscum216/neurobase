@@ -12,7 +12,7 @@ from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.codex import install as codex_install
 from neurobase.brain import anthropic_api, select
 from neurobase.cli import app, diagnostics
-from neurobase.core import projects, store
+from neurobase.core import capabilities, projects, store
 from neurobase.core.config import Config
 
 runner = CliRunner()
@@ -45,7 +45,25 @@ def _which(name: str) -> str | None:
     return paths.get(name)
 
 
+def _patch_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the capability *evidence source* answer as a current install would.
+
+    `SHIM` is a fixture path with no package behind it, so the real manifest read
+    finds nothing and — correctly — marks every enabled startup hook unsafe.
+    These tests are about hook *recognition*; the capability contract, including
+    installs that genuinely ship no manifest, is owned by
+    ``test_doctor_capability_and_health.py``.
+
+    Note this stubs where the evidence comes from, not the gate that judges it:
+    `missing_for_startup_hook` and the check's error path still run for real.
+    """
+    monkeypatch.setattr(
+        diagnostics.capabilities, "provided_by", lambda _executable: capabilities.PROVIDES
+    )
+
+
 def _patch_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_capability_probe(monkeypatch)
     monkeypatch.setattr(diagnostics.shutil, "which", _which)
     monkeypatch.setattr(select.shutil, "which", _which)
     monkeypatch.setattr(select, "_cli_version", lambda binary: f"{binary} 2.1.x")
@@ -317,3 +335,55 @@ def test_doctor_warns_when_user_scoped_codex_hook_has_no_trust_state(
     assert "✓ codex config: user hooks are auto-discovered" in result.output
     assert "! codex trust:" in result.output
     assert "approve the hook prompt" in result.output
+
+
+# --- the 2026-07-27 regression: a stale shim must fail the gate -------------
+
+
+def test_doctor_exits_nonzero_when_a_startup_hook_shim_lacks_the_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end guard against the recurrence.
+
+    On 2026-07-27 both `SessionStart` hooks invoked a shim built three weeks
+    before the automatic-curation guards landed, and `doctor` reported all-green
+    the whole time because it only compared the hook command *string* to the shim
+    path. An enabled startup hook whose install cannot demonstrate the profile
+    must now make doctor non-green — a warning would have been ignored exactly as
+    the all-green was.
+
+    The evidence source is left real: the fixture SHIM has no package behind it,
+    which is precisely the shape of a pre-profile install.
+    """
+    monkeypatch.setattr(diagnostics.shutil, "which", _which)
+    monkeypatch.setattr(select.shutil, "which", _which)
+    monkeypatch.setattr(select, "_cli_version", lambda binary: f"{binary} 2.1.x")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    claude_install.write_settings(
+        tmp_path / "home" / ".claude" / "settings.json",
+        claude_install.build_settings({}, SHIM, ["startup", "clear"]),
+    )
+
+    result = runner.invoke(app, ["doctor", "--cwd", str(repo)])
+
+    assert result.exit_code == 1
+    assert "hook capabilities" in result.output
+    assert capabilities.PROFILE in result.output
+    assert "uv tool install" in result.output
+
+
+def test_doctor_is_green_when_no_startup_hook_is_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Capture-only installs are not gated: `SessionEnd`/`Stop` never spawn a
+    curator, so they carry no capability requirement."""
+    _patch_tools(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(app, ["doctor", "--cwd", str(repo)])
+
+    assert result.exit_code == 0
+    assert "no startup hooks enabled" in result.output

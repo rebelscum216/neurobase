@@ -39,21 +39,39 @@ Runner = Callable[..., subprocess.CompletedProcess]
 #                          folded into a user turn by `combine_prompt`.
 #   --setting-sources ""   no CLAUDE.md, skills, plugins, or hooks.
 #   --strict-mcp-config    with an empty --mcp-config: no MCP servers at all.
+#   --tools ""             no built-in tools — no Bash, Edit, Read, the lot.
 #
-# Verified live against the real 52-fact payload that reproduced G5: refusals
-# stopped and the curator planned normally. This is also defense in depth for the
-# 2026-07-17 runaway — a brain call with no MCP and no project hooks has far less
-# machinery available to re-enter Neurobase.
+# `--tools ""` is load-bearing, not garnish (review F1, 2026-07-29). The first
+# version of this change omitted it on the reasoning that `--system-prompt`
+# already made the call look like what it is; it does not — it replaces the
+# prompt and leaves every built-in tool advertised. Bash and Edit are two of the
+# exact observations the refusal cited. It also closes a reachable failure path
+# rather than merely hardening: `curated_facts` and `raw_captures` are untrusted
+# model-authored input, so an injection that persuades the model to spend its one
+# allowed turn on a tool call leaves curation stalled at the same brain boundary
+# this module exists to repair. A pure transform has no business holding Bash.
+#
+# CLI coupling, stated because it is a real dependency: these four flags are the
+# contract as of Claude Code 2.1.218. A future CLI that renames or drops one
+# should fail loudly here rather than silently restore the harness.
+#
+# Verified live against the real 52-fact payload that reproduced G5 (refusals
+# stopped, the curator planned normally) and against an adversarial payload whose
+# raw body asks the model to use a tool. This is also defense in depth for the
+# 2026-07-17 runaway — a brain call with no MCP, no hooks and no tools has very
+# little machinery available to re-enter Neurobase.
 #
 # Codex has the same class of protection via `--ignore-user-config`
-# (`codex_cli.py`); this is the Claude-side equivalent, and like that flag it
-# must always be present.
+# (`codex_cli.py`); this is the Claude-side equivalent, and like that flag every
+# one of these must always be present.
 _ISOLATION_ARGS = [
     "--setting-sources",
     "",
     "--strict-mcp-config",
     "--mcp-config",
     '{"mcpServers":{}}',
+    "--tools",
+    "",
 ]
 
 

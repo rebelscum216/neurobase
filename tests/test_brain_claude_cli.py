@@ -92,6 +92,12 @@ def test_invokes_with_harness_isolation_so_the_call_is_what_it_claims_to_be() ->
     # No MCP servers at all — including Neurobase's own.
     assert "--strict-mcp-config" in cmd
     assert json.loads(cmd[cmd.index("--mcp-config") + 1]) == {"mcpServers": {}}
+    # No built-in tools. `--system-prompt` replaces the prompt but leaves Bash,
+    # Edit and Read advertised — two of which the observed refusal cited as its
+    # evidence. Review F1: without this the call is not isolated, and an
+    # injection in the untrusted payload can spend the single turn on a tool
+    # call, stalling curation at the same boundary this module repairs.
+    assert cmd[cmd.index("--tools") + 1] == ""
 
 
 def test_plan_json_is_isolated_too_not_just_text() -> None:
@@ -108,6 +114,7 @@ def test_plan_json_is_isolated_too_not_just_text() -> None:
 
     assert seen["cmd"][seen["cmd"].index("--system-prompt") + 1] == "SYS"
     assert "--strict-mcp-config" in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("--tools") + 1] == ""
 
 
 def test_default_runner_marks_agent_process_as_internal(monkeypatch: pytest.MonkeyPatch) -> None:

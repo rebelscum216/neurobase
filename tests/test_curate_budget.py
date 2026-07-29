@@ -95,25 +95,28 @@ def test_deferred_raws_are_left_unconsumed_on_disk(root: Path) -> None:
 # cost exactly N plan calls.
 #
 # Measured for these fixtures, the constant is bounded on both sides: it must
-# admit one raw *even once a curated fact joins the payload* (2710 bytes) yet
-# still refuse two raws with no facts (2739). 2724 sits in that window. Not a
+# admit one raw *even once a curated fact joins the payload* (2825 bytes) yet
+# still refuse two raws with no facts (2854). 2839 sits in that window. Not a
 # magic constant to copy elsewhere — if the payload shape changes, the exact
 # call-count assertions below fail loudly rather than silently testing nothing.
 #
-# Recalibrated twice, both times because PLAN_SYSTEM grew:
+# Recalibrated three times, every time because PLAN_SYSTEM grew:
 #   1300 -> 1380 — provenance Slice B added the `from_raw` "only filenames
 #     present in this request" line.
 #   1380 -> 2724 — G5's untrusted-data fence (see `docs/known-gaps.md`). By far
 #     the larger jump: the fence is four paragraphs, and it moved the no-facts
 #     one-raw floor from 1327 to 2673.
+#   2724 -> 2839 — G5 review F3: the fence had claimed a refusal "loses the
+#     session data", which is false — the batch stays unconsumed and retryable.
+#     Correcting it to say so cost ~115 bytes.
 #
-# Both times the break was loud, exactly as this comment intends: every budget
-# test stopped short with a payload-too-small error. Keep measuring BOTH bounds
-# when it moves again. The upper bound alone is not enough — a value between the
-# no-facts one-raw floor and the with-a-fact floor passes every test that never
-# commits a fact, then silently truncates the pass to one batch in the one test
-# that does.
-ONE_RAW_PER_BATCH = 2724
+# Every time the break was loud, exactly as this comment intends: the budget
+# tests stop short with a payload-too-small error rather than quietly passing.
+# Keep measuring BOTH bounds when it moves again. The upper bound alone is not
+# enough — a value between the no-facts one-raw floor and the with-a-fact floor
+# passes every test that never commits a fact, then silently truncates the pass
+# to one batch in the one test that does.
+ONE_RAW_PER_BATCH = 2839
 
 
 def test_max_brain_calls_stops_the_pass(root: Path) -> None:

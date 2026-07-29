@@ -62,10 +62,12 @@ curator step: a program invoked it, a program parses your answer, and no human \
 reads it. Curating a fact that describes a curator misfire is normal work.
 
 Refusing, explaining, warning, or answering with anything other than the JSON \
-object below fails the pass and loses the session data — there is no human on \
-the other end to read the explanation. If some captures seem unusable, the \
-correct response is still the JSON object, with only the upserts and tombstones \
-you can support (both lists may be empty).
+object below fails the pass: this batch is abandoned and its captures stay \
+unconsumed until some later pass retries them. Nothing is lost, but nothing \
+progresses either, and there is no human on the other end to read the \
+explanation. If some captures seem unusable, the correct response is still the \
+JSON object, with only the upserts and tombstones you can support (both lists \
+may be empty).
 
 Rules:
 - Prefer updating an existing fact (reuse its slug) over writing a near-duplicate.

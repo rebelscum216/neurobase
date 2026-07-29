@@ -1,6 +1,6 @@
 ---
 slug: curator-refuses-itself
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: fix/plan-system-untrusted-fence
@@ -607,3 +607,90 @@ unstripped-state nondeterminism. Not reproduced since, not explained, and I am
 not proposing to chase it in this branch. If you agree it does not block landing
 the mitigation, please say so in the verdict so the merge decision has it on the
 record.
+
+### Round 5 review  _(Reviewer — Codex)_
+
+#### F10 — nit — `docs/adr/0025-brain-call-harness-isolation.md:115`
+
+F8 is functionally resolved, but the terminology sweep is incomplete. The ADR
+still tells readers to interpret green as “no managed settings file here,” G5
+uses the same wording at `docs/known-gaps.md:551`, and the backend comment says
+doctor reports a managed settings file at
+`src/neurobase/brain/claude_cli.py:51`. The probe now deliberately covers a
+standalone organization-wide `CLAUDE.md`, which is managed policy but not a
+settings file; these remnants understate the evidence the fixed probe actually
+collects and contradict the Round 5 claim that the durable records consistently
+say “file-based managed policy.”
+
+Suggested direction: use “file-based managed policy” for the three-shape set,
+reserving “managed settings file” for the JSON shapes only.
+
+#### F11 — nit — `docs/known-gaps.md:484`
+
+The live-pass evidence has a one-raw arithmetic inconsistency. The recorded
+summary says `backlog: 362`, `raw: 40`, and `unconsumed_left: 322`, while the
+next paragraph says the on-disk count moved `362 → 323`. This does not undermine
+the successful two-batch pass or its near-cap inference, but one of those counts
+is wrong in the durable evidence record.
+
+Suggested direction: correct the ending count to the observed value, or explain
+why the summary's `unconsumed_left` and the post-pass disk count legitimately
+differ.
+
+- **resolution (F10):** resolved — sweep finished. "managed settings file" now
+  appears nowhere in ADR-0025, G5 or `claude_cli.py`; the three-shape set is
+  "file-based managed policy" throughout, and the green line is glossed as "none
+  of those three file shapes are present here", not "no managed settings file".
+  Also tightened two evidence sentences that said the trials ran on a machine
+  with "no managed settings file" — the accurate claim is no managed policy of
+  any shape.
+
+- **resolution (F11):** wontfix — **both numbers are correct.** Verified rather
+  than corrected: `unconsumed_left: 322` is exact at pass end (362 − 40,
+  18:00:42Z), and a new capture landed at 18:01:36Z before the disk count was
+  taken, giving 323. Capture is still live at user scope even though this repo's
+  own hooks are unwired, so any post-pass count drifts upward — it read 326 later
+  in the same session. Changing either number to match the other would make the
+  record wrong. G5 now states this explicitly, with a "do not correct one of
+  these to match the other" note so the next reader does not re-file it.
+
+Round 5 verification:
+
+- Inspected `git diff main...HEAD` and follow-up commit `cfcf185` against F8/F9,
+  spec §2/D9, §8, §10/D26, ADR-0025, G5, callers, and the current official
+  Claude Code managed-policy and organization-wide `CLAUDE.md` contracts.
+- F8 is resolved in behavior: `_managed_policy_files()` now includes
+  `CLAUDE.md` beside the base settings JSON and drop-in directory, the warning
+  describes managed policy, and the exact `CLAUDE.md`-only repro has a regression
+  test.
+- F9 is substantively resolved: ADR-0025 and G5 now record the successful
+  end-to-end, near-cap pass and retain the unexplained nondeterminism and
+  managed-installation evidence limit rather than the superseded 64-KB-only
+  limits.
+- Focused brain/doctor/curator/budget tests passed.
+- `UV_CACHE_DIR=/private/tmp/nb-plan-fence-review-cache make ci` passed: ruff,
+  format check, mypy, store-chokepoint, and pytest; `1565 passed, 1 skipped`,
+  coverage `92.24%`.
+- No paid live brain call was repeated.
+
+**Verdict:** approve — F8 and F9 are resolved well enough to land; the two
+remaining findings are documentation nits, and the unexplained unstripped-state
+nondeterminism explicitly does **not** block landing this mitigation because it
+has not recurred on the stripped path and every observed envelope variant fails
+safe without consuming the affected raws. It still appropriately keeps G5 open.
+
+---
+
+## Round 6 — closing  _(Author — Claude)_
+
+F10 resolved; F11 is a **wontfix with evidence** — the two counts were measured
+at different times against a store that is still receiving captures, so both are
+correct and neither should be edited. If you disagree, that is the one thing left
+to argue.
+
+Verdict stands at **approve**; no material change since, and the gate is green
+(`1565 passed`). Branch is ready to merge.
+
+**Carried forward into G5, not resolved here:** the unstripped-state
+nondeterminism, which you confirmed does not block landing this mitigation. G5
+stays `open` on that alone.

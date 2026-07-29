@@ -495,6 +495,13 @@ This closes two of the three gaps this entry previously listed:
 - **Nondeterminism — still NOT explained.** It did not recur across the pass's
   8 brain calls, but that is absence of evidence on a small sample, not a cause.
 
+The summary's `unconsumed_left: 322` and the on-disk 323 are **both correct**
+and differ legitimately: 362 − 40 = 322 at the moment the pass ended
+(18:00:42Z), and a new capture landed at 18:01:36Z before the disk count was
+taken. Capture is still live at user scope even though this repo's own hooks are
+unwired, so any post-pass count drifts upward with time — by later that session
+it read 326. Do not "correct" one of these to match the other.
+
 Two caveats on that pass, so it is not read as more than it is: `budget_calls: 8`
 is low because the earlier failed pass had already cached 23 distill digests, so
 a cold pass costs more; and it consumed only 40 of 362 raws (`max_raws`, auto
@@ -537,7 +544,7 @@ settings, which outrank all three, cannot be overridden from the command line,
 and may carry hooks, force-enabled plugins and a policy `CLAUDE.md` that load
 into the brain call regardless. On a managed machine the harness is therefore
 **not** fully stripped and this gap's fix is unverified — all nine live trials
-ran on a machine with no managed settings file, so they cannot speak to that
+ran on a machine with no managed policy of any shape, so they cannot speak to that
 case. `doctor`'s `brain isolation` check reports **file-based** managed policy —
 the base settings file, `managed-settings.d/` fragments, and the
 organization-wide `CLAUDE.md`, per OS — and only when `claude-cli` is the
@@ -548,8 +555,8 @@ call on a managed machine would disable curation to prevent a hazard that may no
 be there. **It cannot prove the negative** (review F7): server-delivered
 settings, macOS managed preferences and Windows registry policy are invisible to
 a filesystem probe, and no non-interactive command reports effective managed
-state — so a green line means "no managed settings *file* found in the
-directories named in it", never "no managed policy". Closing the gap properly
+state — so a green line means "none of the three file-based
+shapes found in the directories named in it", never "no managed policy". Closing the gap properly
 needs an isolation boundary managed policy cannot populate.
 See [ADR-0025](adr/0025-brain-call-harness-isolation.md) §Scope.
 

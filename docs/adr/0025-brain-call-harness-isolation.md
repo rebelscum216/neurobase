@@ -93,8 +93,8 @@ So this decision's guarantee is: **on an unmanaged installation, the brain call
 carries no MCP, no settings-derived context and no tools.** On a managed
 installation it is weaker by an amount this project cannot measure from outside,
 and G5's refusal fix is correspondingly unverified there. The live evidence below
-was gathered on a machine with no managed settings file and cannot speak to that
-case.
+was gathered on a machine with no managed policy of any shape and cannot speak
+to that case.
 
 `doctor`'s `brain isolation` check reports **file-based** managed policy — the
 base `managed-settings.json`, `managed-settings.d/` fragments, and the
@@ -112,7 +112,8 @@ registry policy, none of which a filesystem probe can observe, and no
 non-interactive command reports effective managed state. So the check reports
 *evidence*, never a conclusion — its green line names the directories inspected
 and the channels it could not inspect, and never claims "fully isolated". Treat
-it as "no managed settings **file** here", not "no managed policy". Closing the
+it as "none of those three file shapes are present here", not "no managed
+policy". Closing the
 gap properly requires an isolation boundary managed policy cannot populate — a
 container or equivalent — which is a larger change than this decision.
 

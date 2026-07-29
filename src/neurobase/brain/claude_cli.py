@@ -48,10 +48,11 @@ Runner = Callable[..., subprocess.CompletedProcess]
 # from the command line, and may carry hooks, force-enabled plugins and a policy
 # CLAUDE.md that load into the brain call anyway. On such a machine the harness
 # is NOT fully stripped and G5's refusal fix is unverified. `doctor`'s "brain
-# isolation" check reports when a managed settings file is present rather than
-# leaving it silent; it deliberately does not fail closed, because refusing every
-# brain call on a managed machine would disable curation to prevent a hazard that
-# may not be there. Closing this properly needs an isolation boundary managed
+# isolation" check reports file-based managed policy (settings JSON, drop-in
+# fragments, or an organization-wide CLAUDE.md) rather than leaving it silent; it
+# deliberately does not fail closed, because refusing every brain call on a
+# managed machine would disable curation to prevent a hazard that may not be
+# there. Closing this properly needs an isolation boundary managed
 # policy cannot populate, which is out of scope here.
 #
 # `--tools ""` is load-bearing, not garnish (review F1, 2026-07-29). The first

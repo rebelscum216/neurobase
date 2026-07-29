@@ -450,7 +450,8 @@ observations.**
 2. **Make the claim true** rather than merely asserted — `claude_cli.py` now runs
    every brain call with the harness stripped: `--system-prompt` (occupying the
    real system slot, replacing Claude Code's agent prompt), `--setting-sources ""`
-   (no CLAUDE.md/skills/plugins/hooks), `--strict-mcp-config` with an empty
+   (no *user/project/local* CLAUDE.md/skills/plugins/hooks — **not** the managed
+   scope, see below), `--strict-mcp-config` with an empty
    `--mcp-config` (no MCP servers), and `--tools ""` (no built-in tools — no Bash,
    Edit or Read). This is the Claude-side counterpart to Codex's existing
    `--ignore-user-config`, and it is also defense in depth for the 2026-07-17
@@ -505,6 +506,19 @@ Verified with an adversarial payload: a raw body instructing the model to run
 prose instead of JSON. Result: **valid plan JSON with the injection attempt
 curated as a fact, and the filesystem artefact never created.** The artefact check
 matters — a model's own report of what it did is not evidence.
+
+**Scope: unmanaged installations only (review F5).** `--setting-sources` selects
+among `user`, `project` and `local`; it cannot deselect enterprise-**managed**
+settings, which outrank all three, cannot be overridden from the command line,
+and may carry hooks, force-enabled plugins and a policy `CLAUDE.md` that load
+into the brain call regardless. On a managed machine the harness is therefore
+**not** fully stripped and this gap's fix is unverified — all nine live trials
+ran on a machine with no managed settings file, so they cannot speak to that
+case. `doctor`'s `brain isolation` check reports the condition instead of leaving
+it silent; it does not fail closed, because refusing every brain call on a
+managed machine would disable curation to prevent a hazard that may not be there.
+Closing it properly needs an isolation boundary managed policy cannot populate.
+See [ADR-0025](adr/0025-brain-call-harness-isolation.md) §Scope.
 
 **Reproduction.** `neurobase curate --if-stale` on this store (2026-07-29: 353
 unconsumed raw, 52 curated facts). ~13 minutes, ~46 brain calls, consumes nothing.

@@ -657,6 +657,52 @@ def _startup_hook_executables(cwd: Path) -> list[tuple[str, str]]:
     return found
 
 
+# Where Claude Code reads enterprise-managed settings, per its settings-precedence
+# contract. That scope outranks user/project/local and cannot be overridden from
+# the command line, so `--setting-sources ""` does not reach it (review F5).
+_MANAGED_SETTINGS_PATHS = (
+    Path("/Library/Application Support/ClaudeCode/managed-settings.json"),  # macOS
+    Path("/etc/claude-code/managed-settings.json"),  # Linux
+    Path("C:/ProgramData/ClaudeCode/managed-settings.json"),  # Windows
+)
+
+
+def _brain_isolation_check() -> Check:
+    """Is the Claude backend's harness isolation actually complete here?
+
+    ADR-0025 strips the harness from every `claude -p` brain call so the curator
+    call *is* what its prompt claims — no MCP, no skills, no CLAUDE.md, no tools.
+    Those flags select among the user/project/local setting sources only. An
+    enterprise **managed** settings file outranks all three, cannot be overridden
+    from the command line, and may carry hooks, force-enabled plugins and a policy
+    CLAUDE.md that load into the brain call regardless.
+
+    So the isolation guarantee is scoped to unmanaged installations, and this
+    check makes that scope observable rather than silent: it reports which file
+    narrows the guarantee, and leaves the decision to the operator. It does not
+    fail closed — a managed policy is usually harmless, and refusing every brain
+    call on a managed machine would disable curation entirely to prevent a hazard
+    that may not be present.
+    """
+    found = [p for p in _MANAGED_SETTINGS_PATHS if p.is_file()]
+    if not found:
+        return _check(
+            "brain isolation",
+            "ok",
+            "no managed Claude settings — brain calls run fully isolated (ADR-0025)",
+        )
+    return _check(
+        "brain isolation",
+        "warn",
+        f"managed Claude settings at {', '.join(str(p) for p in found)} — "
+        "these outrank --setting-sources and may add hooks, plugins or a policy "
+        "CLAUDE.md to every brain call",
+        "ADR-0025's isolation is scoped to unmanaged installs. Curation still "
+        "runs; treat G5's refusal fix as unverified here, and read that file "
+        "before trusting a curate pass on this machine.",
+    )
+
+
 def _capability_checks(cwd: Path) -> list[Check]:
     """Does every enabled startup hook's install satisfy *this* build's profile?
 
@@ -882,6 +928,7 @@ def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
         _claude_hook_check(cwd, shim),
         *_codex_hook_checks(cwd, shim),
         *_capability_checks(cwd),
+        _brain_isolation_check(),
         _claude_mcp_check(shim),
         _codex_mcp_check(shim),
     ]

@@ -387,3 +387,46 @@ def test_doctor_is_green_when_no_startup_hook_is_enabled(
 
     assert result.exit_code == 0
     assert "no startup hooks enabled" in result.output
+
+
+# --- G5 review F5: the isolation guarantee is scoped, and doctor must say so ---
+
+
+def test_brain_isolation_reports_ok_when_no_managed_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The common case: nothing outranks `--setting-sources`, so ADR-0025's
+    isolation holds in full and the check is quiet."""
+    monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_PATHS", (tmp_path / "absent.json",))
+
+    check = diagnostics._brain_isolation_check()
+
+    assert check.status == "ok"
+    assert "fully isolated" in check.detail
+
+
+def test_brain_isolation_warns_when_managed_settings_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Managed settings outrank user/project/local and cannot be turned off from
+    the command line, so `--setting-sources ""` does not reach them: hooks,
+    plugins and a policy CLAUDE.md can still load into a brain call. That makes
+    ADR-0025's guarantee narrower than its wording, and G5's fix unverified on
+    such a machine.
+
+    It warns rather than erroring on purpose. Failing closed would disable
+    curation on every managed install to prevent a hazard that may not be
+    present there — a worse trade for a local-first tool than making the
+    condition visible and letting the operator judge it.
+    """
+    managed = tmp_path / "managed-settings.json"
+    managed.write_text("{}")
+    monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_PATHS", (managed,))
+
+    check = diagnostics._brain_isolation_check()
+
+    assert check.status == "warn"
+    assert str(managed) in check.detail
+    assert check.remedy is not None
+    # Not an error: a managed policy must not take curation offline.
+    assert not diagnostics.has_errors([check])

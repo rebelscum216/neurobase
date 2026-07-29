@@ -77,6 +77,12 @@ def test_invokes_with_harness_isolation_so_the_call_is_what_it_claims_to_be() ->
     removing any of them reopens the refusal, and weakens the 2026-07-17
     runaway containment by handing the brain call MCP and hooks again. This is
     the Claude-side counterpart to Codex's `--ignore-user-config`.
+
+    Scope (review F5): `--setting-sources` selects among user/project/local and
+    cannot deselect enterprise-MANAGED settings, so on a managed installation
+    hooks, plugins and a policy CLAUDE.md still load. This test pins the argv
+    contract, not a guarantee about managed machines — `doctor`'s "brain
+    isolation" check is what surfaces that case.
     """
     seen = {}
 
@@ -87,7 +93,7 @@ def test_invokes_with_harness_isolation_so_the_call_is_what_it_claims_to_be() ->
     ClaudeCLIBrain(runner=runner).text("sys", "user")
     cmd = seen["cmd"]
 
-    # No CLAUDE.md, skills, plugins or hooks.
+    # No user/project/local CLAUDE.md, skills, plugins or hooks.
     assert cmd[cmd.index("--setting-sources") + 1] == ""
     # No MCP servers at all — including Neurobase's own.
     assert "--strict-mcp-config" in cmd

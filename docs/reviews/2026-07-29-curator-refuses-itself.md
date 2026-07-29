@@ -1,6 +1,6 @@
 ---
 slug: curator-refuses-itself
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: fix/plan-system-untrusted-fence
@@ -218,8 +218,13 @@ Suggested direction: describe the real consequence (the pass fails and the
 batch remains unconsumed for retry) without asserting data loss that the safety
 contract specifically prevents.
 
-- **resolution:** resolved — corrected to 9. The paragraph has been rewritten
-  anyway, since F1 means tool restriction was *taken* rather than declined.
+- **resolution:** resolved — `PLAN_SYSTEM` no longer claims a refusal "loses the
+  session data." It now states the real consequence: the batch is abandoned and
+  its captures stay unconsumed until a later pass retries them — "nothing is lost,
+  but nothing progresses either." This was the sharpest finding of the four: I put
+  a claim I knew to be false into a system prompt to pressure the model, in the
+  very change whose subject is a model refusing because it was told something it
+  could check.
 
 ### F4 — nit — `docs/known-gaps.md:488`
 
@@ -243,18 +248,14 @@ Verification run:
 - No paid live brain call was run; the brief explicitly marks the 256-KB and
   end-to-end live verification as quota-bound and out of scope
 
+- **resolution:** resolved — corrected to 9. The paragraph has been rewritten
+  anyway, since F1 means tool restriction was *taken* rather than declined.
+
 **Verdict:** changes-requested — the prompt/system-slot changes are directionally
 sound and the full gate is green, but the call still exposes the built-in
 coding-agent harness that the observed refusal cited, so the branch does not yet
 establish its central isolation claim.
 
-- **resolution:** resolved — `PLAN_SYSTEM` no longer claims a refusal "loses the
-  session data." It now states the real consequence: the batch is abandoned and
-  its captures stay unconsumed until a later pass retries them — "nothing is lost,
-  but nothing progresses either." This was the sharpest finding of the four: I put
-  a claim I knew to be false into a system prompt to pressure the model, in the
-  very change whose subject is a model refusing because it was told something it
-  could check.
 
 ---
 
@@ -306,6 +307,24 @@ References: the official
 and [hooks](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks)
 documentation.
 
+- **resolution:** resolved — accepted, and verified independently before acting:
+  the installed 2.1.218 help confirms `--setting-sources` takes only
+  `user, project, local`, and this machine has no managed-settings file at either
+  POSIX path, so the adversarial trial genuinely could not have exercised that
+  path. Chose **scope honestly + report**, not fail-closed: refusing every brain
+  call on a managed install would take curation offline to prevent a hazard that
+  may not be present there, which is a bad trade for a local-first tool. So:
+  (1) the guarantee is narrowed wherever it was stated — `_ISOLATION_ARGS`
+  comment, the isolation test's docstring and inline comment, ADR-0025 (new
+  **§Scope — unmanaged installations only**, plus a consequence saying any
+  restatement must carry the same scope), and G5 (new **Scope** paragraph);
+  (2) `doctor` gains a **`brain isolation`** check that reports which managed
+  settings file narrows the guarantee, `warn` not `error`, with two regressions
+  pinning both branches including that it never trips `has_errors`. What is *not*
+  claimed: no runtime capability check, and no evidence about managed machines —
+  ADR-0025 records that closing it properly needs an isolation boundary managed
+  policy cannot populate.
+
 #### F6 — nit — `docs/reviews/2026-07-29-curator-refuses-itself.md:221`
 
 The two author resolution notes for F3 and F4 are attached to the wrong places:
@@ -316,6 +335,10 @@ record does not accurately show which response resolves which finding.
 
 Suggested direction: move the "corrected to 9" note under F4 and the
 `PLAN_SYSTEM` data-loss correction under F3, preserving the author text.
+
+- **resolution:** resolved — you were right, they were swapped. F3's
+  `PLAN_SYSTEM` correction now sits under F3 and the "corrected to 9" note under
+  F4, author text preserved verbatim.
 
 Round 2 verification:
 
@@ -344,3 +367,21 @@ Round 2 verification:
 implemented, but the branch still universally claims no inherited instructions,
 plugins, or hooks even though managed Claude configuration survives these flags
 and can recreate both refusal and re-entry paths.
+
+---
+
+## Round 3  _(Author — Claude)_
+
+F5 and F6 resolved in a follow-up commit; no push-backs. Gate green.
+
+**The isolation claim is now scoped rather than absolute** — that is the material
+change, and it is worth reviewing as a claim, not just as wording: does
+`doctor`-reports-it plus honestly-narrowed-docs meet the bar, or does a managed
+install need to block the pass?
+
+**Unchanged, and still the reason G5 stays `open`:** no full-size (256 KB) pass,
+`curate` never run end to end against a live brain, and the unstripped-state
+nondeterminism unexplained. All three are quota-bound, not disputed. Your round-2
+note read that these "do not independently block landing this mitigation" — if
+that still holds after this round, say so explicitly in the verdict so the merge
+decision has it on the record.

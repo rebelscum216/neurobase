@@ -37,9 +37,22 @@ Runner = Callable[..., subprocess.CompletedProcess]
 #   --system-prompt        the curator prompt occupies the system slot and
 #                          REPLACES Claude Code's agent prompt, rather than being
 #                          folded into a user turn by `combine_prompt`.
-#   --setting-sources ""   no CLAUDE.md, skills, plugins, or hooks.
+#   --setting-sources ""   no user/project/local CLAUDE.md, skills, plugins or
+#                          hooks. NOT the managed scope — see the caveat below.
 #   --strict-mcp-config    with an empty --mcp-config: no MCP servers at all.
 #   --tools ""             no built-in tools — no Bash, Edit, Read, the lot.
+#
+# SCOPE — this isolation covers UNMANAGED installations (review F5).
+# `--setting-sources` selects among `user,project,local`; it cannot deselect
+# enterprise-**managed** settings, which outrank all three, cannot be overridden
+# from the command line, and may carry hooks, force-enabled plugins and a policy
+# CLAUDE.md that load into the brain call anyway. On such a machine the harness
+# is NOT fully stripped and G5's refusal fix is unverified. `doctor`'s "brain
+# isolation" check reports when a managed settings file is present rather than
+# leaving it silent; it deliberately does not fail closed, because refusing every
+# brain call on a managed machine would disable curation to prevent a hazard that
+# may not be there. Closing this properly needs an isolation boundary managed
+# policy cannot populate, which is out of scope here.
 #
 # `--tools ""` is load-bearing, not garnish (review F1, 2026-07-29). The first
 # version of this change omitted it on the reasoning that `--system-prompt`

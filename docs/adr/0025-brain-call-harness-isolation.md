@@ -60,7 +60,7 @@ assertion the prompt makes is one the model can verify:
 | flag | effect |
 |---|---|
 | `--system-prompt <system>` | curator mandate occupies the real system slot, **replacing** Claude Code's agent prompt; `combine_prompt` is no longer used by this backend |
-| `--setting-sources ""` | no CLAUDE.md, skills, plugins, hooks |
+| `--setting-sources ""` | no **user/project/local** CLAUDE.md, skills, plugins, hooks — not the managed scope, see *Scope* below |
 | `--strict-mcp-config` + `--mcp-config '{"mcpServers":{}}'` | no MCP servers at all |
 | `--tools ""` | no built-in tools — no Bash, Edit, Read |
 
@@ -81,12 +81,37 @@ This is the Claude-side counterpart to Codex's `--ignore-user-config`
 (`codex_cli.py`), adopted for the same reason: stop the brain call inheriting the
 environment that lets it re-enter Neurobase.
 
+## Scope — unmanaged installations only
+
+`--setting-sources` selects among `user`, `project` and `local`. It cannot
+deselect enterprise-**managed** settings, which outrank all three, cannot be
+overridden from the command line, and may carry hooks, force-enabled plugins and
+a policy `CLAUDE.md` that load into the brain call regardless. In `-p` mode
+managed hooks apply without an approval prompt.
+
+So this decision's guarantee is: **on an unmanaged installation, the brain call
+carries no MCP, no settings-derived context and no tools.** On a managed
+installation it is weaker by an amount this project cannot measure from outside,
+and G5's refusal fix is correspondingly unverified there. The live evidence below
+was gathered on a machine with no managed settings file and cannot speak to that
+case.
+
+`doctor` reports the condition (`brain isolation`) rather than leaving it silent.
+It deliberately does **not** fail closed: a managed policy is usually harmless,
+and refusing every brain call on a managed machine would disable curation
+entirely to prevent a hazard that may not be present. Closing this properly
+requires an isolation boundary managed policy cannot populate — a container or
+equivalent — which is a larger change than this decision.
+
 ## Consequences
 
 - **CLI coupling is now real and must be stated.** These four flags are the
   contract as of **Claude Code 2.1.218**. A future CLI that renames or drops one
   should fail loudly rather than silently restore the harness. There is no
   runtime capability check today; that is a known limitation, not an oversight.
+- **The guarantee is scoped, not absolute** (see *Scope*). Any statement of it
+  elsewhere — code comment, test, `known-gaps.md` — must carry the same scope, or
+  it is an overclaim.
 - **Headless brain calls no longer inherit user configuration.** Intended, and
   parallel to Codex, but a real behavioral change: anyone who configured
   MCP-dependent behavior for headless calls loses it with no warning.
@@ -96,7 +121,7 @@ environment that lets it re-enter Neurobase.
   now passes system and user as separate argv entries. Still conservative (the
   sum is near-identical) but no longer exact for one backend. Left alone
   deliberately rather than perturb `ONE_RAW_PER_BATCH`, which the fence had
-  already forced from 1380 to 2724.
+  already forced from 1380 to 2724, and F3's correction to 2839.
 - **The fence alone is insufficient and is kept anyway.** It is correct on its own
   terms, costs one prompt, and closes the argument it was aimed at. It should not
   be mistaken for the fix.

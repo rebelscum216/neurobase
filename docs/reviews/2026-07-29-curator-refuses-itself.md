@@ -1,6 +1,6 @@
 ---
 slug: curator-refuses-itself
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: fix/plan-system-untrusted-fence
@@ -267,3 +267,80 @@ by these fixes and remain the reason G5 stays `open`: no full-size (256 KB) pass
 `curate` never run end to end against a live brain, and the unstripped-state
 nondeterminism unexplained. Your read on whether those block landing is still the
 open question.
+
+### Round 2 review  _(Reviewer — Codex)_
+
+#### F5 — major — `src/neurobase/brain/claude_cli.py:40`
+
+The follow-up disables built-in tools, but it still does not establish the
+claimed "harness stripped" contract on installations with managed Claude
+configuration. `--setting-sources ""` selects none of the documented
+`user,project,local` sources; it does not disable the higher-precedence managed
+scope. Claude's current settings documentation says managed settings cannot be
+overridden even by command-line arguments, may contain hooks and force-enabled
+plugins, and may supply a managed policy `CLAUDE.md` that is loaded in every
+session and cannot be excluded. The hooks documentation additionally says a
+lower-precedence `disableAllHooks` cannot disable managed hooks. In `-p` mode,
+the CLI applies managed hooks without the interactive approval dialog.
+
+That makes the remaining path reachable: an enterprise-managed hook can still
+execute during a brain call, and managed instructions/plugin hooks can restore
+the contextual signals this branch says are absent. The model may again refuse
+or emit a non-plan response, while a hook can re-enter external machinery even
+though MCP and built-in tools are disabled. This is especially important because
+the code, ADR-0025, G5, and the test all make the stronger statements "no
+CLAUDE.md, skills, plugins, or hooks" and "every one of these must always be
+present"; the live adversarial trial ran on a machine with no file-based managed
+configuration and cannot validate this branch.
+
+Suggested direction: either detect managed configuration and fail closed before
+the brain call, run the transform across an isolation boundary that managed
+Claude policy cannot populate, or explicitly scope the backend's isolation
+guarantee/support to unmanaged installations and keep G5 open for managed ones.
+Whichever contract is chosen, test or capability-check that contract rather than
+inferring it solely from the presence of `--setting-sources ""`.
+
+References: the official
+[settings precedence](https://code.claude.com/docs/en/settings#settings-precedence),
+[managed settings](https://code.claude.com/docs/en/server-managed-settings),
+and [hooks](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks)
+documentation.
+
+#### F6 — nit — `docs/reviews/2026-07-29-curator-refuses-itself.md:221`
+
+The two author resolution notes for F3 and F4 are attached to the wrong places:
+F3's note says only "corrected to 9" (the F4 evidence-count resolution), while
+F3's actual prompt-correction resolution appears after the Round 1 verdict,
+below F4. The code and durable gap record resolve both findings, but the relay
+record does not accurately show which response resolves which finding.
+
+Suggested direction: move the "corrected to 9" note under F4 and the
+`PLAN_SYSTEM` data-loss correction under F3, preserving the author text.
+
+Round 2 verification:
+
+- Inspected `git diff main...HEAD` and follow-up commit `a4acc5c` against spec
+  §2, §2.1, §2.2, ADR-0002, ADR-0025, G5, and Claude Code 2.1.218's installed
+  help and official configuration contract.
+- F1's built-in-tool defect is fixed: `_ISOLATION_ARGS` contains `--tools ""`,
+  the installed CLI documents that value as disabling every built-in tool, and
+  both `text` and `plan_json` route through the pinned `_once` command.
+- F2 is fixed by the indexed ADR-0025 and ADR-0002's scoped supersession note.
+  F3 is fixed in code: the prompt now matches §2/D9's unconsumed-and-retryable
+  contract. F4 is fixed in G5: the stale three-trial paragraph was replaced with
+  the nine-trial account.
+- Independently reproduced the budget bounds: one raw after a curated fact is
+  2,825 bytes, two raws without facts are 2,854 bytes, and 2,839 lies between
+  them.
+- Focused brain/curator/budget tests passed.
+- `UV_CACHE_DIR=/private/tmp/nb-review-uv-cache make ci` passed: ruff, format
+  check, mypy, store-chokepoint, and pytest; `1560 passed, 1 skipped`, coverage
+  `92.21%`.
+- No paid live brain call was repeated. The acknowledged 256-KB, end-to-end, and
+  nondeterminism gaps do not independently block landing this mitigation while
+  G5 remains honestly open; they do still block calling G5 fixed.
+
+**Verdict:** changes-requested — F1's built-in-tool path is closed and F2–F4 are
+implemented, but the branch still universally claims no inherited instructions,
+plugins, or hooks even though managed Claude configuration survives these flags
+and can recreate both refusal and re-entry paths.

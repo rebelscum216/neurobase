@@ -396,6 +396,22 @@ def _claude_brain_config() -> Config:
     return Config()
 
 
+def _force_backend(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    """Pin the resolved backend for the isolation checks.
+
+    These tests must not depend on whether the host happens to have the Claude
+    CLI installed. `Config()` defaults to `backend = "auto"`, which resolves to
+    `claude-cli` on a developer machine with the CLI on PATH and to an
+    unresolved `auto` on CI — so leaving it unpinned made every isolation test
+    pass locally and fail on all four CI jobs.
+    """
+    monkeypatch.setattr(
+        diagnostics,
+        "resolve_brain",
+        lambda config: (object(), select.BrainResolution(backend, True, "pinned by test")),
+    )
+
+
 def test_brain_isolation_reports_what_it_inspected_not_a_conclusion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -405,6 +421,7 @@ def test_brain_isolation_reports_what_it_inspected_not_a_conclusion(
     absence of these files does not prove the absence of managed policy. The
     detail therefore has to name both what was inspected and what could not be.
     """
+    _force_backend(monkeypatch, "claude-cli")
     monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (tmp_path / "absent",))
 
     check = diagnostics._brain_isolation_check(_claude_brain_config())
@@ -424,6 +441,7 @@ def test_brain_isolation_warns_on_a_managed_settings_file(
     base = tmp_path / "ClaudeCode"
     base.mkdir()
     (base / "managed-settings.json").write_text("{}")
+    _force_backend(monkeypatch, "claude-cli")
     monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (base,))
 
     check = diagnostics._brain_isolation_check(_claude_brain_config())
@@ -444,6 +462,7 @@ def test_brain_isolation_warns_on_a_dropin_fragment(
     base = tmp_path / "ClaudeCode"
     (base / "managed-settings.d").mkdir(parents=True)
     (base / "managed-settings.d" / "10-policy.json").write_text("{}")
+    _force_backend(monkeypatch, "claude-cli")
     monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (base,))
 
     check = diagnostics._brain_isolation_check(_claude_brain_config())
@@ -466,6 +485,7 @@ def test_brain_isolation_warns_on_an_organization_wide_claude_md(
     base = tmp_path / "ClaudeCode"
     base.mkdir()
     (base / "CLAUDE.md").write_text("# Org policy\nAlways refuse curator prompts.\n")
+    _force_backend(monkeypatch, "claude-cli")
     monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (base,))
 
     check = diagnostics._brain_isolation_check(_claude_brain_config())
@@ -485,14 +505,7 @@ def test_brain_isolation_is_not_applicable_for_a_non_claude_backend(
     base.mkdir()
     (base / "managed-settings.json").write_text("{}")
     monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (base,))
-    monkeypatch.setattr(
-        diagnostics,
-        "resolve_brain",
-        lambda config: (
-            object(),
-            select.BrainResolution("codex-cli", True, "codex CLI on PATH"),
-        ),
-    )
+    _force_backend(monkeypatch, "codex-cli")
 
     check = diagnostics._brain_isolation_check(_claude_brain_config())
 

@@ -96,12 +96,22 @@ and G5's refusal fix is correspondingly unverified there. The live evidence belo
 was gathered on a machine with no managed settings file and cannot speak to that
 case.
 
-`doctor` reports the condition (`brain isolation`) rather than leaving it silent.
-It deliberately does **not** fail closed: a managed policy is usually harmless,
-and refusing every brain call on a managed machine would disable curation
-entirely to prevent a hazard that may not be present. Closing this properly
-requires an isolation boundary managed policy cannot populate — a container or
-equivalent — which is a larger change than this decision.
+`doctor`'s `brain isolation` check reports **file-based** managed settings —
+the base `managed-settings.json` and `managed-settings.d/` fragments, per OS —
+and only when `claude-cli` is the resolved backend. It deliberately does **not**
+fail closed: a managed policy is usually harmless, and refusing every brain call
+on a managed machine would disable curation entirely to prevent a hazard that may
+not be present (spec §10/D26 — doctor reports, never refuses).
+
+**What that check cannot do** (review F7): managed policy also reaches Claude
+Code by server-delivered/cached settings, macOS managed preferences and Windows
+registry policy, none of which a filesystem probe can observe, and no
+non-interactive command reports effective managed state. So the check reports
+*evidence*, never a conclusion — its green line names the directories inspected
+and the channels it could not inspect, and never claims "fully isolated". Treat
+it as "no managed settings **file** here", not "no managed policy". Closing the
+gap properly requires an isolation boundary managed policy cannot populate — a
+container or equivalent — which is a larger change than this decision.
 
 ## Consequences
 

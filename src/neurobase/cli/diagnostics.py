@@ -657,39 +657,85 @@ def _startup_hook_executables(cwd: Path) -> list[tuple[str, str]]:
     return found
 
 
-# Where Claude Code reads enterprise-managed settings, per its settings-precedence
-# contract. That scope outranks user/project/local and cannot be overridden from
-# the command line, so `--setting-sources ""` does not reach it (review F5).
-_MANAGED_SETTINGS_PATHS = (
-    Path("/Library/Application Support/ClaudeCode/managed-settings.json"),  # macOS
-    Path("/etc/claude-code/managed-settings.json"),  # Linux
-    Path("C:/ProgramData/ClaudeCode/managed-settings.json"),  # Windows
+# File-based enterprise-managed settings, per Claude Code's settings-precedence
+# contract: a base file plus a `managed-settings.d/` drop-in directory, per OS.
+# The macOS/Linux locations and the Windows `Program Files` location are the
+# current ones; `C:/ProgramData/ClaudeCode` was the pre-2.1.75 path and is
+# deliberately NOT probed, because finding nothing there proves nothing.
+_MANAGED_SETTINGS_DIRS = (
+    Path("/Library/Application Support/ClaudeCode"),  # macOS
+    Path("/etc/claude-code"),  # Linux / WSL
+    Path("C:/Program Files/ClaudeCode"),  # Windows (current; not ProgramData)
+)
+
+# Managed policy Claude Code can apply that a filesystem probe cannot observe.
+# Named in the check's own output so a green line is never read as "no managed
+# policy exists" — only as "none of the files below are present" (review F7).
+_UNINSPECTABLE_MANAGED_SOURCES = (
+    "server-delivered/cached settings",
+    "macOS managed preferences",
+    "Windows registry policy",
 )
 
 
-def _brain_isolation_check() -> Check:
-    """Is the Claude backend's harness isolation actually complete here?
+def _managed_settings_files() -> list[Path]:
+    """Every file-based managed settings source present on this machine."""
+    found: list[Path] = []
+    for base in _MANAGED_SETTINGS_DIRS:
+        candidate = base / "managed-settings.json"
+        if candidate.is_file():
+            found.append(candidate)
+        dropin = base / "managed-settings.d"
+        if dropin.is_dir():
+            found.extend(sorted(p for p in dropin.glob("*.json") if p.is_file()))
+    return found
+
+
+def _brain_isolation_check(config: Config) -> Check:
+    """Report what narrows ADR-0025's brain-call isolation on this machine.
 
     ADR-0025 strips the harness from every `claude -p` brain call so the curator
-    call *is* what its prompt claims — no MCP, no skills, no CLAUDE.md, no tools.
-    Those flags select among the user/project/local setting sources only. An
-    enterprise **managed** settings file outranks all three, cannot be overridden
-    from the command line, and may carry hooks, force-enabled plugins and a policy
-    CLAUDE.md that load into the brain call regardless.
+    call *is* what its prompt claims. Those flags select among the
+    user/project/local setting sources only; enterprise-**managed** settings
+    outrank all three, cannot be overridden from the command line, and may carry
+    hooks, force-enabled plugins and a policy CLAUDE.md regardless.
 
-    So the isolation guarantee is scoped to unmanaged installations, and this
-    check makes that scope observable rather than silent: it reports which file
-    narrows the guarantee, and leaves the decision to the operator. It does not
-    fail closed — a managed policy is usually harmless, and refusing every brain
-    call on a managed machine would disable curation entirely to prevent a hazard
-    that may not be present.
+    Two deliberate limits, both from review F7:
+
+    **This check reports evidence, never a conclusion.** Managed policy also
+    arrives by channels no filesystem probe can see (:data:`_UNINSPECTABLE_MANAGED_SOURCES`),
+    so the absence of these files does *not* prove the absence of managed policy.
+    The `ok` detail therefore says what was inspected and what could not be, and
+    never claims "fully isolated". Anything stronger would be the same class of
+    overclaim this check exists to correct.
+
+    **It only applies to the Claude CLI backend.** ADR-0025's contract is about
+    `claude -p` argv. When Codex or an API backend is resolved, the question is
+    not merely green — it is irrelevant, and saying so is more useful than a
+    reassuring line about a code path that will not run.
+
+    It warns rather than errors: a managed policy is usually harmless, and
+    refusing every brain call on a managed machine would take curation offline to
+    prevent a hazard that may not be present (spec §10/D26 — doctor reports).
     """
-    found = [p for p in _MANAGED_SETTINGS_PATHS if p.is_file()]
+    _, resolution = resolve_brain(config)
+    if resolution.backend != "claude-cli":
+        return _check(
+            "brain isolation",
+            "ok",
+            f"not applicable — resolved brain is {resolution.backend}, "
+            "and ADR-0025's isolation contract covers the claude CLI only",
+        )
+
+    found = _managed_settings_files()
     if not found:
         return _check(
             "brain isolation",
             "ok",
-            "no managed Claude settings — brain calls run fully isolated (ADR-0025)",
+            "no managed settings file in "
+            f"{', '.join(str(d) for d in _MANAGED_SETTINGS_DIRS)} "
+            f"(not inspected: {'; '.join(_UNINSPECTABLE_MANAGED_SOURCES)} — "
+            "see ADR-0025 §Scope)",
         )
     return _check(
         "brain isolation",
@@ -928,7 +974,7 @@ def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
         _claude_hook_check(cwd, shim),
         *_codex_hook_checks(cwd, shim),
         *_capability_checks(cwd),
-        _brain_isolation_check(),
+        _brain_isolation_check(config),
         _claude_mcp_check(shim),
         _codex_mcp_check(shim),
     ]

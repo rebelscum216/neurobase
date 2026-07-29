@@ -472,14 +472,33 @@ signature, not a refusal). Zero refusals.** Six of the seven did real work (1–
 upserts each); one returned an empty-but-valid plan. The unstripped state, by
 contrast, refused or returned nothing across four runs.
 
-That is strong for the axis it tests — refusal-resistance at the size that
-actually reproduced the bug — and silent on two others:
+**End-to-end pass, 2026-07-29 — the decisive evidence.** `curate --if-stale` on
+the real store, running the fixed code, completed in **3m11s**:
 
-- **No full-size (256 KB) pass has been run end to end.** The original production
-  symptom was an empty string at that size; every probe here was 64 KB, so the
-  size dimension is uncontrolled. Closing this is the precondition for `fixed`.
-- **`curate` has never run to completion against a live brain** — only the plan
-  call in isolation. Consumption, the fold journal and synthesis are unexercised.
+```json
+{"status":"ok","node_refreshed":true,"raw":40,"backlog":362,"batches":2,
+ "distilled":23,"fallback":17,"upserts":6,"superseded":0,"tombstones":1,
+ "pruned_tombstones":59,"active_facts":55,"budget_calls":8,"unconsumed_left":322}
+```
+
+Verified on disk: unconsumed **362 → 323**, curated **52 → 55**, node rewritten,
+and `doctor`'s `curate health` **green for the first time since 2026-07-16**.
+This closes two of the three gaps this entry previously listed:
+
+- **End to end — closed.** The whole pipeline ran against a live brain: distill,
+  plan across two batches, `mark_consumed`, the fold journal (provenance edges
+  recorded), a tombstone, 59 pruned tombstones, and node synthesis.
+- **Full-size payload — closed by inference.** 40 raws splitting into exactly two
+  batches means the first filled to the 262,144-byte cap; had it not, all 40
+  would have fitted in one. So a ~256 KB plan request ran and returned parseable
+  JSON — the exact condition that produced the original empty result.
+- **Nondeterminism — still NOT explained.** It did not recur across the pass's
+  8 brain calls, but that is absence of evidence on a small sample, not a cause.
+
+Two caveats on that pass, so it is not read as more than it is: `budget_calls: 8`
+is low because the earlier failed pass had already cached 23 distill digests, so
+a cold pass costs more; and it consumed only 40 of 362 raws (`max_raws`, auto
+tier), so the backlog is drained but not cleared.
 
 **Unexplained, and deliberately not papered over:** identical repeated calls in the
 unstripped state returned different envelopes — sometimes `subtype: success` with
@@ -514,10 +533,16 @@ and may carry hooks, force-enabled plugins and a policy `CLAUDE.md` that load
 into the brain call regardless. On a managed machine the harness is therefore
 **not** fully stripped and this gap's fix is unverified — all nine live trials
 ran on a machine with no managed settings file, so they cannot speak to that
-case. `doctor`'s `brain isolation` check reports the condition instead of leaving
-it silent; it does not fail closed, because refusing every brain call on a
-managed machine would disable curation to prevent a hazard that may not be there.
-Closing it properly needs an isolation boundary managed policy cannot populate.
+case. `doctor`'s `brain isolation` check reports **file-based** managed settings
+(base file + `managed-settings.d/` fragments, per OS) and only when `claude-cli`
+is the resolved backend. It does not fail closed, because refusing every brain
+call on a managed machine would disable curation to prevent a hazard that may not
+be there. **It cannot prove the negative** (review F7): server-delivered
+settings, macOS managed preferences and Windows registry policy are invisible to
+a filesystem probe, and no non-interactive command reports effective managed
+state — so a green line means "no managed settings *file* found in the
+directories named in it", never "no managed policy". Closing the gap properly
+needs an isolation boundary managed policy cannot populate.
 See [ADR-0025](adr/0025-brain-call-harness-isolation.md) §Scope.
 
 **Reproduction.** `neurobase curate --if-stale` on this store (2026-07-29: 353

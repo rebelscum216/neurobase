@@ -657,6 +657,111 @@ def _startup_hook_executables(cwd: Path) -> list[tuple[str, str]]:
     return found
 
 
+# File-based enterprise-managed **policy**, per Claude Code's settings-precedence
+# and memory contracts: a base settings file, a `managed-settings.d/` drop-in
+# directory, and a standalone organization-wide `CLAUDE.md` — all per OS. The
+# last is a separate channel from the `claudeMd` key inside the settings JSON:
+# it is loaded into every session, cannot be excluded, and its content reaches
+# the model as a user message after the system prompt. That makes it the most
+# G5-relevant source of the three, because organization-authored instructions
+# are exactly what can turn a plan call into a refusal (review F8).
+# The macOS/Linux locations and the Windows `Program Files` location are the
+# current ones; `C:/ProgramData/ClaudeCode` was the pre-2.1.75 path and is
+# deliberately NOT probed, because finding nothing there proves nothing.
+_MANAGED_SETTINGS_DIRS = (
+    Path("/Library/Application Support/ClaudeCode"),  # macOS
+    Path("/etc/claude-code"),  # Linux / WSL
+    Path("C:/Program Files/ClaudeCode"),  # Windows (current; not ProgramData)
+)
+
+# Managed policy Claude Code can apply that a filesystem probe cannot observe.
+# Named in the check's own output so a green line is never read as "no managed
+# policy exists" — only as "none of the files below are present" (review F7).
+_UNINSPECTABLE_MANAGED_SOURCES = (
+    "server-delivered/cached settings",
+    "macOS managed preferences",
+    "Windows registry policy",
+)
+
+
+def _managed_policy_files() -> list[Path]:
+    """Every file-based managed-policy source present on this machine.
+
+    Three shapes, all of which reach a `claude -p` call: the base settings file,
+    `managed-settings.d/*.json` fragments, and the organization-wide `CLAUDE.md`.
+    Missing the last one meant a machine whose only managed policy was
+    org-authored instructions reported green (review F8).
+    """
+    found: list[Path] = []
+    for base in _MANAGED_SETTINGS_DIRS:
+        for name in ("managed-settings.json", "CLAUDE.md"):
+            candidate = base / name
+            if candidate.is_file():
+                found.append(candidate)
+        dropin = base / "managed-settings.d"
+        if dropin.is_dir():
+            found.extend(sorted(p for p in dropin.glob("*.json") if p.is_file()))
+    return found
+
+
+def _brain_isolation_check(config: Config) -> Check:
+    """Report what narrows ADR-0025's brain-call isolation on this machine.
+
+    ADR-0025 strips the harness from every `claude -p` brain call so the curator
+    call *is* what its prompt claims. Those flags select among the
+    user/project/local setting sources only; enterprise-**managed** settings
+    outrank all three, cannot be overridden from the command line, and may carry
+    hooks, force-enabled plugins and a policy CLAUDE.md regardless.
+
+    Two deliberate limits, both from review F7:
+
+    **This check reports evidence, never a conclusion.** Managed policy also
+    arrives by channels no filesystem probe can see (:data:`_UNINSPECTABLE_MANAGED_SOURCES`),
+    so the absence of these files does *not* prove the absence of managed policy.
+    The `ok` detail therefore says what was inspected and what could not be, and
+    never claims "fully isolated". Anything stronger would be the same class of
+    overclaim this check exists to correct.
+
+    **It only applies to the Claude CLI backend.** ADR-0025's contract is about
+    `claude -p` argv. When Codex or an API backend is resolved, the question is
+    not merely green — it is irrelevant, and saying so is more useful than a
+    reassuring line about a code path that will not run.
+
+    It warns rather than errors: a managed policy is usually harmless, and
+    refusing every brain call on a managed machine would take curation offline to
+    prevent a hazard that may not be present (spec §10/D26 — doctor reports).
+    """
+    _, resolution = resolve_brain(config)
+    if resolution.backend != "claude-cli":
+        return _check(
+            "brain isolation",
+            "ok",
+            f"not applicable — resolved brain is {resolution.backend}, "
+            "and ADR-0025's isolation contract covers the claude CLI only",
+        )
+
+    found = _managed_policy_files()
+    if not found:
+        return _check(
+            "brain isolation",
+            "ok",
+            "no managed policy file (settings, drop-in, or org CLAUDE.md) in "
+            f"{', '.join(str(d) for d in _MANAGED_SETTINGS_DIRS)} "
+            f"(not inspected: {'; '.join(_UNINSPECTABLE_MANAGED_SOURCES)} — "
+            "see ADR-0025 §Scope)",
+        )
+    return _check(
+        "brain isolation",
+        "warn",
+        f"managed Claude policy at {', '.join(str(p) for p in found)} — "
+        "this outranks --setting-sources and may add hooks, plugins or "
+        "organization instructions to every brain call",
+        "ADR-0025's isolation is scoped to unmanaged installs. Curation still "
+        "runs; treat G5's refusal fix as unverified here, and read that file "
+        "before trusting a curate pass on this machine.",
+    )
+
+
 def _capability_checks(cwd: Path) -> list[Check]:
     """Does every enabled startup hook's install satisfy *this* build's profile?
 
@@ -882,6 +987,7 @@ def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
         _claude_hook_check(cwd, shim),
         *_codex_hook_checks(cwd, shim),
         *_capability_checks(cwd),
+        _brain_isolation_check(config),
         _claude_mcp_check(shim),
         _codex_mcp_check(shim),
     ]

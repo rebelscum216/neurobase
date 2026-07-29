@@ -1,6 +1,6 @@
 # ADR-0002: `claude -p` JSON contract reliability for the curator
 
-- **Status:** Accepted
+- **Status:** Accepted — **invocation shape superseded by [ADR-0025](0025-brain-call-harness-isolation.md)** (the folded single prompt and "no flag adjustment was needed"). The reliability finding below stands.
 - **Date:** 2026-07-07
 - **Resolves:** S5
 - **Supersedes:** none

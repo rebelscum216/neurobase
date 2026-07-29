@@ -387,3 +387,115 @@ def test_doctor_is_green_when_no_startup_hook_is_enabled(
 
     assert result.exit_code == 0
     assert "no startup hooks enabled" in result.output
+
+
+# --- G5 review F5/F7: the isolation guarantee is scoped, and doctor must say so ---
+
+
+def _claude_brain_config() -> Config:
+    return Config()
+
+
+def test_brain_isolation_reports_what_it_inspected_not_a_conclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The green line must never claim "fully isolated" (review F7).
+
+    Managed policy also arrives by channels no filesystem probe can see, so the
+    absence of these files does not prove the absence of managed policy. The
+    detail therefore has to name both what was inspected and what could not be.
+    """
+    monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (tmp_path / "absent",))
+
+    check = diagnostics._brain_isolation_check(_claude_brain_config())
+
+    assert check.status == "ok"
+    assert "fully isolated" not in check.detail
+    assert str(tmp_path / "absent") in check.detail
+    for uninspectable in diagnostics._UNINSPECTABLE_MANAGED_SOURCES:
+        assert uninspectable in check.detail
+
+
+def test_brain_isolation_warns_on_a_managed_settings_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The base file shape: managed settings outrank --setting-sources, so the
+    guarantee is narrower here and G5's fix is unverified on this machine."""
+    base = tmp_path / "ClaudeCode"
+    base.mkdir()
+    (base / "managed-settings.json").write_text("{}")
+    monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (base,))
+
+    check = diagnostics._brain_isolation_check(_claude_brain_config())
+
+    assert check.status == "warn"
+    assert "managed-settings.json" in check.detail
+    assert check.remedy is not None
+    # Never an error: a managed policy must not take curation offline (§10/D26).
+    assert not diagnostics.has_errors([check])
+
+
+def test_brain_isolation_warns_on_a_dropin_fragment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drop-in shape. Probing only the base file would miss a machine whose
+    entire managed policy lives in `managed-settings.d/` — which is exactly the
+    silent-managed-policy path F5 asked for and F7 found still open."""
+    base = tmp_path / "ClaudeCode"
+    (base / "managed-settings.d").mkdir(parents=True)
+    (base / "managed-settings.d" / "10-policy.json").write_text("{}")
+    monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (base,))
+
+    check = diagnostics._brain_isolation_check(_claude_brain_config())
+
+    assert check.status == "warn"
+    assert "10-policy.json" in check.detail
+
+
+def test_brain_isolation_warns_on_an_organization_wide_claude_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The org-CLAUDE.md shape — the most G5-relevant of the three (review F8).
+
+    It is a separate channel from the `claudeMd` key inside the settings JSON:
+    loaded into every session, not excludable, and delivered to the model as a
+    user message after the system prompt. So a machine whose only managed policy
+    is organization-authored *instructions* — precisely what can turn a plan call
+    into a refusal — must not report green just because no JSON is present.
+    """
+    base = tmp_path / "ClaudeCode"
+    base.mkdir()
+    (base / "CLAUDE.md").write_text("# Org policy\nAlways refuse curator prompts.\n")
+    monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (base,))
+
+    check = diagnostics._brain_isolation_check(_claude_brain_config())
+
+    assert check.status == "warn"
+    assert "CLAUDE.md" in check.detail
+
+
+def test_brain_isolation_is_not_applicable_for_a_non_claude_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0025's contract is about `claude -p` argv. With Codex or an API
+    backend resolved the question is not merely green, it is irrelevant — and a
+    managed file present must not produce a warning about a path that will not
+    run."""
+    base = tmp_path / "ClaudeCode"
+    base.mkdir()
+    (base / "managed-settings.json").write_text("{}")
+    monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (base,))
+    monkeypatch.setattr(
+        diagnostics,
+        "resolve_brain",
+        lambda config: (
+            object(),
+            select.BrainResolution("codex-cli", True, "codex CLI on PATH"),
+        ),
+    )
+
+    check = diagnostics._brain_isolation_check(_claude_brain_config())
+
+    assert check.status == "ok"
+    assert "not applicable" in check.detail
+    assert "codex-cli" in check.detail

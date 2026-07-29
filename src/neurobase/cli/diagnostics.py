@@ -657,8 +657,14 @@ def _startup_hook_executables(cwd: Path) -> list[tuple[str, str]]:
     return found
 
 
-# File-based enterprise-managed settings, per Claude Code's settings-precedence
-# contract: a base file plus a `managed-settings.d/` drop-in directory, per OS.
+# File-based enterprise-managed **policy**, per Claude Code's settings-precedence
+# and memory contracts: a base settings file, a `managed-settings.d/` drop-in
+# directory, and a standalone organization-wide `CLAUDE.md` — all per OS. The
+# last is a separate channel from the `claudeMd` key inside the settings JSON:
+# it is loaded into every session, cannot be excluded, and its content reaches
+# the model as a user message after the system prompt. That makes it the most
+# G5-relevant source of the three, because organization-authored instructions
+# are exactly what can turn a plan call into a refusal (review F8).
 # The macOS/Linux locations and the Windows `Program Files` location are the
 # current ones; `C:/ProgramData/ClaudeCode` was the pre-2.1.75 path and is
 # deliberately NOT probed, because finding nothing there proves nothing.
@@ -678,13 +684,20 @@ _UNINSPECTABLE_MANAGED_SOURCES = (
 )
 
 
-def _managed_settings_files() -> list[Path]:
-    """Every file-based managed settings source present on this machine."""
+def _managed_policy_files() -> list[Path]:
+    """Every file-based managed-policy source present on this machine.
+
+    Three shapes, all of which reach a `claude -p` call: the base settings file,
+    `managed-settings.d/*.json` fragments, and the organization-wide `CLAUDE.md`.
+    Missing the last one meant a machine whose only managed policy was
+    org-authored instructions reported green (review F8).
+    """
     found: list[Path] = []
     for base in _MANAGED_SETTINGS_DIRS:
-        candidate = base / "managed-settings.json"
-        if candidate.is_file():
-            found.append(candidate)
+        for name in ("managed-settings.json", "CLAUDE.md"):
+            candidate = base / name
+            if candidate.is_file():
+                found.append(candidate)
         dropin = base / "managed-settings.d"
         if dropin.is_dir():
             found.extend(sorted(p for p in dropin.glob("*.json") if p.is_file()))
@@ -727,12 +740,12 @@ def _brain_isolation_check(config: Config) -> Check:
             "and ADR-0025's isolation contract covers the claude CLI only",
         )
 
-    found = _managed_settings_files()
+    found = _managed_policy_files()
     if not found:
         return _check(
             "brain isolation",
             "ok",
-            "no managed settings file in "
+            "no managed policy file (settings, drop-in, or org CLAUDE.md) in "
             f"{', '.join(str(d) for d in _MANAGED_SETTINGS_DIRS)} "
             f"(not inspected: {'; '.join(_UNINSPECTABLE_MANAGED_SOURCES)} — "
             "see ADR-0025 §Scope)",
@@ -740,9 +753,9 @@ def _brain_isolation_check(config: Config) -> Check:
     return _check(
         "brain isolation",
         "warn",
-        f"managed Claude settings at {', '.join(str(p) for p in found)} — "
-        "these outrank --setting-sources and may add hooks, plugins or a policy "
-        "CLAUDE.md to every brain call",
+        f"managed Claude policy at {', '.join(str(p) for p in found)} — "
+        "this outranks --setting-sources and may add hooks, plugins or "
+        "organization instructions to every brain call",
         "ADR-0025's isolation is scoped to unmanaged installs. Curation still "
         "runs; treat G5's refusal fix as unverified here, and read that file "
         "before trusting a curate pass on this machine.",

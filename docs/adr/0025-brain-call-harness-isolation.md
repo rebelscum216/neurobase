@@ -96,9 +96,12 @@ and G5's refusal fix is correspondingly unverified there. The live evidence belo
 was gathered on a machine with no managed settings file and cannot speak to that
 case.
 
-`doctor`'s `brain isolation` check reports **file-based** managed settings —
-the base `managed-settings.json` and `managed-settings.d/` fragments, per OS —
-and only when `claude-cli` is the resolved backend. It deliberately does **not**
+`doctor`'s `brain isolation` check reports **file-based** managed policy — the
+base `managed-settings.json`, `managed-settings.d/` fragments, and the
+organization-wide `CLAUDE.md`, per OS — and only when `claude-cli` is the
+resolved backend. The org `CLAUDE.md` is a distinct channel from the settings
+JSON's `claudeMd` key: not excludable, and delivered to the model as a user
+message, so it is the shape most able to reproduce G5 (review F8). It deliberately does **not**
 fail closed: a managed policy is usually harmless, and refusing every brain call
 on a managed machine would disable curation entirely to prevent a hazard that may
 not be present (spec §10/D26 — doctor reports, never refuses).
@@ -146,17 +149,26 @@ unstripped state refused or returned nothing across 4 runs. An adversarial paylo
 with the injection attempt curated as a fact**, and the filesystem artefact was
 never created.
 
-What this does **not** establish, recorded so nobody reads more into it:
+**End-to-end confirmation (2026-07-29).** `curate --if-stale` then ran to
+completion on the live store with this decision's code: `status: ok`, 40 raws
+consumed in 2 batches, 6 upserts, node refreshed, 3m11s, and `doctor`'s
+`curate health` green for the first time since 2026-07-16. Two batches for 40
+raws means the first filled the 262,144-byte cap, so a near-full-size plan
+request planned cleanly — the size at which the original symptom appeared. The
+pass was cheap (23 distill digests were already cached) and drained 40 of 362
+raws, so it is confirmation, not a throughput measurement.
 
-- **Payload size is uncontrolled.** Every trial ran at 64 KB. The original
-  production symptom was an empty result at **256 KB**; no full-size pass has run.
-- **`curate` has never run end to end against a live brain.** Only the plan call
-  in isolation — consumption, the fold journal and synthesis are unexercised.
-- **An unexplained nondeterminism remains.** In the *unstripped* state, identical
+What this still does **not** establish, recorded so nobody reads more into it:
+
+- **The nondeterminism is unexplained.** In the *unstripped* state, identical
   repeated calls returned different envelopes: sometimes a refusal string,
   sometimes `is_error: true`, sometimes a `None` result, roughly half and half.
   Whether the empty-result mode is a refusal failing to serialize or a third
-  distinct defect is unknown. It may be unrelated to this decision entirely.
+  distinct defect is unknown. It did not recur in the end-to-end pass, across
+  only 8 brain calls. It may be unrelated to this decision entirely — and it is
+  the reason G5 stays open.
+- **Nothing about managed installations.** All evidence was gathered on a machine
+  with no managed policy of any shape; see *Scope*.
 
 ## Alternatives considered
 

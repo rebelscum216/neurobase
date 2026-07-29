@@ -500,14 +500,19 @@ is low because the earlier failed pass had already cached 23 distill digests, so
 a cold pass costs more; and it consumed only 40 of 362 raws (`max_raws`, auto
 tier), so the backlog is drained but not cleared.
 
-**Unexplained, and deliberately not papered over:** identical repeated calls in the
-unstripped state returned different envelopes — sometimes `subtype: success` with
-a refusal string, sometimes `is_error: true` or a `None` result, roughly half and
-half. Whether the empty-result mode is the same refusal failing to serialize or a
-third distinct defect is **unknown**. The original production failure was an empty
-string at 256 KB, and only the 64 KB probes ever produced refusal *text*, so the
-size dimension is also uncontrolled. Re-run a full-size pass and confirm before
-calling this closed.
+**Unexplained, and deliberately not papered over — the one gap still open.**
+Identical repeated calls in the *unstripped* state returned different envelopes:
+sometimes `subtype: success` with a refusal string, sometimes `is_error: true`,
+sometimes a `None` result, roughly half and half. Whether the empty-result mode
+is the same refusal failing to serialize or a third distinct defect is
+**unknown**.
+
+The 2026-07-29 end-to-end pass did not reproduce it across 8 brain calls, which
+is absence of evidence on a small sample and not a cause. Note what that pass did
+and did not settle: it removes the *size* confound (a near-cap request planned
+cleanly), so "only 64 KB was ever tested" is no longer true — but the original
+production symptom was an empty result at that size, and nothing here explains
+why. **This alone is why G5 is not `fixed`.**
 
 **Tool restriction — first omitted, then found load-bearing (review F1).** The
 initial fix left built-in tools advertised, reasoning that `--system-prompt`
@@ -533,9 +538,12 @@ and may carry hooks, force-enabled plugins and a policy `CLAUDE.md` that load
 into the brain call regardless. On a managed machine the harness is therefore
 **not** fully stripped and this gap's fix is unverified — all nine live trials
 ran on a machine with no managed settings file, so they cannot speak to that
-case. `doctor`'s `brain isolation` check reports **file-based** managed settings
-(base file + `managed-settings.d/` fragments, per OS) and only when `claude-cli`
-is the resolved backend. It does not fail closed, because refusing every brain
+case. `doctor`'s `brain isolation` check reports **file-based** managed policy —
+the base settings file, `managed-settings.d/` fragments, and the
+organization-wide `CLAUDE.md`, per OS — and only when `claude-cli` is the
+resolved backend. That last shape is a separate channel from the settings JSON's
+`claudeMd` key, is not excludable, and reaches the model as a user message, which
+makes it the most G5-relevant of the three (review F8). It does not fail closed, because refusing every brain
 call on a managed machine would disable curation to prevent a hazard that may not
 be there. **It cannot prove the negative** (review F7): server-delivered
 settings, macOS managed preferences and Windows registry policy are invisible to

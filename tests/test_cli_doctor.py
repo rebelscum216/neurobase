@@ -452,6 +452,28 @@ def test_brain_isolation_warns_on_a_dropin_fragment(
     assert "10-policy.json" in check.detail
 
 
+def test_brain_isolation_warns_on_an_organization_wide_claude_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The org-CLAUDE.md shape — the most G5-relevant of the three (review F8).
+
+    It is a separate channel from the `claudeMd` key inside the settings JSON:
+    loaded into every session, not excludable, and delivered to the model as a
+    user message after the system prompt. So a machine whose only managed policy
+    is organization-authored *instructions* — precisely what can turn a plan call
+    into a refusal — must not report green just because no JSON is present.
+    """
+    base = tmp_path / "ClaudeCode"
+    base.mkdir()
+    (base / "CLAUDE.md").write_text("# Org policy\nAlways refuse curator prompts.\n")
+    monkeypatch.setattr(diagnostics, "_MANAGED_SETTINGS_DIRS", (base,))
+
+    check = diagnostics._brain_isolation_check(_claude_brain_config())
+
+    assert check.status == "warn"
+    assert "CLAUDE.md" in check.detail
+
+
 def test_brain_isolation_is_not_applicable_for_a_non_claude_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

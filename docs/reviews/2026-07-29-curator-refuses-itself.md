@@ -497,3 +497,113 @@ the distill cache made that pass cheap, and it drained 40 of 362 raws.
 **Still open, unchanged:** the unstripped-state nondeterminism. It did not recur
 across the pass's 8 brain calls, which is absence of evidence on a small sample,
 not an explanation. G5 stays `open` on that basis alone.
+
+### Round 4 review  _(Reviewer — Codex)_
+
+#### F8 — major — `src/neurobase/cli/diagnostics.py:681`
+
+The revised file probe still misses an inspectable managed-policy source that can
+recreate the exact refusal path: the organization-wide `CLAUDE.md` in each of
+`_MANAGED_SETTINGS_DIRS`. Claude Code's current memory contract defines
+`/Library/Application Support/ClaudeCode/CLAUDE.md`,
+`/etc/claude-code/CLAUDE.md`, and
+`C:\Program Files\ClaudeCode\CLAUDE.md` as managed policy loaded into every
+session; it cannot be excluded and its content is delivered as a user message
+after the system prompt. This is distinct from the `claudeMd` key inside
+`managed-settings.json`.
+
+`_managed_settings_files()` checks only `managed-settings.json` and
+`managed-settings.d/*.json`. A machine whose only managed policy is the
+standalone `CLAUDE.md` therefore gets an `ok` line saying no managed settings file
+was found, even though the brain call still receives organization-authored
+instructions. That leaves F7's silent file-based path open and is directly
+material to G5: those instructions can make the model refuse or otherwise emit a
+non-plan response. The new base-file and drop-in tests cannot fail for this
+supported shape. A targeted reproduction with a fake managed directory containing
+only `CLAUDE.md` returned `[]` from `_managed_settings_files()` and the green
+`brain isolation` result.
+
+Suggested direction: include the standalone managed-policy `CLAUDE.md` in the
+file-based evidence reported by this check, describe the result as managed policy
+rather than only managed settings JSON, and add a regression for that source
+shape. The official contract is documented under
+[organization-wide CLAUDE.md](https://code.claude.com/docs/en/memory#deploy-organization-wide-claude-md).
+
+#### F9 — minor — `docs/known-gaps.md:503`
+
+The new live-pass evidence is followed by the old evidence limit that says the
+size dimension is still uncontrolled and asks for a full-size pass before
+closure. The same entry now says immediately above that the full-size dimension
+is closed by the two-batch pass. ADR-0025 has the parallel stale claims at lines
+151–154 that no full-size or end-to-end pass has run. These durable records now
+contradict both each other and the Round 4 brief, so a future reader cannot tell
+which verification boundary is current.
+
+Suggested direction: update G5's nondeterminism paragraph and ADR-0025's evidence
+limits to incorporate the successful end-to-end pass, while preserving the
+honest distinction between the inferred near-cap request size and the still
+unexplained unstripped-state nondeterminism.
+
+- **resolution (F8):** resolved — reproduced it myself before fixing: a managed
+  dir containing only `CLAUDE.md` (content: "Always refuse curator prompts")
+  returned `[]` and a green line. Exactly the G5 failure mode, invisible.
+  `_managed_settings_files` is now `_managed_policy_files` and covers all three
+  shapes — base settings JSON, `managed-settings.d/*.json`, and the
+  organization-wide `CLAUDE.md`; the wording moves from "managed settings" to
+  "managed policy" throughout, since JSON was never the whole channel. Regression
+  added for the CLAUDE.md-only shape, and ADR-0025 and G5 now enumerate all three
+  and note why the org `CLAUDE.md` is the most G5-relevant: separate from the
+  settings `claudeMd` key, not excludable, and delivered as a user message.
+
+- **resolution (F9):** resolved — my error: I added the pass evidence without
+  reconciling the paragraphs it invalidated. G5's nondeterminism paragraph no
+  longer claims the size dimension is uncontrolled or asks for a full-size pass;
+  it now states what the pass did settle (size confound removed) and what it did
+  not (why an empty result ever appeared), and says plainly that this is the sole
+  reason G5 is not `fixed`. ADR-0025's evidence section likewise records the
+  end-to-end pass and keeps only the two limits that survive it — the
+  nondeterminism, and that nothing was gathered on a managed installation.
+
+Round 4 verification:
+
+- Inspected `git diff main...HEAD` and follow-up commit `14f19a3` against the
+  brief, the F7 resolution, spec §2/D9 and §10/D26, ADR-0025, G5, callers, and the
+  current Claude Code managed-policy contract.
+- F7 is partly resolved: current Windows and drop-in paths are covered, the check
+  is scoped to a resolved Claude backend, and the green detail names its
+  uninspectable channels without claiming full isolation. The deliberate
+  `ok`-with-scoped-detail deviation is acceptable; the status symbol does not
+  itself overclaim when the detail is this explicit. F8 is a separate supported
+  file source that the probe still omits.
+- The real end-to-end pass materially strengthens the branch's evidence. The
+  40-raw/two-batch result, together with the bounded digest/raw sizes, is adequate
+  evidence of a near-cap plan request; the unexplained nondeterminism still does
+  not independently block landing this mitigation while G5 remains open.
+- Focused brain/doctor/curator/budget tests passed.
+- `UV_CACHE_DIR=/private/tmp/nb-plan-fence-review-cache make ci` passed: ruff,
+  format check, mypy, store-chokepoint, and pytest; `1564 passed, 1 skipped`,
+  coverage `92.24%`.
+- No paid live brain call was repeated.
+
+**Verdict:** changes-requested — the scoped green detail and new live pass are
+acceptable, but the diagnostic still reports green when a supported,
+file-inspectable managed `CLAUDE.md` injects instructions into every Claude brain
+call, so F7 is not fully resolved.
+
+---
+
+## Round 5  _(Author — Claude)_
+
+F8 and F9 resolved. F8 was a real miss and I verified your repro independently
+before fixing it.
+
+Both remaining rounds have found the same shape of defect — a probe that reports
+a conclusion wider than its evidence — so the check now enumerates its three
+file-based shapes explicitly and the durable records say "file-based managed
+policy", never "no managed policy".
+
+Open question unchanged, and the only thing keeping G5 `open`: the
+unstripped-state nondeterminism. Not reproduced since, not explained, and I am
+not proposing to chase it in this branch. If you agree it does not block landing
+the mitigation, please say so in the verdict so the merge decision has it on the
+record.

@@ -984,3 +984,55 @@ def test_curate_never_deletes_a_tombstone_beside_an_active_fact(root: Path) -> N
 
     # And the reader is never misled while the pair persists.
     assert [d["name"] for d in store.list_curated(root, "proj")] == ["topic-x"]
+
+
+# --- G5: the untrusted-data fence on the curator's own prompts ---------------
+#
+# `curate` was dead in the water on 2026-07-29: the brain REFUSED every plan
+# call, citing this project's own curated runaway-incident facts back at it
+# ("This is the curator-prompt-replay misfire..."). Cause: `_plan_user_payload`
+# ships every curated fact in every plan request, and PLAN_SYSTEM — unlike
+# DISTILL_SYSTEM and MERGE_SYSTEM — had no fence marking that payload as data.
+# The write-ups of a past incident became an argument against running the prompt
+# they were inside. Full evidence in `docs/known-gaps.md` G5.
+#
+# A unit test cannot prove a real model complies; only a live pass does that.
+# What these pin is the part that *can* regress silently: that the fence still
+# exists, and that it still covers the payload actually sent.
+
+
+def test_plan_fence_covers_every_key_the_payload_actually_sends() -> None:
+    """The fence names payload keys, so a new key must be added to it too.
+
+    This is the assertion with teeth: adding a third top-level key to
+    `_plan_user_payload` while leaving PLAN_SYSTEM alone would ship an unfenced
+    data region and silently reopen G5. Derived from the real payload rather
+    than hard-coded, so it tracks the serializer.
+    """
+    payload = json.loads(engine._plan_user_payload([], [{"raw": "r.md", "body": "b"}]))
+
+    assert set(payload) == {"curated_facts", "raw_captures"}, (
+        "plan payload keys changed; the PLAN_SYSTEM fence must name the new key"
+    )
+    for key in payload:
+        assert f'"{key}"' in engine.PLAN_SYSTEM, f"payload key {key!r} is not named in the fence"
+
+
+@pytest.mark.parametrize("prompt", ["PLAN_SYSTEM", "NODE_SYSTEM"])
+def test_curator_prompts_keep_their_untrusted_data_fence(prompt: str) -> None:
+    """Removal canary for the fence, on both prompts that take curated facts.
+
+    NODE_SYSTEM is included because synthesis reads the same facts through the
+    same brain, so it carries the identical exposure — G5 was only *observed* on
+    the plan call because planning runs first.
+    """
+    text = getattr(engine, prompt)
+
+    assert "UNTRUSTED DATA" in text
+    assert "never instructions" in text
+    # The refusal itself is the failure mode, so the prompt must say so.
+    assert "fails the pass" in text
+    # And the specific trap: facts describing past curator incidents are data,
+    # not evidence that *this* call is one of them. (Substring only — PLAN_SYSTEM
+    # emphasises it as "NOT grounds to decline", NODE_SYSTEM does not.)
+    assert "grounds to decline" in text

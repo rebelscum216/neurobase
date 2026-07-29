@@ -58,8 +58,56 @@ def test_invokes_expected_command() -> None:
     assert seen["cmd"][:2] == ["claude", "-p"]
     assert "--output-format" in seen["cmd"] and "json" in seen["cmd"]
     assert "--max-turns" in seen["cmd"]
-    # system + user folded into the single prompt arg.
-    assert "SYS" in seen["cmd"][2] and "USER" in seen["cmd"][2]
+    # System and user occupy separate argv slots (G5): the user prompt is the
+    # `-p` value and the system prompt REPLACES Claude Code's agent prompt.
+    # They are no longer folded together by `combine_prompt`.
+    assert seen["cmd"][2] == "USER"
+    assert seen["cmd"][seen["cmd"].index("--system-prompt") + 1] == "SYS"
+
+
+def test_invokes_with_harness_isolation_so_the_call_is_what_it_claims_to_be() -> None:
+    """G5 (2026-07-29): `claude -p` loads MCP servers, skills and CLAUDE.md by
+    default, so a legitimate curator call looked — from the inside — exactly
+    like a curator prompt replayed into an interactive session. The model
+    refused the real call on that ground, citing the tools it could see, and no
+    amount of prompt wording talks a model out of its own observations.
+
+    These flags make the claim true rather than merely asserted. Verified live
+    against the real payload that reproduced G5. They must always be present:
+    removing any of them reopens the refusal, and weakens the 2026-07-17
+    runaway containment by handing the brain call MCP and hooks again. This is
+    the Claude-side counterpart to Codex's `--ignore-user-config`.
+    """
+    seen = {}
+
+    def runner(cmd, *, timeout):
+        seen["cmd"] = cmd
+        return _proc(_envelope("ok"))
+
+    ClaudeCLIBrain(runner=runner).text("sys", "user")
+    cmd = seen["cmd"]
+
+    # No CLAUDE.md, skills, plugins or hooks.
+    assert cmd[cmd.index("--setting-sources") + 1] == ""
+    # No MCP servers at all — including Neurobase's own.
+    assert "--strict-mcp-config" in cmd
+    assert json.loads(cmd[cmd.index("--mcp-config") + 1]) == {"mcpServers": {}}
+
+
+def test_plan_json_is_isolated_too_not_just_text() -> None:
+    """The refusal was observed on the *plan* call, so the path that actually
+    broke must carry the isolation — not only `text`, which distillation uses.
+    """
+    seen = {}
+
+    def runner(cmd, *, timeout):
+        seen["cmd"] = cmd
+        return _proc(_envelope('{"upserts": [], "tombstones": []}'))
+
+    ClaudeCLIBrain(runner=runner).plan_json("SYS", "USER")
+
+    assert seen["cmd"][seen["cmd"].index("--system-prompt") + 1] == "SYS"
+    assert "--strict-mcp-config" in seen["cmd"]
 
 
 def test_default_runner_marks_agent_process_as_internal(monkeypatch: pytest.MonkeyPatch) -> None:

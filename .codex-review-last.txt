@@ -1,0 +1,10 @@
+Review recorded in [the relay file](/Users/andrewsmith/Projects/nb-header-fallback/docs/reviews/2026-07-28-recall-header-search-fallback.md).
+
+Verdict: `changes-requested`.
+
+- Confirmed F2/F3 resolutions.
+- Confirmed exactly one of the five cap tests fails under the pre-F2 mutation.
+- Full CI passes.
+- Added blocker F4: the new §3 MUST needs a test for the complete fallback instruction, not disconnected substrings.
+
+Suggested next action: have the author strengthen that test and re-submit for round 3.

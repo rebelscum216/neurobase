@@ -57,10 +57,25 @@ def _node_bodies(handle: StoreHandle, project: str) -> list[str]:
     return bodies
 
 
-def _assemble(header: str, bodies: list[str], cap: int = MAX_CONTEXT_CHARS) -> str:
-    """Header + node bodies joined by ``\\n\\n---\\n\\n``, capped at ``cap``.
+def _assemble(header: str, bodies: list[str], cap: int = MAX_CONTEXT_CHARS) -> str | None:
+    """Header + node bodies joined by ``\\n\\n---\\n\\n``, capped at ``cap``, or
+    ``None`` when nothing worth injecting fits.
+
     Drop whole trailing nodes rather than truncate mid-node; truncate only if a
-    single node alone exceeds the cap."""
+    single node alone exceeds the cap.
+
+    **The header is indivisible** (spec §3): it carries the trust framing that
+    tells the reading agent this is background data and not instructions, plus
+    the retrieval-fallback instruction. A partial header is worse than no
+    injection — it can cut mid-sentence through the very framing that makes the
+    payload safe to read — so when the cap cannot fit the whole header plus at
+    least some node body we inject nothing at all. Review F2: a header-only
+    fragment is also simply useless, since it is framing for content that isn't
+    there.
+    """
+    room = cap - len(header) - len(_JOINER)
+    if not bodies or room < 1:
+        return None
     content = header
     for i, body in enumerate(bodies):
         candidate = content + _JOINER + body
@@ -68,9 +83,10 @@ def _assemble(header: str, bodies: list[str], cap: int = MAX_CONTEXT_CHARS) -> s
             content = candidate
             continue
         # This node doesn't fit. If it's the first node and even alone it
-        # overflows, truncate it; otherwise drop it and all following.
+        # overflows, truncate the BODY (never the header); otherwise drop it and
+        # all following.
         if i == 0:
-            content = (content + _JOINER + body)[:cap]
+            content = header + _JOINER + body[:room]
         break
     return content
 

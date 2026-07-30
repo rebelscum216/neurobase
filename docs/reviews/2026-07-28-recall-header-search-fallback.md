@@ -1,6 +1,6 @@
 ---
 slug: recall-header-search-fallback
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/recall-header-search-fallback
@@ -111,3 +111,69 @@ Full gate was green at `f76d6fd`: `1556 passed, 1 skipped`, coverage 92.21%
 ## Reviewer findings  _(Reviewer — Codex)_
 
 > Run the diff and review the actual code. One entry per finding.
+
+### F1 — blocker — `docs/neurobase-spec-appendix.md:523`
+
+The new standalone `MUST NOT` constrains the reading model's conclusion, but the
+change can only emit instruction text; it has no mechanism that can guarantee
+the model follows that instruction. The brief explicitly acknowledges that the
+model may or may not heed it, and
+`test_header_instructs_search_fallback_when_a_fact_seems_absent` only asserts
+three substrings. It therefore cannot fail when the newly specified behavior
+fails. That leaves a new §3 `MUST` without an enforcing test, contrary to
+AGENTS.md principle 1 ("Every `MUST` ... gets a test"), which makes this a
+blocking contract violation even though the intended prompt text is present.
+Suggested direction: make the normative subject the behavior Neurobase controls
+(for example, the header MUST convey the fallback instruction), and keep
+"absence is never treated as proof" as rationale or an evaluation target rather
+than a deterministic software contract; then pin the complete directive in the
+shared recall tests.
+
+### F2 — major — `src/neurobase/adapters/recall_common.py:31`
+
+The 200-character header expansion causes supported small
+`[inject].max_chars` configurations to stop injecting memory at all. There is no
+minimum or validation on `InjectConfig.max_chars`, and the existing regression
+suite deliberately exercises `cap=300`. With the short memory path `/tmp/n`,
+the header grows from 252 to 452 characters; calling `_assemble` with two
+250-character nodes and `cap=300` produced 41 characters of the first node on
+`main`, but on this branch produced zero node characters and only the first 300
+characters of an incomplete header. `emit()` still sends that non-empty fragment
+as `additionalContext`, so the result contains neither a status node nor the
+complete trusted framing/search instruction. This is materially more than the
+brief's claimed "~130 chars of node budget" tradeoff and conflicts with §3's
+`<content> = header + node bodies` / "Inject nodes" contract for an accepted
+configuration. The green suite misses it because
+`test_small_configured_cap_is_honored` checks only `len(ctx) <= 300` and absence
+of the trailing node, never that the first node or complete header survives.
+Suggested direction: define and enforce a minimum viable cap or otherwise make
+assembly fail safe while preserving a complete trusted header plus useful node
+content, and add a configured-cap regression that asserts both framing integrity
+and node presence (including a realistic variable-length memory path).
+
+### F3 — minor — `docs/how-it-works.md:1065`
+
+The documentation now calls the entire expanded header the exact wording that
+is "proven," but ADR-0005 only live-verified the delivery mechanism and the old
+defensive framing; the new retrieval-fallback sentence has no behavioral
+verification. The brief itself accurately calls the mechanism
+"unfalsifiable-by-construction," so labeling the augmented wording as proven
+overstates the evidence. Suggested direction: scope the historical "proven"
+claim to the defensive framing/delivery that ADR-0005 actually exercised, and
+describe the new closing sentence as an unevaluated retrieval instruction.
+
+Verification run:
+
+- `git diff main...HEAD`, repository protocol, §3, shared Claude/Codex recall
+  callers, MCP tool registration, and all matching header quotations
+- `uv run pytest tests/test_claude_recall.py tests/test_recall_common.py -q` —
+  passed (`14 passed`)
+- `uv run python scripts/ci.py` — ruff, format check, mypy, store-chokepoint,
+  and pytest passed; `1556 passed, 1 skipped`, total coverage `92.21%`
+- Direct `_assemble` reproduction at `cap=300` — `main` header: 41 first-node
+  characters and a complete header; branch header: zero node characters and a
+  truncated header
+
+**Verdict:** changes-requested — the wording is present and the gate is green,
+but the new §3 `MUST` is not enforceable as written and the longer header
+regresses valid small-cap recall into a header-only fragment.

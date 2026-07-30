@@ -1,6 +1,6 @@
 # ADR-0022: Curator fold journal + `from_raw` validation (provenance hardening, Slice B)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-24 (decision first authored 2026-07-19)
 - **Resolves:** session→fact provenance hardening, write side ("Slice B")
 - **Supersedes:** none

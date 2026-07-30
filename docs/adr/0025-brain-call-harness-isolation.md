@@ -1,6 +1,6 @@
 # ADR-0025: Brain-call harness isolation — the curator call must *be* a curator call
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-29
 - **Resolves:** `known-gaps.md` **G5** (the curator's brain call is
   indistinguishable from a replayed curator prompt, so the model refuses it).

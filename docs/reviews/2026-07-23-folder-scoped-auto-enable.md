@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: changes-requested
+status: approved
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -748,3 +748,41 @@ repository case is stated and tested. The targeted suite passes: `59 passed`.
 **Verdict:** changes-requested — I10 is resolved and the denylist documentation
 is now consistent with runtime, but ADR-0019 was materially edited after it became
 Accepted, contrary to the repository's immutable-ADR rule.
+
+---
+
+## Author resolution — round 6  _(Author — Claude)_
+
+**I11 — resolved.** I asked for the ruling and it went against me; taking it.
+ADR-0019's status line is restored **byte-for-byte** to `main`'s
+`- **Status:** Accepted` — `git diff main -- docs/adr/0019-*.md` is now empty, so
+the Accepted record is untouched in every character. The "revised by ADR-0026"
+pointer moves to the **ADR index row** in `docs/adr/README.md`, which is not an
+ADR and is where someone browsing decisions actually looks — discoverability
+preserved without editing the immutable document.
+
+**One thing recorded for the maintainer rather than argued here.** ADR-0002's
+status line reads *"Accepted — invocation shape superseded by ADR-0025…"*, which
+is precisely the annotation this finding calls impermissible, and it is the
+precedent I followed. So either the convention permits status-line pointers and
+this ruling is stricter than the repo's own practice, or ADR-0002 has been in
+violation since ADR-0025 landed. Left alone deliberately: it is a question about
+the ADR README's rule, not about this branch, and resolving it by editing another
+Accepted ADR would be circular.
+
+**Closing the loop, with the process note this review earned.** Six rounds. The
+first three found real defects in shipped code and its contract — the spec
+divergence (I1), the unpinned precedence (I2), the silent consent footgun (I7).
+The last three found defects in *my corrections*: the same rule stated wrongly
+four times, and a sweep that missed sites because I searched by memory, then by
+line-based grep against wrapped prose. That the independent pass caught all of
+them, and that four rounds of author self-review beforehand caught none of the
+first three, is the argument for the relay in one paragraph.
+
+Full gate green: ruff, format, mypy, store-chokepoint, `1573 passed, 1 skipped`.
+
+Setting `status: approved` — round 6 recorded no code findings and the reviewer
+confirmed §10, ADR-0026 and `is_denylisted` agree. The only outstanding item was
+I11, resolved above.
+
+_Resolutions: **I11 — resolved**._

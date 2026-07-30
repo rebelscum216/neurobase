@@ -159,6 +159,66 @@ def test_register_project_refuses_to_clobber_an_unusable_registry(
     assert (path.read_text() if path.is_file() else None) == before
 
 
+# --- valid TOML that is not a registry --------------------------------------
+#
+# Every one of these is reachable by hand-editing registry.toml, and each used to
+# detonate *later* than the read — two of them inside ``Path()`` on the capture
+# path — rather than at the accessor that promises to absorb them.
+
+_SHAPES = {
+    "entry-not-a-table": "[projects]\nx = 1\n",
+    "root-not-a-string": "[projects.x]\nroots = [1]\n",
+    "projects-not-a-table": "projects = []\n",
+    "roots-not-a-list": '[projects.x]\nroots = "/tmp/x"\n',
+}
+
+
+@pytest.mark.parametrize("shape", list(_SHAPES.values()), ids=list(_SHAPES))
+def test_load_registry_treats_a_wrongly_shaped_registry_as_empty(root: Path, shape: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "registry.toml").write_text(shape)
+    assert projects.load_registry(root) == {}
+
+
+@pytest.mark.parametrize("shape", list(_SHAPES.values()), ids=list(_SHAPES))
+def test_resolve_project_survives_a_wrongly_shaped_registry(
+    root: Path, repo: Path, shape: str
+) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "registry.toml").write_text(shape)
+    assert projects.resolve_project(root, repo) is None
+
+
+def test_one_mangled_entry_does_not_untrack_every_other_project(root: Path, repo: Path) -> None:
+    """The deliberate deviation from "treat the whole file as empty": a lenient
+    read skips the offending *entry* and keeps the rest. ``resolve_project`` runs
+    at hook time, so one hand-mangled entry must untrack that project alone — not
+    silently kill capture everywhere."""
+    projects.register_project(root, repo)
+    registry = root / "registry.toml"
+    registry.write_text(registry.read_text() + "\n[projects.mangled]\nroots = [1]\n")
+
+    assert projects.load_registry(root) == {"my-cool-repo": [str(repo.resolve())]}
+    assert projects.resolve_project(root, repo) == "my-cool-repo"
+
+
+@pytest.mark.parametrize("shape", list(_SHAPES.values()), ids=list(_SHAPES))
+def test_register_project_refuses_a_wrongly_shaped_registry(
+    root: Path, repo: Path, shape: str
+) -> None:
+    """Read-for-rewrite stays strict for shape violations too: skipping an entry
+    and *then* rewriting the file is how the skipped project's roots would be
+    lost for good."""
+    root.mkdir(parents=True, exist_ok=True)
+    registry = root / "registry.toml"
+    registry.write_text(shape)
+
+    with pytest.raises(projects.RegistryShapeError):
+        projects.register_project(root, repo)
+
+    assert registry.read_text() == shape
+
+
 # --- resolution: git root, worktrees, non-git, no-match ---------------------
 
 

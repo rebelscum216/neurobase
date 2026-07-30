@@ -92,6 +92,9 @@ def resolve_or_auto_enable(
         projects.ProjectSlugCollisionError,
         store.InvalidSlugError,
         tomllib.TOMLDecodeError,
+        # register_project reads the registry strictly (it is about to rewrite
+        # it), so a valid-TOML-but-wrong-shape registry raises here too.
+        projects.RegistryShapeError,
         OSError,
     ):
         return None

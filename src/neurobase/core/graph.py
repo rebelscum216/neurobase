@@ -365,23 +365,6 @@ def _project_graph(
                 add_fact_edge(old, new, "journal")
 
 
-def _all_projects(handle: StoreHandle) -> list[str]:
-    """Registry project slugs, fail-soft: a malformed or unreadable
-    ``registry.toml`` yields ``[]`` rather than raising.
-
-    Spec §10 states registry parseability is a *separate*, fail-soft concern —
-    reads "treat it as empty" — but ``projects.load_registry`` parses TOML
-    unguarded, so the containment is the caller's. This mirrors the two readers
-    that already carry their own copy (``core.search._all_projects``,
-    ``mcp.server._safe_registry``); the sweep below reads the registry *before*
-    its per-project try/except, so without this a corrupt registry takes down
-    every project's graph rather than one."""
-    try:
-        return sorted(handle.load_registry())
-    except Exception:
-        return []
-
-
 def _sessions_from_raws(project: str, raws: dict[str, _Raw]) -> list[SessionNode]:
     """Collapse captures into one node per session. A session's ``captured_at``
     is its earliest capture, and it is ``resolved`` if *any* of its captures
@@ -422,16 +405,17 @@ def memory_graph(
     invalidate). Ordering is total and stable so callers can diff two graphs.
 
     Fail-soft is scoped to the *store*, not to the caller. In the all-projects
-    sweep a registry that does not parse reads as empty (spec §10, via
-    :func:`_all_projects`), and a registry slug that is corrupt or whose tree is
-    unreadable contributes nothing rather than taking down every other project's
-    graph (the ``memory_list_projects`` posture). An **explicitly named** project that is not
+    sweep an unusable registry reads as empty — that guarantee lives in
+    ``projects.load_registry`` itself (spec §10), not here — and a registry slug
+    that is corrupt or whose tree is unreadable contributes nothing rather than
+    taking down every other project's graph (the ``memory_list_projects``
+    posture). An **explicitly named** project that is not
     a valid slug still raises :class:`store.InvalidSlugError` — swallowing that
     would turn a caller's typo into a silently empty graph, which is
     indistinguishable from a project that genuinely has no memory yet.
     """
     sweeping = project is None
-    targets = _all_projects(handle) if sweeping else [str(project)]
+    targets = sorted(handle.load_registry()) if sweeping else [str(project)]
 
     sessions: list[SessionNode] = []
     facts: dict[tuple[str, str], FactNode] = {}

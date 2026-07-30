@@ -969,10 +969,19 @@ schema-independent by design — see the maintenance exception below.
   project directly from the registry when `store.toml` itself is corrupt and no handle
   can open. That fail-soft behaviour lives **in `load_registry` itself**, not in each
   reader — a rule every caller has to remember is one a future caller will forget.
+  "Corrupt" covers **valid TOML of the wrong shape**, not just a failed parse: a
+  `projects` that is not a table, an entry that is not a table, or a `roots` list
+  holding a non-string are all hand-editable and otherwise detonate *later* than the
+  read — inside `Path()`, on the capture path. A wrongly-shaped **entry** is skipped
+  and the rest of the registry is kept (one mangled entry untracks that project, it
+  does not kill capture for every other one — the same posture §12 takes for a
+  malformed project tree); a `projects` that is not a table has nothing to salvage
+  and reads as empty.
   **Read-for-rewrite is the one exception and reads strictly:** `register_project`
-  parses through the raw reader, because treating an unparseable registry as empty
-  would rewrite the file from `{}` and silently drop every other project's roots.
-  A corrupt registry therefore raises there; `core/enable.py` catches it and fails
+  parses through the raw reader, because treating an unparseable *or* skippable
+  registry as empty would rewrite the file and silently drop every other project's
+  roots. A corrupt registry therefore raises there — `TOMLDecodeError`, `OSError`,
+  or `projects.RegistryShapeError`; `core/enable.py` catches all three and fails
   closed, per the auto-enable posture above.
 
 **Enforcement.** Production store-tree and registry access (`src/neurobase/`) goes

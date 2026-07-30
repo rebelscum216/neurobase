@@ -12,6 +12,7 @@ import re
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import tomli_w
 
@@ -24,6 +25,15 @@ class ProjectSlugCollisionError(ValueError):
     """The slugified name already maps to a different root."""
 
 
+class RegistryShapeError(ValueError):
+    """``registry.toml`` parsed as TOML but is not a registry: ``projects`` is not
+    a table, an entry is not a table, or a ``roots`` list holds a non-string.
+
+    Distinct from ``tomllib.TOMLDecodeError`` because the two read paths need to
+    tell "this file is not valid TOML" from "this file is valid TOML that means
+    nothing here" — but only the *strict* path ever sees either."""
+
+
 def slugify(name: str) -> str:
     """Lowercase; every run of non-``[a-z0-9]`` chars becomes one ``-``; trim
     leading/trailing ``-`` (spec §10)."""
@@ -34,21 +44,55 @@ def _registry_path(root: Path) -> Path:
     return root / "registry.toml"
 
 
-def _read_registry(root: Path) -> dict[str, list[str]]:
-    """The parse itself. Raises on a registry that is unreadable (``OSError``) or
-    unparseable (``tomllib.TOMLDecodeError``) — see the two callers below, which
-    differ precisely in whether they may swallow that."""
+def _load_toml(root: Path) -> dict[str, Any]:
+    """The file read + TOML parse. Missing file ⇒ ``{}``; unreadable ⇒ ``OSError``;
+    unparseable ⇒ ``tomllib.TOMLDecodeError``."""
     path = _registry_path(root)
     if not path.exists():
         return {}
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    projects = data.get("projects", {})
-    return {slug: list(entry.get("roots", [])) for slug, entry in projects.items()}
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def _shape(data: dict[str, Any], *, strict: bool) -> dict[str, list[str]]:
+    """``{slug: [roots...]}`` out of parsed TOML.
+
+    Valid TOML is not automatically a registry: ``projects`` may not be a table,
+    an entry may not be a table, and a ``roots`` list may hold non-strings — all
+    reachable by hand-editing, and each one detonates *later* (in ``Path()``, on
+    the capture path) rather than at the read if it is passed through.
+
+    ``strict`` decides what a violation means. Strict raises. Lenient **skips the
+    offending entry** and keeps the rest, rather than emptying the whole
+    registry: ``resolve_project`` runs at hook time, so one hand-mangled entry
+    must untrack *that* project, not silently kill capture for every other one —
+    the same posture the spec takes for a malformed project tree. A ``projects``
+    that is not a table has no entries to salvage and reads as empty."""
+    table = data.get("projects", {})
+    if not isinstance(table, dict):
+        if strict:
+            raise RegistryShapeError(f"'projects' is {type(table).__name__}, not a table")
+        return {}
+    registry: dict[str, list[str]] = {}
+    for slug, entry in table.items():
+        roots = entry.get("roots", []) if isinstance(entry, dict) else None
+        if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+            if strict:
+                raise RegistryShapeError(f"entry {slug!r} has no valid 'roots' list of strings")
+            continue  # skip this project, keep the others
+        registry[str(slug)] = list(roots)
+    return registry
+
+
+def _read_registry(root: Path) -> dict[str, list[str]]:
+    """Strict read, for the read-for-rewrite path only. Raises on a registry that
+    is unreadable (``OSError``), unparseable (``tomllib.TOMLDecodeError``), or not
+    shaped like a registry (:class:`RegistryShapeError`)."""
+    return _shape(_load_toml(root), strict=True)
 
 
 def load_registry(root: Path) -> dict[str, list[str]]:
-    """``{slug: [roots...]}``. Missing file ⇒ empty registry, and so does a
-    corrupt or unreadable one.
+    """``{slug: [roots...]}``. A missing, unreadable, unparseable, or
+    wrongly-shaped ``registry.toml`` all read as empty — never as an exception.
 
     **Spec §10:** registry parseability is a separate, fail-soft concern — a
     corrupt ``registry.toml`` is not folded into the schema guard; registry reads
@@ -56,14 +100,17 @@ def load_registry(root: Path) -> dict[str, list[str]]:
     lives here, at the named accessor, rather than in each reader: a rule that
     every caller has to remember is one a future caller will forget, and the
     failure mode is a whole surface crashing on a file it only wanted to read.
+    "Corrupt" covers valid TOML of the wrong shape too — see :func:`_shape`,
+    which is where the file-level and shape-level halves of that guarantee meet.
 
     Read-for-**rewrite** is the deliberate exception and does not come through
     here — see :func:`register_project`, which must not overwrite a registry it
-    could not parse."""
+    could not fully parse."""
     try:
-        return _read_registry(root)
+        data = _load_toml(root)
     except (OSError, tomllib.TOMLDecodeError):
         return {}
+    return _shape(data, strict=False)
 
 
 def _write_registry(root: Path, registry: dict[str, list[str]]) -> None:

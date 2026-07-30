@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -526,3 +526,56 @@ Full gate green: ruff, format, mypy, store-chokepoint, `1572 passed, 1 skipped`.
 Re-opened `status: awaiting-review`.
 
 _Resolutions: **I5 — resolved** · **I6 — resolved** · **I7 — resolved**._
+
+## Reviewer findings — round 4 (independent pass)
+
+Verified `main...HEAD` and the round-3 resolution.  ADR-0019's body is
+byte-for-byte `main` apart from its status-line annotation; that annotation is
+consistent with the ADR-0002 → ADR-0025 precedent, and does not itself rewrite
+the Accepted decision.  ADR-0026 is now the corrective home for both D39 and
+D40's stale carve-out language; the remaining old wording is deliberately
+preserved only in the immutable ADR-0019 and is called out by the pointer.
+The five new doctor tests are genuine assertions (including the registration
+test) and the full gate passes, but they omit the nested-repository case below.
+Sharing `_resolved_config_dirs` is the right implementation choice here: this
+read-only diagnostic must use the identical config expansion as
+`is_denylisted`, and promoting that small helper merely to avoid an underscore
+would add API surface without reducing meaningful coupling.
+
+### I8 — The denylist-scope warning is false for an entry that contains a nested repository
+
+- **severity:** major
+- **location:** `src/neurobase/cli/diagnostics.py:997-1023`
+- **issue:** The check classifies every existing denylist path whose own Git root
+  differs from the path as an entry that "gate[s] NOTHING."  That does not match
+  `is_denylisted` for nested repositories.  For example, with outer repository
+  `/work/mono`, `denylist = ["/work/mono/packages"]`, and a separate Git
+  repository at `/work/mono/packages/plugin`, the check calls
+  `git_common_root(/work/mono/packages)` and warns because it finds `/work/mono`.
+  But an automatic action in `plugin` collapses to `/work/mono/packages/plugin`,
+  which *is* under the configured entry, so `is_denylisted()` returns true and
+  capture/injection is gated.  The doctor report and ADR-0026's claimed
+  "nothing" behavior are therefore overbroad precisely at a repo boundary.
+- **suggested direction:** Define the warning against the actual set of possible
+  repository roots, rather than just the Git root of the configured directory.
+  At minimum, do not report an entry as a no-op when it can contain a nested Git
+  repository; add a nested-repository regression test that compares the warning
+  with `is_denylisted`'s result.  Align ADR-0026 and §10 with the chosen scoped
+  statement.
+
+### I9 — ADR-0026 should be Accepted when this branch lands its decision and normative contract
+
+- **severity:** minor
+- **location:** `docs/adr/0026-denylist-is-repo-scoped.md:3`; `docs/adr/README.md:59`
+- **issue:** ADR-0026 is marked `Proposed`, while this branch both adopts its
+  decision and lands the normative §10 text and doctor behavior that implement
+  it.  Leaving it Proposed after merge would recreate the stale-decision state
+  the recent ADR status cleanup removed, and would leave an Accepted ADR-0019
+  annotated as revised by a decision record that has not itself been accepted.
+- **suggested direction:** Make ADR-0026 (and its index row) `Accepted` as part
+  of the merge that accepts this branch.  It may remain Proposed only while the
+  maintainer is still deciding whether to take this branch.
+
+**Verdict:** changes-requested — I8 makes the new consent diagnostic report a
+reachable working denylist entry as a no-op; I9 should be completed when the
+branch's decision is accepted.

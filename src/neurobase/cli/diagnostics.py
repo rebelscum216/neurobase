@@ -975,19 +975,31 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
 
 
 def _denylist_scope_check(config: Config) -> Check:
-    """Report `[enable].denylist` entries that sit *inside* a git repo (ADR-0026).
+    """Report `[enable].denylist` entries that do not gate the repo containing them.
 
-    Matching is repo-scoped: `projects.is_denylisted` collapses the cwd to its git
-    root before comparing, so an entry naming a directory inside a repo can never
-    match and silently does nothing. That is deliberate, but a consent opt-out that
-    quietly no-ops is exactly what a user must be told about (review I7). Doctor is
-    the surface because a hook cannot warn — its stdout is protocol output
-    (`hookSpecificOutput`), not a user channel.
+    The matching rule (ADR-0026), stated exactly:
+    **an entry gates a repo iff that repo's root is at or beneath the entry.**
+    `projects.is_denylisted` collapses the cwd to its git root and tests *that*
+    against each entry, so everything follows from the rule with no special cases.
+
+    The consequence worth warning about: an entry *inside* repo `C` never gates
+    `C`, because `C`'s root sits **above** the entry — so a user who denylists a
+    sensitive subdirectory has not stopped capture of the repo it lives in
+    (review I7), and a hook cannot tell them, since its stdout is protocol output
+    (`hookSpecificOutput`) rather than a user channel.
+
+    It does **not** follow that such an entry does nothing. Review I8: with repo
+    `/work/mono`, entry `/work/mono/packages`, and a nested repo
+    `/work/mono/packages/plugin`, the nested repo's root *is* beneath the entry, so
+    `is_denylisted` returns True and it is gated. An earlier version of this check
+    claimed such entries "gate NOTHING" and was simply wrong there. The wording
+    below is therefore scoped to the claim that is true in every case — the
+    containing repo is not gated — and says what the entry does still cover.
 
     Read-only. Uses `projects._resolved_config_dirs` rather than re-implementing
     the expansion: this check's only job is to predict what the matcher will do, so
     a private-but-shared helper beats a copy that can drift out of agreement with
-    it. Promote it to public API if that coupling is judged wrong.
+    it.
     """
     entries = config.enable.denylist
     if not entries:
@@ -1015,12 +1027,14 @@ def _denylist_scope_check(config: Config) -> Check:
     return _check(
         "denylist scope",
         "warn",
-        f"{len(inner)} [enable].denylist entr{plural(len(inner))} sit inside a git repo "
-        f"and therefore gate NOTHING — capture and injection continue there: {shown}{more}",
+        f"{len(inner)} [enable].denylist entr{plural(len(inner))} sit inside a git repo and "
+        f"do NOT gate that repo — automatic capture and injection continue in it. Only repos "
+        f"whose root is at or beneath the entry are gated: {shown}{more}",
         remedy=(
-            "Denylist matching is repo-scoped (ADR-0026): name the repo root itself, "
-            f"e.g. `{inner[0][1]}`, or an ancestor directory. A path inside a repo "
-            "cannot carve out a subtree."
+            "An entry gates a repo iff that repo's root is at or beneath it (ADR-0026). "
+            f"To gate the containing repo, name its root — e.g. `{inner[0][1]}` — or an "
+            "ancestor. Keep the entry as-is only if you meant to gate repos nested "
+            "beneath it."
         ),
     )
 

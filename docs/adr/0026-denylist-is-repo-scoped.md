@@ -48,20 +48,32 @@ they revoked consent when they did not.
 
 **Denylist matching is repo-scoped, and the documentation moves to say so.**
 
-1. **The compared candidate is the repository root.** An entry must name a repo
-   root or an ancestor of one. An entry naming a path *inside* a repo matches
-   nothing.
+1. **The rule, stated exactly: an entry gates a repo *iff* that repo's root is at
+   or beneath the entry.** The compared candidate is always the repository root,
+   never the cwd, so everything follows from this one sentence with no special
+   cases.
+
+   The consequence that surprises: an entry *inside* repo `C` never gates `C`,
+   because `C`'s root sits **above** it. It does **not** follow that such an entry
+   is inert — a repo nested *beneath* the entry has its root beneath it and **is**
+   gated. Review I8 caught an earlier draft of this ADR (and of the doctor check)
+   asserting the blanket "matches nothing", which is false exactly at a nested-repo
+   boundary: with repo `/work/mono`, entry `/work/mono/packages`, and a nested repo
+   `/work/mono/packages/plugin`, `is_denylisted` returns **True** for the plugin.
 2. **This is deliberate, not a defect to fix.** A capture is attributed to the
    repo's project regardless of which subdirectory the session ran in, so a
    subtree entry could not deliver the protection its path implies — it would be
    partial at best, and misleading at worst. Consent is granted per repo
    (`enable`) and per folder (`auto_enable_roots`); it is revoked at the same
    granularity.
-3. **But a silent no-op in a consent config is not acceptable** (review I7).
-   `doctor` reports any `denylist` entry that resolves inside a git repository,
-   naming the repo root as the remedy. `doctor` is the right surface: it is
-   already the read-only reporting path, and a hook cannot warn — its stdout is
-   protocol output (`hookSpecificOutput`), not a user channel.
+3. **But silently failing to gate the repo a user pointed inside is not
+   acceptable** (review I7). `doctor` reports any `denylist` entry resolving
+   inside a git repository, stating that the **containing repo is not gated** and
+   naming its root as the remedy. `doctor` is the right surface: it is already the
+   read-only reporting path, and a hook cannot warn — its stdout is protocol
+   output (`hookSpecificOutput`), not a user channel. The report is scoped to the
+   claim that holds in every case (the containing repo is not gated) rather than
+   the blanket no-op claim I8 disproved.
 4. **The permissive outcome is pinned by test**
    (`test_denylist_entry_inside_a_repo_does_not_gate_it`), asserting that a
    denylisted inner directory still auto-enables while denylisting the repo root

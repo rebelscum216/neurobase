@@ -846,14 +846,22 @@ scribes' capture):
    automatic injection, and does **not** gate explicit MCP tools or CLI commands,
    nor purge memory already captured.
 
-   **A `denylist` entry naming a path *inside* a repo has no effect** — it cannot
-   carve a subtree out of a repo, because the compared candidate is always the
-   repo root. Denylist the repo root, or an ancestor of it. This is deliberate,
-   not a limitation to route around: consent is granted per repo (`enable`) and
-   per folder (`auto_enable_roots`), so it is revoked at the same granularity —
-   and a capture is attributed to the repo's project no matter which subdirectory
-   the session ran in, so a subtree entry could never deliver the protection its
-   path implies. It would read as consent that silently does nothing.
+   Equivalently, and this is the whole rule: **an entry gates a repo iff that
+   repo's root is at or beneath the entry.** No special cases follow from it.
+
+   **An entry naming a path *inside* a repo does not gate that repo** — the repo's
+   root sits *above* the entry, so it never matches. Denylist the repo root, or an
+   ancestor of it. This is deliberate: consent is granted per repo (`enable`) and
+   per folder (`auto_enable_roots`), so it is revoked at the same granularity — and
+   a capture is attributed to the repo's project no matter which subdirectory the
+   session ran in, so a subtree entry could not deliver the protection its path
+   implies. Because the failure is silent, `doctor` reports such an entry
+   (ADR-0026).
+
+   It does **not** follow that an inside-a-repo entry is inert: a repo **nested**
+   beneath it has its root beneath the entry and *is* gated. With repo `/work/mono`
+   and entry `/work/mono/packages`, a nested repo at `/work/mono/packages/plugin`
+   is gated while `/work/mono` itself is not.
 2. **Registered project next.** An existing registry match wins over
    auto-enable. Consequence, deliberate: when an **ancestor** of a new repo is
    already registered (`~/Projects` itself, or a monorepo root), a brand-new

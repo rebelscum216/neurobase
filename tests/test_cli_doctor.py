@@ -563,11 +563,13 @@ def test_denylist_scope_warns_on_an_entry_inside_a_repo(tmp_path: Path) -> None:
     check = diagnostics._denylist_scope_check(_denylist_config(inner))
 
     assert check.status == "warn"
-    assert "gate NOTHING" in check.detail
+    assert "do NOT gate that repo" in check.detail
     assert str(inner) in check.detail
     # The remedy must name the repo root the user should have used instead.
     assert check.remedy is not None
     assert str(repo.resolve()) in check.remedy
+    # And the containing repo really is ungated — the warning is not a guess.
+    assert projects.is_denylisted(inner, [str(inner)]) is False
 
 
 def test_denylist_scope_ignores_a_nonexistent_entry(tmp_path: Path) -> None:
@@ -588,3 +590,38 @@ def test_denylist_scope_is_wired_into_collect_checks(tmp_path: Path) -> None:
     scope = [c for c in checks if c.name == "denylist scope"]
     assert len(scope) == 1
     assert scope[0].status == "warn"
+
+
+def test_denylist_scope_does_not_claim_a_nested_repo_entry_gates_nothing(tmp_path: Path) -> None:
+    """Review I8: an entry inside a repo still gates repos NESTED beneath it.
+
+    The first version of this check said such entries "gate NOTHING", which is
+    false exactly at a repo boundary: with outer repo `mono`, entry
+    `mono/packages`, and a separate repo at `mono/packages/plugin`, the plugin's
+    root IS beneath the entry, so `is_denylisted` gates it. The diagnostic must
+    warn about the real problem (the CONTAINING repo is not gated) without
+    asserting a coverage claim the matcher contradicts.
+
+    The assertions tie the check to `is_denylisted`'s actual answers, which is
+    what the original tests failed to do — they only inspected wording.
+    """
+    outer = tmp_path / "mono"
+    entry = outer / "packages"
+    nested = entry / "plugin"
+    nested.mkdir(parents=True)
+    _git_init(outer)
+    _git_init(nested)
+
+    # Ground truth from the matcher itself: the nested repo IS gated by this entry;
+    # the containing repo is NOT.
+    assert projects.is_denylisted(nested, [str(entry)]) is True
+    assert projects.is_denylisted(outer, [str(entry)]) is False
+
+    check = diagnostics._denylist_scope_check(_denylist_config(entry))
+
+    # Still warns — the user's containing repo is unprotected, which is the point.
+    assert check.status == "warn"
+    assert str(outer.resolve()) in check.detail
+    # ...but must NOT claim the entry covers nothing, which the matcher disproves.
+    assert "NOTHING" not in check.detail
+    assert "at or beneath" in check.detail

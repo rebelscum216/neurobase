@@ -555,6 +555,39 @@ def soft_delete_curated(root: Path, project: str, slug: str) -> Path:
     return dest
 
 
+def list_tombstoned(root: Path, project: str) -> list[Document]:
+    """Tombstoned facts still inside the grace period, sorted by slug.
+
+    The ``.tombstones/`` counterpart to ``list_curated`` — no store API enumerated
+    that directory before, and a lineage/graph reader needs it to render a fact
+    that has since been folded away. Unparseable *or* unreadable files are
+    skipped, never fatal (same posture as ``list_curated``).
+
+    **Implements spec §1's resolution rule:** a slug present in *both* ``curated/``
+    and ``.tombstones/`` is **active**, and the tombstone is residue —
+    ``upsert_curated`` deliberately leaves a same-slug tombstone in place because
+    deleting it cannot be done safely. §1 makes excluding those slugs a MUST for
+    any reader of ``.tombstones/``, so the exclusion lives here rather than in each
+    caller: this is the only enumerator of the directory, and a caller that had to
+    remember the rule would eventually forget it."""
+    mem = memory_dir(project, root)
+    tomb_dir = mem / ".tombstones"
+    if not tomb_dir.exists():
+        return []
+    curated_dir = mem / "curated"
+    active = {path.stem for path in curated_dir.glob("*.md")} if curated_dir.exists() else set()
+    docs = []
+    for path in sorted(tomb_dir.glob("*.md")):
+        if path.stem in active:  # §1: curated/ wins; this tombstone is residue
+            continue
+        try:
+            doc = read_doc(path)
+        except (ValueError, OSError):  # malformed frontmatter or unreadable entry
+            continue
+        docs.append(doc)
+    return docs
+
+
 def prune_tombstones(root: Path, project: str, older_than_days: int = 14) -> list[str]:
     """Hard-delete tombstones past the grace period. Returns pruned slugs."""
     tomb_dir = memory_dir(project, root) / ".tombstones"

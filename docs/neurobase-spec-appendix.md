@@ -211,6 +211,13 @@ residue. `list_curated` reads only `curated/`, so every current reader resolves
 this by construction; any reader of `.tombstones/` (e.g. a lineage/graph reader)
 **MUST** exclude slugs present in `curated/`.
 
+`list_tombstoned(project)` is the **only** enumerator of `.tombstones/`, and it
+applies that exclusion itself — the MUST is discharged once, in the enumerator,
+rather than re-derived by each caller. It returns tombstoned facts sorted by
+slug; unparseable or unreadable files are skipped, never fatal (the `list_curated`
+posture). Callers that want the tombstoned facts *shown* opt in explicitly (e.g.
+`core.graph.memory_graph(..., include_tombstoned=True)`).
+
 **No unowned deletion of `.tombstones/<slug>`.** An active+tombstoned pair is
 *indistinguishable on disk* from the midpoint of an in-flight
 `soft_delete_curated`. `.tombstones/<slug>.md` is a shared path that a racing
@@ -967,8 +974,9 @@ through `open_store(...)` + a `StoreHandle`. The CI guard
 `scripts/check_store_chokepoint.py` fails the gate when a module **outside** the three
 implementation modules (`core/store.py`, `core/store_handle.py`, `core/projects.py`)
 calls a raw-`root` store/registry **accessor** — `memory_dir`, `ensure_tree`,
-`list_raw` / `list_curated`, `write_raw`, `upsert_curated`, `write_node`,
-`rebuild_index`, `load_registry`, `register_project`, `resolve_project`, … (whether
+`list_raw` / `list_curated` / `list_tombstoned`, `write_raw`, `upsert_curated`,
+`write_node`, `rebuild_index`, `load_registry`, `register_project`,
+`resolve_project`, … (whether
 reached as `store.x` / `projects.x`, via a dotted module, or by a direct/relative
 import) — or references the `store.toml` / `registry.toml` metadata filenames. The
 guard keys on those accessors and literals, **not** on path shape: a handle-derived

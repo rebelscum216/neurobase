@@ -82,6 +82,7 @@ STORE_FORBIDDEN = frozenset(
         "mark_consumed",
         "upsert_curated",
         "list_curated",
+        "list_tombstoned",
         "soft_delete_curated",
         "prune_tombstones",
         "write_node",

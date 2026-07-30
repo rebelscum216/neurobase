@@ -512,3 +512,120 @@ def test_brain_isolation_is_not_applicable_for_a_non_claude_backend(
     assert check.status == "ok"
     assert "not applicable" in check.detail
     assert "codex-cli" in check.detail
+
+
+# --- ADR-0026 / review I7: denylist entries that don't gate their own repo ----
+
+
+def _git_init(path: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True)
+
+
+def _denylist_config(*entries: Path) -> Config:
+    from neurobase.core.config import EnableConfig
+
+    return Config(enable=EnableConfig(auto_enable_roots=[], denylist=[str(e) for e in entries]))
+
+
+def test_denylist_scope_ok_when_unconfigured() -> None:
+    check = diagnostics._denylist_scope_check(Config())
+    assert check.status == "ok"
+    assert check.remedy is None
+
+
+def test_denylist_scope_ok_for_a_repo_root_and_an_ancestor(tmp_path: Path) -> None:
+    umbrella = tmp_path / "Projects"
+    repo = umbrella / "app"
+    repo.mkdir(parents=True)
+    _git_init(repo)
+
+    # The repo root itself and a plain ancestor directory both gate correctly.
+    check = diagnostics._denylist_scope_check(_denylist_config(repo, umbrella))
+
+    assert check.status == "ok"
+    assert check.remedy is None
+
+
+def test_denylist_scope_warns_on_an_entry_inside_a_repo(tmp_path: Path) -> None:
+    """The I7 case: a user names a sensitive subdirectory, and their repo is not
+    gated.
+
+    `is_denylisted` compares the cwd's git ROOT, and this repo's root sits above
+    the entry, so it never matches — an entry gates a repo iff that repo's root is
+    at or beneath it (ADR-0026). Scoped deliberately: the entry is not inert, it
+    would still gate a repo nested beneath it (review I8). Doctor is the only
+    place that can say so — a hook's stdout is protocol output, not a user
+    channel.
+    """
+    repo = tmp_path / "app"
+    inner = repo / "private"
+    inner.mkdir(parents=True)
+    _git_init(repo)
+
+    check = diagnostics._denylist_scope_check(_denylist_config(inner))
+
+    assert check.status == "warn"
+    assert "do NOT gate that repo" in check.detail
+    assert str(inner) in check.detail
+    # The remedy must name the repo root the user should have used instead.
+    assert check.remedy is not None
+    assert str(repo.resolve()) in check.remedy
+    # And the containing repo really is ungated — the warning is not a guess.
+    assert projects.is_denylisted(inner, [str(inner)]) is False
+
+
+def test_denylist_scope_ignores_a_nonexistent_entry(tmp_path: Path) -> None:
+    # A path that isn't on disk matches nothing and is not this check's business;
+    # it must not be reported as an inner-repo entry (git resolves it to None).
+    check = diagnostics._denylist_scope_check(_denylist_config(tmp_path / "gone"))
+    assert check.status == "ok"
+
+
+def test_denylist_scope_is_wired_into_collect_checks(tmp_path: Path) -> None:
+    repo = tmp_path / "app"
+    inner = repo / "private"
+    inner.mkdir(parents=True)
+    _git_init(repo)
+
+    checks = diagnostics.collect_checks(_denylist_config(inner), tmp_path / "store", tmp_path)
+
+    scope = [c for c in checks if c.name == "denylist scope"]
+    assert len(scope) == 1
+    assert scope[0].status == "warn"
+
+
+def test_denylist_scope_does_not_claim_a_nested_repo_entry_gates_nothing(tmp_path: Path) -> None:
+    """Review I8: an entry inside a repo still gates repos NESTED beneath it.
+
+    The first version of this check said such entries "gate NOTHING", which is
+    false exactly at a repo boundary: with outer repo `mono`, entry
+    `mono/packages`, and a separate repo at `mono/packages/plugin`, the plugin's
+    root IS beneath the entry, so `is_denylisted` gates it. The diagnostic must
+    warn about the real problem (the CONTAINING repo is not gated) without
+    asserting a coverage claim the matcher contradicts.
+
+    The assertions tie the check to `is_denylisted`'s actual answers, which is
+    what the original tests failed to do — they only inspected wording.
+    """
+    outer = tmp_path / "mono"
+    entry = outer / "packages"
+    nested = entry / "plugin"
+    nested.mkdir(parents=True)
+    _git_init(outer)
+    _git_init(nested)
+
+    # Ground truth from the matcher itself: the nested repo IS gated by this entry;
+    # the containing repo is NOT.
+    assert projects.is_denylisted(nested, [str(entry)]) is True
+    assert projects.is_denylisted(outer, [str(entry)]) is False
+
+    check = diagnostics._denylist_scope_check(_denylist_config(entry))
+
+    # Still warns — the user's containing repo is unprotected, which is the point.
+    assert check.status == "warn"
+    assert str(outer.resolve()) in check.detail
+    # ...but must NOT claim the entry covers nothing, which the matcher disproves.
+    assert "NOTHING" not in check.detail
+    assert "at or beneath" in check.detail

@@ -87,6 +87,47 @@ def test_policy_denylist_wins_over_root(workspace: Path) -> None:
     assert projects.auto_enable_root_for(repo, [str(workspace)], []) == repo.resolve()
 
 
+def test_denylist_entry_inside_a_repo_does_not_gate_it(workspace: Path, tmp_path: Path) -> None:
+    """A `denylist` entry naming a directory INSIDE a repo does not gate that repo
+    — it still auto-enables and still captures.
+
+    An entry gates a repo iff that repo's root is at or beneath it: `is_denylisted`
+    compares the cwd's git ROOT, and this repo's root sits above the entry. Scoped
+    to the containing repo on purpose — such an entry is NOT inert, it would still
+    gate a repo nested beneath it (review I8/I10). Independent review I3 caught the spec claiming a
+    cwd-based carve-out; the maintainer's decision was that the docs follow the
+    shipped repo-root semantics, because a capture is attributed to the repo's
+    project regardless of which subdirectory the session ran in — a subtree entry
+    could not deliver the protection its path implies.
+
+    Pinned deliberately, and asserting the PERMISSIVE outcome, so the limitation
+    is a recorded decision rather than an accident: if someone later makes
+    denylist cwd/subtree-scoped, this test fails and forces spec §10, ADR-0026 and
+    the config comment to be updated with it.
+    """
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    inner = repo / "private"
+    inner.mkdir()
+
+    # Denylisting a path *inside* the repo, then running a hook from that very
+    # directory, does NOT gate it.
+    slug = resolve_or_auto_enable(
+        root, inner, auto_enable_roots=[str(workspace)], denylist=[str(inner)]
+    )
+    assert slug == "app"
+    assert projects.load_registry(root)["app"] == [str(repo.resolve())]
+
+    # Denylisting the repo ROOT is what actually gates it.
+    other_root = tmp_path / "store2"
+    assert (
+        resolve_or_auto_enable(
+            other_root, inner, auto_enable_roots=[str(workspace)], denylist=[str(repo)]
+        )
+        is None
+    )
+
+
 def test_policy_tilde_and_missing_paths_are_safe(workspace: Path) -> None:
     repo = _make_repo(workspace / "app")
     # A non-existent configured root matches nothing rather than raising.
@@ -105,6 +146,39 @@ def test_resolve_returns_existing_without_registering(workspace: Path, tmp_path:
     assert (
         resolve_or_auto_enable(root, repo, auto_enable_roots=[str(workspace)], denylist=[]) == "app"
     )
+
+
+def test_registered_ancestor_wins_over_auto_enabling_a_nested_repo(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """A brand-new git repo nested under an ALREADY-REGISTERED ancestor folds into
+    the ancestor's project instead of auto-registering as its own.
+
+    Deliberate precedence, not a bug: the seam resolves the registered project
+    first, so "registered wins" beats auto-enable (ADR-0019 F6). It reads as a
+    surprise against D40's one-project-per-repo, which describes the *auto-enable*
+    path rather than this ordering — which is why it needs pinning. Independent
+    review I2: the behavior was documented in the ADR but untested, so a later
+    resolution-policy refactor could reverse it, or reintroduce the fold as an
+    accident, with the suite still green.
+    """
+    root = tmp_path / "store"
+    parent = _make_repo(workspace / "monorepo")
+    projects.register_project(root, parent, slug="monorepo")
+    store.ensure_tree("monorepo", root)
+
+    # A genuinely separate git repo created INSIDE the registered ancestor.
+    child = _make_repo(parent / "packages" / "child")
+
+    slug = resolve_or_auto_enable(root, child, auto_enable_roots=[str(workspace)], denylist=[])
+
+    # Folds into the ancestor by longest-prefix match...
+    assert slug == "monorepo"
+    # ...and the child gets neither its own registry entry nor its own tree.
+    registry = projects.load_registry(root)
+    assert "child" not in registry
+    assert registry["monorepo"] == [str(parent.resolve())]
+    assert not store.memory_dir("child", root).exists()
 
 
 def test_resolve_auto_registers_and_creates_tree(workspace: Path, tmp_path: Path) -> None:

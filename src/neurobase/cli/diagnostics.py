@@ -974,6 +974,71 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
     return _check("curate health", "ok", f"{project!r}: last refresh {last_refresh.get('at')}")
 
 
+def _denylist_scope_check(config: Config) -> Check:
+    """Report `[enable].denylist` entries that do not gate the repo containing them.
+
+    The matching rule (ADR-0026), stated exactly:
+    **an entry gates a repo iff that repo's root is at or beneath the entry.**
+    `projects.is_denylisted` collapses the cwd to its git root and tests *that*
+    against each entry, so everything follows from the rule with no special cases.
+
+    The consequence worth warning about: an entry *inside* repo `C` never gates
+    `C`, because `C`'s root sits **above** the entry — so a user who denylists a
+    sensitive subdirectory has not stopped capture of the repo it lives in
+    (review I7), and a hook cannot tell them, since its stdout is protocol output
+    (`hookSpecificOutput`) rather than a user channel.
+
+    It does **not** follow that such an entry does nothing. Review I8: with repo
+    `/work/mono`, entry `/work/mono/packages`, and a nested repo
+    `/work/mono/packages/plugin`, the nested repo's root *is* beneath the entry, so
+    `is_denylisted` returns True and it is gated. An earlier version of this check
+    claimed such entries "gate NOTHING" and was simply wrong there. The wording
+    below is therefore scoped to the claim that is true in every case — the
+    containing repo is not gated — and says what the entry does still cover.
+
+    Read-only. Uses `projects._resolved_config_dirs` rather than re-implementing
+    the expansion: this check's only job is to predict what the matcher will do, so
+    a private-but-shared helper beats a copy that can drift out of agreement with
+    it.
+    """
+    entries = config.enable.denylist
+    if not entries:
+        return _check("denylist scope", "ok", "no [enable].denylist entries configured")
+
+    inner: list[tuple[Path, Path]] = []
+    for path in projects._resolved_config_dirs(entries):
+        if not path.exists():
+            continue  # a non-existent entry matches nothing; not this check's concern
+        repo_root = projects.git_common_root(path)
+        if repo_root is not None and repo_root.resolve() != path:
+            inner.append((path, repo_root.resolve()))
+
+    plural = lambda n: "y" if n == 1 else "ies"  # noqa: E731
+    if not inner:
+        return _check(
+            "denylist scope",
+            "ok",
+            f"all {len(entries)} [enable].denylist entr{plural(len(entries))} "
+            "name a repo root or an ancestor",
+        )
+
+    shown = "; ".join(f"{path} (inside repo {repo})" for path, repo in inner[:3])
+    more = f" (+{len(inner) - 3} more)" if len(inner) > 3 else ""
+    return _check(
+        "denylist scope",
+        "warn",
+        f"{len(inner)} [enable].denylist entr{plural(len(inner))} sit inside a git repo and "
+        f"do NOT gate that repo — automatic capture and injection continue in it. Only repos "
+        f"whose root is at or beneath the entry are gated: {shown}{more}",
+        remedy=(
+            "An entry gates a repo iff that repo's root is at or beneath it (ADR-0026). "
+            f"To gate the containing repo, name its root — e.g. `{inner[0][1]}` — or an "
+            "ancestor. Keep the entry as-is only if you meant to gate repos nested "
+            "beneath it."
+        ),
+    )
+
+
 def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
     which = shutil.which
     shim = claude_install.shim_path()
@@ -987,6 +1052,7 @@ def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
         _claude_hook_check(cwd, shim),
         *_codex_hook_checks(cwd, shim),
         *_capability_checks(cwd),
+        _denylist_scope_check(config),
         _brain_isolation_check(config),
         _claude_mcp_check(shim),
         _codex_mcp_check(shim),

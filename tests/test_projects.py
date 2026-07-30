@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,69 @@ def test_register_project_collision_raises(root: Path, repo: Path, tmp_path: Pat
     # ...but an explicit slug always bypasses the collision guard.
     slug = projects.register_project(root, other, slug="my-cool-repo-2")
     assert slug == "my-cool-repo-2"
+
+
+# --- a corrupt registry: fail-soft to read, strict to rewrite ---------------
+#
+# Spec §10: "registry parseability is a separate, fail-soft concern — a corrupt
+# registry.toml is *not* folded into the schema guard: registry reads
+# (load_registry, resolve_project) treat it as empty". The contract lives at the
+# accessors, so it is tested at the accessors — a reader-local wrapper only makes
+# the surface that remembers to write one compliant.
+
+
+def _corrupt(root: Path) -> Path:
+    """A registry.toml that exists and does not parse."""
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "registry.toml"
+    path.write_text('[projects."x"\nroots = [')
+    return path
+
+
+def _unreadable(root: Path) -> Path:
+    """A registry.toml that cannot even be read — a directory in its place, which
+    raises OSError from ``read_text`` before any parse is attempted."""
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "registry.toml"
+    path.mkdir()
+    return path
+
+
+@pytest.mark.parametrize("arrange", [_corrupt, _unreadable])
+def test_load_registry_treats_an_unusable_registry_as_empty(root: Path, arrange) -> None:  # type: ignore[no-untyped-def]
+    arrange(root)
+    assert projects.load_registry(root) == {}
+
+
+@pytest.mark.parametrize("arrange", [_corrupt, _unreadable])
+def test_resolve_project_treats_an_unusable_registry_as_untracked(
+    root: Path,
+    repo: Path,
+    arrange,  # type: ignore[no-untyped-def]
+) -> None:
+    """The capture path resolves through here on every hook fire: a corrupt
+    registry must read as *untracked*, not raise into the hook."""
+    arrange(root)
+    assert projects.resolve_project(root, repo) is None
+
+
+@pytest.mark.parametrize("arrange", [_corrupt, _unreadable])
+def test_register_project_refuses_to_clobber_an_unusable_registry(
+    root: Path,
+    repo: Path,
+    arrange,  # type: ignore[no-untyped-def]
+) -> None:
+    """The one place fail-soft would be *destructive*. ``register_project`` reads
+    the registry in order to rewrite it, so a silent empty read would overwrite a
+    corrupt-but-present file and lose every other project's roots. Read-for-rewrite
+    stays strict, and the file on disk must survive untouched."""
+    path = arrange(root)
+    before = path.read_text() if path.is_file() else None
+
+    with pytest.raises((tomllib.TOMLDecodeError, OSError)):
+        projects.register_project(root, repo)
+
+    assert (path.read_text() if path.is_file() else None) == before
 
 
 # --- resolution: git root, worktrees, non-git, no-match ---------------------

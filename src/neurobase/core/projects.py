@@ -34,14 +34,36 @@ def _registry_path(root: Path) -> Path:
     return root / "registry.toml"
 
 
-def load_registry(root: Path) -> dict[str, list[str]]:
-    """``{slug: [roots...]}``. Missing file ⇒ empty registry."""
+def _read_registry(root: Path) -> dict[str, list[str]]:
+    """The parse itself. Raises on a registry that is unreadable (``OSError``) or
+    unparseable (``tomllib.TOMLDecodeError``) — see the two callers below, which
+    differ precisely in whether they may swallow that."""
     path = _registry_path(root)
     if not path.exists():
         return {}
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     projects = data.get("projects", {})
     return {slug: list(entry.get("roots", [])) for slug, entry in projects.items()}
+
+
+def load_registry(root: Path) -> dict[str, list[str]]:
+    """``{slug: [roots...]}``. Missing file ⇒ empty registry, and so does a
+    corrupt or unreadable one.
+
+    **Spec §10:** registry parseability is a separate, fail-soft concern — a
+    corrupt ``registry.toml`` is not folded into the schema guard; registry reads
+    (``load_registry``, ``resolve_project``) *treat it as empty*. The contract
+    lives here, at the named accessor, rather than in each reader: a rule that
+    every caller has to remember is one a future caller will forget, and the
+    failure mode is a whole surface crashing on a file it only wanted to read.
+
+    Read-for-**rewrite** is the deliberate exception and does not come through
+    here — see :func:`register_project`, which must not overwrite a registry it
+    could not parse."""
+    try:
+        return _read_registry(root)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
 
 
 def _write_registry(root: Path, registry: dict[str, list[str]]) -> None:
@@ -96,10 +118,17 @@ def register_project(root: Path, cwd: Path, slug: str | None = None) -> str:
     """Register ``cwd`` (or its git common root) under ``slug`` (derived from
     the directory name if not given). Raises ``ProjectSlugCollisionError`` if
     the derived slug already maps to a different root — the caller (CLI)
-    should re-prompt with an explicit ``slug``."""
+    should re-prompt with an explicit ``slug``.
+
+    **Reads strictly**, unlike :func:`load_registry`: this read exists only to be
+    written back, so treating an unparseable registry as empty would rewrite the
+    file from ``{}`` and silently drop every other project's roots. A corrupt
+    registry raises here instead — ``core/enable.py`` already catches
+    ``TOMLDecodeError``/``OSError`` and fails closed, which is the documented
+    auto-enable posture."""
     project_root = git_common_root(cwd) or cwd.resolve()
     final_slug = derive_slug(project_root, slug)
-    registry = load_registry(root)
+    registry = _read_registry(root)
     existing_roots = registry.get(final_slug, [])
     root_str = str(project_root)
     if existing_roots and root_str not in existing_roots and slug is None:

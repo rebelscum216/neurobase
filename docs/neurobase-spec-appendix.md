@@ -967,7 +967,13 @@ schema-independent by design — see the maintenance exception below.
   `registry.toml` is *not* folded into the schema guard: registry reads
   (`load_registry`, `resolve_project`) treat it as empty, and `doctor` may resolve a
   project directly from the registry when `store.toml` itself is corrupt and no handle
-  can open.
+  can open. That fail-soft behaviour lives **in `load_registry` itself**, not in each
+  reader — a rule every caller has to remember is one a future caller will forget.
+  **Read-for-rewrite is the one exception and reads strictly:** `register_project`
+  parses through the raw reader, because treating an unparseable registry as empty
+  would rewrite the file from `{}` and silently drop every other project's roots.
+  A corrupt registry therefore raises there; `core/enable.py` catches it and fails
+  closed, per the auto-enable posture above.
 
 **Enforcement.** Production store-tree and registry access (`src/neurobase/`) goes
 through `open_store(...)` + a `StoreHandle`. The CI guard

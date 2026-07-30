@@ -46,6 +46,38 @@ def test_builds_context_with_framing_header(enabled: tuple[Path, Path]) -> None:
     assert "The login bug is fixed." in ctx
 
 
+def test_header_instructs_search_fallback_when_a_fact_seems_absent(
+    enabled: tuple[Path, Path],
+) -> None:
+    """The injected header must tell the reading agent that absence from the
+    synthesized node is not proof the store lacks the fact, and name the tool to
+    escalate to (context-loading Phase 5 / C-11). Pinned because this is the
+    whole mechanism — there is no code path behind it to fail loudly.
+
+    Review F4: this asserted three disconnected substrings, which could not fail
+    for a violation of the §3 MUST it exists to enforce — a header reading
+    "…is a summary, not the whole store. The Neurobase memory_search tool is
+    unavailable (when available)." contains all three fragments while *negating*
+    the directive. The whole sentence is pinned instead, so the assertion carries
+    the actual semantics: summary → search → before concluding absence, with the
+    availability qualifier attached to the escalation rather than floating.
+
+    Written as a literal, NOT derived from ``recall_common.HEADER`` — deriving it
+    would make the test tautological, passing against any header including a
+    negated one. Spec §3 quotes HEADER verbatim, so a reword must already update
+    the spec in the same change; this makes the test move with them rather than
+    silently tolerating drift."""
+    root, repo = enabled
+    store.write_node(root, "myrepo", "myrepo-status", "# Status\n\nbody")
+    ctx = recall.build_context(root, repo)
+    assert ctx is not None
+    assert (
+        "This node is a summary, not the whole store: if a fact seems absent from it, "
+        "search the underlying memory with the Neurobase memory_search tool (when "
+        "available) before concluding it is not in memory."
+    ) in ctx
+
+
 def test_emit_shape(enabled: tuple[Path, Path]) -> None:
     root, repo = enabled
     store.write_node(root, "myrepo", "myrepo-status", "# Status\n\nbody")
@@ -70,6 +102,7 @@ def test_cap_drops_whole_trailing_nodes() -> None:
     header = "H"
     bodies = ["A" * 3000, "B" * 3000, "C" * 3000]
     out = recall._assemble(header, bodies, cap=6000)
+    assert out is not None  # cap leaves ample body room, so this assembles
     assert "A" * 3000 in out
     assert "B" * 3000 not in out  # second node would push over 6000 → dropped whole
     assert "C" * 3000 not in out
@@ -79,7 +112,9 @@ def test_cap_truncates_single_oversized_first_node() -> None:
     header = "H"
     bodies = ["A" * 10000]
     out = recall._assemble(header, bodies, cap=6000)
+    assert out is not None
     assert len(out) == 6000  # truncated mid-node only because it's alone and overflows
+    assert out.startswith(header)  # the cut fell on the body, not the framing
 
 
 def test_emit_fail_safe_swallows_errors(enabled: tuple[Path, Path], monkeypatch) -> None:

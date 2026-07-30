@@ -1,6 +1,11 @@
-"""F2 regression (spec §10): recall must honor the configured [inject].max_chars,
-not the hardcoded default. build_context is shared, so both the Claude and Codex
-adapters inherit the fix."""
+"""Recall must honor the configured [inject].max_chars, not the hardcoded default
+(spec §10), and must never emit a partial header (spec §3, review F2).
+build_context is shared, so both the Claude and Codex adapters inherit both.
+
+`test_cap_too_small_for_the_header_injects_nothing` is the F2 regression pin —
+stash-verified to fail against the pre-F2 `_assemble`, which returned a
+header-only fragment there. The surrounding cap tests characterize the contract
+at its other boundaries; see the mutation note on the truncation test."""
 
 from __future__ import annotations
 
@@ -40,19 +45,94 @@ def _set_cap(monkeypatch: pytest.MonkeyPatch, cap: int) -> None:
     )
 
 
-def test_small_configured_cap_is_honored(
+def _header_for(root: Path, project: str = "myrepo") -> str:
+    """The exact header ``build_context`` emits for this store. Its length varies
+    with the ``memory_dir`` path, so every cap below is *derived* from it rather
+    than hardcoded — review F2 called out that a fixed cap silently means
+    different things under a short tmp path and a real one."""
+    return recall_common.HEADER.format(memory_dir=store.memory_dir(project, root))
+
+
+def test_cap_too_small_for_the_header_injects_nothing(
     enabled: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The header is indivisible (spec §3): when the cap cannot fit the whole
+    header plus at least one character of node body, recall injects NOTHING
+    rather than a header-only or mid-sentence fragment. Review F2 — the previous
+    behavior emitted the first `cap` characters of an incomplete header, cutting
+    through the trust framing that makes the payload safe to read, and carrying
+    no node content to justify it."""
     root, repo = enabled
-    # Two sizable nodes; a 300-char cap must drop the trailing one.
     store.write_node(root, "myrepo", "a-node", "A" * 250)
     store.write_node(root, "myrepo", "b-node", "B" * 250)
-    _set_cap(monkeypatch, 300)
+    header = _header_for(root)
+    # Exactly one char short of viable: header + joiner fits, no body room left.
+    _set_cap(monkeypatch, len(header) + len(recall_common._JOINER))
+
+    assert claude_recall.build_context(root, repo) is None
+
+
+def test_smallest_viable_cap_still_carries_the_complete_header(
+    enabled: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One char of body room is the boundary: at exactly that cap we inject, and
+    what we inject still opens with the entire header."""
+    root, repo = enabled
+    store.write_node(root, "myrepo", "a-node", "A" * 250)
+    header = _header_for(root)
+    cap = len(header) + len(recall_common._JOINER) + 1
+    _set_cap(monkeypatch, cap)
+
+    ctx = claude_recall.build_context(root, repo)
+    assert ctx == header + recall_common._JOINER + "A"
+    assert len(ctx) <= cap
+
+
+def test_configured_cap_keeps_whole_header_and_real_node_content(
+    enabled: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Framing integrity AND node presence together (review F2): a cap sized for
+    the header plus one node must yield the complete header, that node's body in
+    full, and no trailing node — not merely a length under the cap."""
+    root, repo = enabled
+    store.write_node(root, "myrepo", "a-node", "A" * 250)
+    store.write_node(root, "myrepo", "b-node", "B" * 250)
+    header = _header_for(root)
+    cap = len(header) + len(recall_common._JOINER) + 250
+    _set_cap(monkeypatch, cap)
 
     ctx = claude_recall.build_context(root, repo)
     assert ctx is not None
-    assert len(ctx) <= 300
-    assert "B" * 250 not in ctx  # trailing node dropped by the small cap
+    assert ctx.startswith(header)  # complete framing, not a prefix of it
+    assert "A" * 250 in ctx  # the node that fits survives intact
+    assert "B" * 250 not in ctx  # trailing node dropped, never truncated
+    assert len(ctx) <= cap
+
+
+def test_oversized_first_node_truncates_the_body_never_the_header(
+    enabled: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single node larger than the cap is the one truncating case, and the cut
+    falls on the BODY, sized by `room`.
+
+    Mutation note: this does NOT discriminate pre- from post-F2. Whenever the
+    header itself fits, `(header + _JOINER + body)[:cap]` and
+    `header + _JOINER + body[:room]` are the same string — the two forms only
+    diverge once the cap is too small for the header, which is
+    `test_cap_too_small_for_the_header_injects_nothing`'s case (verified: that
+    test is the one of these five that fails against the pre-F2 `_assemble`).
+    What this pins is the going-forward contract: a refactor that reintroduced
+    slicing over the assembled string, or prepended anything ahead of the
+    header, would overflow the cap or cut the framing and fail here."""
+    root, repo = enabled
+    store.write_node(root, "myrepo", "a-node", "A" * 500)
+    header = _header_for(root)
+    room = 100
+    cap = len(header) + len(recall_common._JOINER) + room
+    _set_cap(monkeypatch, cap)
+
+    ctx = claude_recall.build_context(root, repo)
+    assert ctx == header + recall_common._JOINER + "A" * room
 
 
 def test_both_adapters_share_the_cap(
@@ -61,10 +141,17 @@ def test_both_adapters_share_the_cap(
     root, repo = enabled
     store.write_node(root, "myrepo", "a-node", "A" * 250)
     store.write_node(root, "myrepo", "b-node", "B" * 250)
-    _set_cap(monkeypatch, 300)
-    # Both adapters re-export the same build_context, so both see the cap.
-    assert claude_recall.build_context(root, repo) == codex_recall.build_context(root, repo)
-    assert len(codex_recall.build_context(root, repo) or "") <= 300
+    header = _header_for(root)
+    cap = len(header) + len(recall_common._JOINER) + 250
+    _set_cap(monkeypatch, cap)
+    # Both adapters re-export the same build_context, so both see the cap. Assert
+    # on real content: at a viable cap an `is None == is None` parity check would
+    # pass even if both adapters injected nothing.
+    ctx = claude_recall.build_context(root, repo)
+    assert ctx == codex_recall.build_context(root, repo)
+    assert ctx is not None
+    assert ctx.startswith(header)
+    assert len(ctx) <= cap
 
 
 def test_default_cap_is_6000_when_config_absent(enabled: tuple[Path, Path]) -> None:

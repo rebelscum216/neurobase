@@ -512,3 +512,79 @@ def test_brain_isolation_is_not_applicable_for_a_non_claude_backend(
     assert check.status == "ok"
     assert "not applicable" in check.detail
     assert "codex-cli" in check.detail
+
+
+# --- ADR-0026 / review I7: denylist entries that silently gate nothing --------
+
+
+def _git_init(path: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True)
+
+
+def _denylist_config(*entries: Path) -> Config:
+    from neurobase.core.config import EnableConfig
+
+    return Config(enable=EnableConfig(auto_enable_roots=[], denylist=[str(e) for e in entries]))
+
+
+def test_denylist_scope_ok_when_unconfigured() -> None:
+    check = diagnostics._denylist_scope_check(Config())
+    assert check.status == "ok"
+    assert check.remedy is None
+
+
+def test_denylist_scope_ok_for_a_repo_root_and_an_ancestor(tmp_path: Path) -> None:
+    umbrella = tmp_path / "Projects"
+    repo = umbrella / "app"
+    repo.mkdir(parents=True)
+    _git_init(repo)
+
+    # The repo root itself and a plain ancestor directory both gate correctly.
+    check = diagnostics._denylist_scope_check(_denylist_config(repo, umbrella))
+
+    assert check.status == "ok"
+    assert check.remedy is None
+
+
+def test_denylist_scope_warns_on_an_entry_inside_a_repo(tmp_path: Path) -> None:
+    """The I7 case: a user names a sensitive subdirectory, and it gates nothing.
+
+    `is_denylisted` collapses the cwd to its git root before comparing, so this
+    entry can never match (ADR-0026). Doctor is the only place that can say so —
+    a hook's stdout is protocol output, not a user channel.
+    """
+    repo = tmp_path / "app"
+    inner = repo / "private"
+    inner.mkdir(parents=True)
+    _git_init(repo)
+
+    check = diagnostics._denylist_scope_check(_denylist_config(inner))
+
+    assert check.status == "warn"
+    assert "gate NOTHING" in check.detail
+    assert str(inner) in check.detail
+    # The remedy must name the repo root the user should have used instead.
+    assert check.remedy is not None
+    assert str(repo.resolve()) in check.remedy
+
+
+def test_denylist_scope_ignores_a_nonexistent_entry(tmp_path: Path) -> None:
+    # A path that isn't on disk matches nothing and is not this check's business;
+    # it must not be reported as an inner-repo entry (git resolves it to None).
+    check = diagnostics._denylist_scope_check(_denylist_config(tmp_path / "gone"))
+    assert check.status == "ok"
+
+
+def test_denylist_scope_is_wired_into_collect_checks(tmp_path: Path) -> None:
+    repo = tmp_path / "app"
+    inner = repo / "private"
+    inner.mkdir(parents=True)
+    _git_init(repo)
+
+    checks = diagnostics.collect_checks(_denylist_config(inner), tmp_path / "store", tmp_path)
+
+    scope = [c for c in checks if c.name == "denylist scope"]
+    assert len(scope) == 1
+    assert scope[0].status == "warn"

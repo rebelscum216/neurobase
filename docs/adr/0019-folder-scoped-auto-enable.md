@@ -1,6 +1,6 @@
 # ADR-0019: Folder-scoped auto-enable — consent once at a directory, not per repo
 
-- **Status:** Accepted
+- **Status:** Accepted — **denylist granularity revised by [ADR-0026](0026-denylist-is-repo-scoped.md)** (D39's "subtrees carved back out" and D40's "a sensitive subtree can be carved out" imply an entry may name a directory *inside* a repo; matching is repo-scoped, so it cannot). Everything else below stands.
 - **Date:** 2026-07-23
 - **Resolves:** the per-repo `enable` friction; relocates the opt-in gate (spec §3/§4/§5/§10)
 - **Supersedes:** none
@@ -111,11 +111,8 @@ policy is a pure function,
 — the single place all three hook surfaces (both scribes §4/§5, recall §3) route
 project resolution through. It:
 
-1. checks the **live `denylist`** first (F4) — a cwd whose **git root** sits under
-   a denylist entry returns `None` before anything else, so it neither
-   auto-enables nor keeps capturing. Matching is repo-scoped (the cwd is collapsed
-   to its repo root first), so an entry naming a path *inside* a repo never
-   matches — see the carve-out note below;
+1. checks the **live `denylist`** first (F4) — a denylisted cwd returns `None`
+   before anything else, so it neither auto-enables nor keeps capturing;
 2. resolves the **registered** project (READ handle — the D11 guard runs, no
    write); returns it if found;
 3. otherwise consults `auto_enable_root_for`; a non-qualifying cwd returns `None`
@@ -170,11 +167,7 @@ the store or raises a registry/FS error out of that fail-soft surface (spec §13
   granularity of consent moves from a repo to a folder the user deliberately named.
 - **Opt-out within an opted-in folder is the new mental model — call it out.** A
   brand-new repo cloned under an `auto_enable_root` is captured by default; a user
-  who wants a carve-out uses `denylist`, naming the **repo root or an ancestor** —
-  the gate is repo-scoped, so an entry pointing at a directory *inside* a repo
-  does not carve out a subtree and silently has no effect (independent review I3;
-  spec §10 states the rule and why it is deliberate). This is the *intended*
-  semantics of
+  who wants a carve-out uses `denylist`. This is the *intended* semantics of
   folder-level consent, but it is a genuine shift from "nothing is captured until I
   say so" to "everything under here is captured unless I say not to." Accepting
   this ADR is accepting that shift for repos under a named root.

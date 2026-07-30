@@ -974,6 +974,57 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
     return _check("curate health", "ok", f"{project!r}: last refresh {last_refresh.get('at')}")
 
 
+def _denylist_scope_check(config: Config) -> Check:
+    """Report `[enable].denylist` entries that sit *inside* a git repo (ADR-0026).
+
+    Matching is repo-scoped: `projects.is_denylisted` collapses the cwd to its git
+    root before comparing, so an entry naming a directory inside a repo can never
+    match and silently does nothing. That is deliberate, but a consent opt-out that
+    quietly no-ops is exactly what a user must be told about (review I7). Doctor is
+    the surface because a hook cannot warn — its stdout is protocol output
+    (`hookSpecificOutput`), not a user channel.
+
+    Read-only. Uses `projects._resolved_config_dirs` rather than re-implementing
+    the expansion: this check's only job is to predict what the matcher will do, so
+    a private-but-shared helper beats a copy that can drift out of agreement with
+    it. Promote it to public API if that coupling is judged wrong.
+    """
+    entries = config.enable.denylist
+    if not entries:
+        return _check("denylist scope", "ok", "no [enable].denylist entries configured")
+
+    inner: list[tuple[Path, Path]] = []
+    for path in projects._resolved_config_dirs(entries):
+        if not path.exists():
+            continue  # a non-existent entry matches nothing; not this check's concern
+        repo_root = projects.git_common_root(path)
+        if repo_root is not None and repo_root.resolve() != path:
+            inner.append((path, repo_root.resolve()))
+
+    plural = lambda n: "y" if n == 1 else "ies"  # noqa: E731
+    if not inner:
+        return _check(
+            "denylist scope",
+            "ok",
+            f"all {len(entries)} [enable].denylist entr{plural(len(entries))} "
+            "name a repo root or an ancestor",
+        )
+
+    shown = "; ".join(f"{path} (inside repo {repo})" for path, repo in inner[:3])
+    more = f" (+{len(inner) - 3} more)" if len(inner) > 3 else ""
+    return _check(
+        "denylist scope",
+        "warn",
+        f"{len(inner)} [enable].denylist entr{plural(len(inner))} sit inside a git repo "
+        f"and therefore gate NOTHING — capture and injection continue there: {shown}{more}",
+        remedy=(
+            "Denylist matching is repo-scoped (ADR-0026): name the repo root itself, "
+            f"e.g. `{inner[0][1]}`, or an ancestor directory. A path inside a repo "
+            "cannot carve out a subtree."
+        ),
+    )
+
+
 def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
     which = shutil.which
     shim = claude_install.shim_path()
@@ -987,6 +1038,7 @@ def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
         _claude_hook_check(cwd, shim),
         *_codex_hook_checks(cwd, shim),
         *_capability_checks(cwd),
+        _denylist_scope_check(config),
         _brain_isolation_check(config),
         _claude_mcp_check(shim),
         _codex_mcp_check(shim),

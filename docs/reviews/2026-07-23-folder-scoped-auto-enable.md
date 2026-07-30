@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -402,3 +402,66 @@ Full gate green: ruff, format, mypy, store-chokepoint, `1567 passed, 1 skipped`.
 Re-opened `status: awaiting-review`.
 
 _Resolutions: **I3 — resolved** · **I4 — resolved**._
+
+---
+
+## Reviewer findings — round 3 (independent pass)
+
+Verified `main...HEAD` against `projects.is_denylisted()`: for a Git cwd it
+compares only `git_common_root(cwd)` with each configured entry, so an inner
+directory cannot match. The baseline `tests/test_auto_enable.py` passes. I also
+temporarily added a raw-cwd comparison to `is_denylisted()` and ran that whole
+file: exactly `test_denylist_entry_inside_a_repo_does_not_gate_it` failed; the
+source was restored before this finding was recorded. ADR-0019 is `Accepted` in
+the working tree and the ADR index agrees, so I4's actual status discrepancy is
+resolved.
+
+### I5 — ADR-0019's D39 configuration example still promises unsupported subtree carve-outs
+
+- **severity:** major
+- **location:** `docs/adr/0019-folder-scoped-auto-enable.md:68`
+- **issue:** The example still labels `denylist = ["~/Projects/client-work"]` as
+  “subtrees carved back out,” while the corrected D41 and Consequences text, the
+  new §10 rule, and the implementation all say an entry inside a Git repository
+  silently has no effect. This is precisely the permission a user will infer
+  when they put a sensitive subdirectory in `denylist`; the four-place sweep
+  missed it, leaving the ADR self-contradictory.
+- **suggested direction:** Make the D39 example and its surrounding explanation
+  repo-scoped too: show a repository root (or an ancestor containing repositories)
+  and state that inner paths are not carve-outs. Keep a regression assertion tied
+  to the resulting, user-visible policy.
+
+### I6 — The accepted ADR is being edited directly, contrary to the ADR lifecycle
+
+- **severity:** blocker
+- **location:** `docs/adr/0019-folder-scoped-auto-enable.md:114-118,171-176`; `docs/adr/README.md:21`
+- **issue:** The branch merged the `Proposed → Accepted` change from `main`, then
+  `bcc7e67` directly rewrote ADR-0019's decision/seam and consequences wording.
+  The repository's ADR rules say an ADR is immutable once Accepted and changes
+  require a new superseding ADR. The correction is material (it changes what a
+  denylist entry means), so the status now makes the direct edit a process and
+  decision-record violation, even though the final prose is mostly accurate.
+- **suggested direction:** Record the post-acceptance repo-scoped-denylist
+  clarification in a new ADR that supersedes/revises ADR-0019, and put the
+  normative spec/config changes under that decision; do not mutate the accepted
+  decision record in place.
+
+### I7 — Deliberately pinning a silent privacy opt-out no-op is not an adequate safety boundary
+
+- **severity:** major
+- **location:** `docs/neurobase-spec-appendix.md:849-856`; `tests/test_auto_enable.py:90-127`
+- **issue:** The test proves the implementation and mutation claim, but it locks
+  in an unobservable fail-open outcome: a user who names a sensitive inner
+  directory expects automatic capture/injection to stop, yet capture proceeds
+  with no indication. Calling that result deliberate does not make it safe for a
+  hand-edited consent configuration. The stated rationale also acknowledges the
+  misleading implication rather than resolving it.
+- **suggested direction:** Preserve repo-scoped attribution if desired, but make
+  an inner-repository `denylist` entry visible and fail-safe through an explicit
+  config/doctor validation path (or reject it with a clear remedy). Test that
+  observable handling rather than asserting only the permissive capture result;
+  avoid relying on hook stdout for a warning because it is protocol output.
+
+**Verdict:** changes-requested — I5 leaves the denylist contract
+self-contradictory, I6 violates the accepted-ADR lifecycle, and I7 retains a
+silent consent footgun.

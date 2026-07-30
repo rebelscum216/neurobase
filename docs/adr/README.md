@@ -56,6 +56,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0023](0023-project-store-write-lock.md) | Per-project store write lock — serialize mutating passes, close the prune TOCTOU | Accepted | resolves G4 |
 | [0024](0024-reopen-a-rejected-proposal.md) | `reopen` — the one sanctioned `rejected → proposed` transition (Reconsider/un-reject) | Accepted | Web UI reconsider action |
 | [0025](0025-brain-call-harness-isolation.md) | Brain-call harness isolation — the curator call must *be* a curator call | Accepted | G5 |
+| [0026](0026-denylist-is-repo-scoped.md) | `denylist` matching is repo-scoped — an entry inside a repo is not a carve-out (revises ADR-0019 denylist granularity) | Proposed | independent review I3/I5/I7 |
 
 ADRs 0016–0018 are the three **Phase-0** decisions promoted from the
 [hardening plan](../notes/2026-07-21-hardening-plan-draft.md) (per the

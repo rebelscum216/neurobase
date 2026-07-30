@@ -49,13 +49,13 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0016](0016-store-schema-2-project-records-profiles.md) | Store schema 2 — project-record registry, logical profiles, forward-compatible identifiers (D27–D31) | Accepted | Hardening §12/§16/§25 |
 | [0017](0017-egress-policy-gate.md) | Central egress policy — one `authorize_egress()` gate every brain call passes (D32–D35) | Accepted | Hardening §9 |
 | [0018](0018-hook-receipts-degraded-state.md) | Hook receipts and degraded-state reporting — make fail-soft visible (D36–D38) | Accepted | Hardening §10 |
-| [0019](0019-folder-scoped-auto-enable.md) | Folder-scoped auto-enable — consent once at a directory, not per repo (D39–D42) | Proposed | per-repo `enable` friction / spec §3–§5/§10 |
-| [0020](0020-revert-drift-repair-only.md) | `recommend revert` is drift repair only, not an un-accept (D43–D44; revises ADR-0007 lifecycle) | Proposed | G2 / review F1–F4 |
+| [0019](0019-folder-scoped-auto-enable.md) | Folder-scoped auto-enable — consent once at a directory, not per repo (D39–D42) | Accepted | per-repo `enable` friction / spec §3–§5/§10 |
+| [0020](0020-revert-drift-repair-only.md) | `recommend revert` is drift repair only, not an un-accept (D43–D44; revises ADR-0007 lifecycle) | Accepted | G2 / review F1–F4 |
 | [0021](0021-webui-surface.md) | Web UI — loopback server as a peer presentation layer (spec §14) | Accepted | Web UI Phase 1 |
-| [0022](0022-curator-fold-journal.md) | Curator fold journal + `from_raw` validation (provenance hardening, Slice B) | Proposed | provenance plan Slice B / G4 |
-| [0023](0023-project-store-write-lock.md) | Per-project store write lock — serialize mutating passes, close the prune TOCTOU | Proposed | resolves G4 |
-| [0024](0024-reopen-a-rejected-proposal.md) | `reopen` — the one sanctioned `rejected → proposed` transition (Reconsider/un-reject) | Proposed | Web UI reconsider action |
-| [0025](0025-brain-call-harness-isolation.md) | Brain-call harness isolation — the curator call must *be* a curator call | Proposed | G5 |
+| [0022](0022-curator-fold-journal.md) | Curator fold journal + `from_raw` validation (provenance hardening, Slice B) | Accepted | provenance plan Slice B / G4 |
+| [0023](0023-project-store-write-lock.md) | Per-project store write lock — serialize mutating passes, close the prune TOCTOU | Accepted | resolves G4 |
+| [0024](0024-reopen-a-rejected-proposal.md) | `reopen` — the one sanctioned `rejected → proposed` transition (Reconsider/un-reject) | Accepted | Web UI reconsider action |
+| [0025](0025-brain-call-harness-isolation.md) | Brain-call harness isolation — the curator call must *be* a curator call | Accepted | G5 |
 
 ADRs 0016–0018 are the three **Phase-0** decisions promoted from the
 [hardening plan](../notes/2026-07-21-hardening-plan-draft.md) (per the

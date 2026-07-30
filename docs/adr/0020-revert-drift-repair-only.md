@@ -1,6 +1,6 @@
 # ADR-0020: `recommend revert` is drift repair only, not an un-accept
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-24
 - **Resolves:** G2 (`docs/known-gaps.md`); review findings F1/F2/F4 in
   `docs/reviews/2026-07-23-g2-g3-recommender-fixes.md`

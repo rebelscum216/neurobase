@@ -1,6 +1,6 @@
 # ADR-0024: `reopen` — the one sanctioned `rejected → proposed` transition
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-27
 - **Revises:** the §12.7 "a decided proposal is never silently reopened" clause —
   narrows it from "never" to "never *silently*; only by an explicit, ledgered

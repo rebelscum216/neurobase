@@ -1,6 +1,6 @@
 # ADR-0023: Per-project store write lock — serialize mutating passes, close the prune TOCTOU
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-20
 - **Resolves:** `known-gaps.md` **G4** (no project-level store lock; concurrent
   curate passes can interleave store mutations) — including its embedded

@@ -1,6 +1,6 @@
 # ADR-0019: Folder-scoped auto-enable — consent once at a directory, not per repo
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-23
 - **Resolves:** the per-repo `enable` friction; relocates the opt-in gate (spec §3/§4/§5/§10)
 - **Supersedes:** none

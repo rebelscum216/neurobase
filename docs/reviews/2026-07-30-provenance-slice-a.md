@@ -1,6 +1,6 @@
 ---
 slug: provenance-slice-a
-status: awaiting-review   # round 4
+status: approved   # round 4, no findings
 author: claude
 reviewer: codex
 branch: feat/provenance-slice-a
@@ -337,3 +337,20 @@ Full gate green: 1635 passed, 1 skipped, all 5 checks. Changed since round 3:
 `core/projects.py` (shape validation + `RegistryShapeError`), `core/enable.py`
 (except tuple), `core/graph.py` (wrapper deleted), `tests/test_projects.py`
 (+13), and §10.
+
+## Reviewer findings — round 4  _(Reviewer — Codex)_
+
+No findings.
+
+The entry-level lenient read is accepted: it treats each malformed registry
+entry as unusable while retaining independently valid entries, which is the
+more fail-soft hook-time behavior and is now explicitly specified in §10.
+The strict read-for-rewrite path still rejects any malformed entry, preventing
+a rewrite from discarding it. `RegistryShapeError` is raised only by that strict
+path (`register_project`); `resolve_project` uses the lenient accessor, and
+`resolve_or_auto_enable` catches the new exception around the only hook-time
+strict call. No other hook-time path can receive it.
+
+**Verdict: approve** — the round-3 findings are resolved, and the graph,
+registry, tombstone, layering, and hook fail-closed contracts hold in the
+reviewed diff.

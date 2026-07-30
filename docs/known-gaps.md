@@ -575,3 +575,54 @@ The fixed floor scales with the curated set, so the per-request cost of facts gr
 as the store does — at 52 facts it was already a quarter of the default cap, and
 the fence itself pushed the one-raw floor from 1,327 to 2,673 bytes (which is why
 `ONE_RAW_PER_BATCH` in `test_curate_budget.py` needed recalibrating to 2724).
+
+---
+
+### G6 — the Codex brain backend has no equivalent of ADR-0025's harness isolation
+
+- **status:** open
+- **severity:** minor — no observed failure. Codex planned the exact payload that
+  made Claude refuse (2026-07-30 probe: 55 curated facts including the incident
+  write-ups, valid plan JSON, no refusal), so nothing is broken today. It is filed
+  because the Codex path is protected by the model's *disposition* rather than by
+  design, and because that distinction disappears from view the moment someone
+  reads "G5 is fixed" and assumes it covers both backends.
+- **found:** 2026-07-30 by Claude, while evaluating `codex-cli` as the curator
+  brain to keep curation off the user's Claude quota. (G5's own work was
+  2026-07-29; this session ran past midnight UTC.)
+
+**The asymmetry.** ADR-0025 gives `ClaudeCLIBrain` four isolation flags so the
+curator call *is* what its prompt claims. `CodexCLIBrain._once`
+(`brain/codex_cli.py`) still runs the pre-ADR-0025 shape:
+
+```
+codex exec --ignore-user-config --json <combine_prompt(system, user)>
+```
+
+| | claude-cli | codex-cli |
+|---|---|---|
+| untrusted-data fence | ✓ (in `PLAN_SYSTEM`, backend-agnostic) | ✓ |
+| curator mandate in a real system slot | ✓ `--system-prompt` | ✗ folded into a user turn |
+| settings/CLAUDE.md/skills suppressed | ✓ `--setting-sources ""` | partial — `--ignore-user-config` |
+| MCP servers suppressed | ✓ `--strict-mcp-config` | ✗ |
+| built-in tools suppressed | ✓ `--tools ""` | ✗ |
+
+`--ignore-user-config` exists for a *different* reason — it stops Codex
+discovering its own hooks and re-entering Neurobase (2026-07-21 spike). It is not
+an isolation contract, and it should not be read as one.
+
+**Why this matters despite no failure.** G5's mechanism was not
+Claude-specific. The plan payload carries model-authored content, including
+descriptions of curator misfires, into a session that has tools and looks
+interactive from the inside. Claude refused by reasoning from what it could
+observe; Codex did not. Nothing establishes that Codex *cannot* — one probe with
+one raw is not evidence of robustness, and the injection test that backs the
+Claude path (adversarial raw body → valid JSON, no tool use, no artefact) has
+never been run against Codex.
+
+**Fix direction.** If Codex becomes a routine curator brain rather than an
+occasional fallback, give it the equivalent contract and test it the same way:
+whatever `codex exec` offers for a real system-instruction slot, MCP suppression
+and tool suppression, plus the adversarial-payload regression. Until then, treat
+"G5 is fixed" as **claude-cli only** — that scope is stated in ADR-0025 and must
+not be widened by implication.

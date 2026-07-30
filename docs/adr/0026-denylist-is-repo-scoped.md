@@ -1,6 +1,6 @@
 # ADR-0026: `denylist` matching is repo-scoped — an entry inside a repo is not a carve-out
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-30
 - **Resolves:** independent-review findings I3/I5/I7 on
   [`docs/reviews/2026-07-23-folder-scoped-auto-enable.md`](../reviews/2026-07-23-folder-scoped-auto-enable.md)

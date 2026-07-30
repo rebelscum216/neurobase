@@ -89,6 +89,7 @@ def test_cap_drops_whole_trailing_nodes() -> None:
     header = "H"
     bodies = ["A" * 3000, "B" * 3000, "C" * 3000]
     out = recall._assemble(header, bodies, cap=6000)
+    assert out is not None  # cap leaves ample body room, so this assembles
     assert "A" * 3000 in out
     assert "B" * 3000 not in out  # second node would push over 6000 → dropped whole
     assert "C" * 3000 not in out
@@ -98,7 +99,9 @@ def test_cap_truncates_single_oversized_first_node() -> None:
     header = "H"
     bodies = ["A" * 10000]
     out = recall._assemble(header, bodies, cap=6000)
+    assert out is not None
     assert len(out) == 6000  # truncated mid-node only because it's alone and overflows
+    assert out.startswith(header)  # the cut fell on the body, not the framing
 
 
 def test_emit_fail_safe_swallows_errors(enabled: tuple[Path, Path], monkeypatch) -> None:

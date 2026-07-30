@@ -52,17 +52,30 @@ def test_header_instructs_search_fallback_when_a_fact_seems_absent(
     """The injected header must tell the reading agent that absence from the
     synthesized node is not proof the store lacks the fact, and name the tool to
     escalate to (context-loading Phase 5 / C-11). Pinned because this is the
-    whole mechanism — there is no code path behind it to fail loudly."""
+    whole mechanism — there is no code path behind it to fail loudly.
+
+    Review F4: this asserted three disconnected substrings, which could not fail
+    for a violation of the §3 MUST it exists to enforce — a header reading
+    "…is a summary, not the whole store. The Neurobase memory_search tool is
+    unavailable (when available)." contains all three fragments while *negating*
+    the directive. The whole sentence is pinned instead, so the assertion carries
+    the actual semantics: summary → search → before concluding absence, with the
+    availability qualifier attached to the escalation rather than floating.
+
+    Written as a literal, NOT derived from ``recall_common.HEADER`` — deriving it
+    would make the test tautological, passing against any header including a
+    negated one. Spec §3 quotes HEADER verbatim, so a reword must already update
+    the spec in the same change; this makes the test move with them rather than
+    silently tolerating drift."""
     root, repo = enabled
     store.write_node(root, "myrepo", "myrepo-status", "# Status\n\nbody")
     ctx = recall.build_context(root, repo)
     assert ctx is not None
-    assert "summary, not the whole store" in ctx
-    assert "memory_search" in ctx
-    # The escalation must be conditional on the tool existing: injection runs
-    # from the SessionStart hook whether or not the agent has the Neurobase MCP
-    # server wired.
-    assert "(when available)" in ctx
+    assert (
+        "This node is a summary, not the whole store: if a fact seems absent from it, "
+        "search the underlying memory with the Neurobase memory_search tool (when "
+        "available) before concluding it is not in memory."
+    ) in ctx
 
 
 def test_emit_shape(enabled: tuple[Path, Path]) -> None:

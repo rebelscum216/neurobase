@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: awaiting-review   # round 2: self-review findings resolved; independent Codex pass still owed
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -203,3 +203,53 @@ A third fresh-eyes pass verified the round-2 fixes against the code (config coer
 - **Collision pre-check nit** — the pre-check keyed on `slug in registry` rather than a truthy roots list, so a *corrupt empty-roots* registry entry could false-skip (benign — retries next hook). Tightened to `registry.get(slug) or []` to mirror `register_project` exactly.
 
 State: full CI gate green, 30 tests, self-review converged (round 3 = approve). The one thing still outstanding is the **independent Codex pass**, which no amount of self-review replaces.
+
+## Reviewer findings — independent Codex pass
+
+Verified against `git diff 60bb6f9^1...60bb6f9^2`. F1/F2/F3/F4/F5/F7 and
+the R2 fixes are present: MCP `recall` keeps the read-only default and catches
+its call; the seam catches the claimed store/slug failures and creates the tree
+before registry registration; the new path-policy, recall, Codex-scribe,
+denylist, scalar-config, collision, and too-new-store tests exercise those
+paths. F6's behavior is documented and F7's lost-registration race is honestly
+described as an accepted, self-healing risk.
+
+### I1 — The implementation changes spec-governed capture and recall semantics without updating the spec
+
+- **severity:** blocker
+- **location:** `src/neurobase/core/enable.py:64-89`; `docs/neurobase-spec-appendix.md:503`, `docs/neurobase-spec-appendix.md:529`, and `docs/neurobase-spec-appendix.md:780`
+- **issue:** A qualifying unregistered repository is now registered and given a
+  tree at session start/capture, whereas the governing spec still requires
+  recall to resolve the project via the registry and capture to write only when
+  the resolved tree already exists; it also does not define the new `[enable]`
+  keys. This is not merely documentation lag: it is a direct behavioral
+  contradiction to the contracts that AGENTS.md calls law. ADR-0019 itself
+  acknowledges at lines 198-202 that these exact sections must be folded in
+  "on implement," but the PR implements the feature while leaving them absent.
+  The tests demonstrate the new behavior, so they cannot enforce the published
+  contract.
+- **suggested direction:** Accept/finalize the design decision as appropriate,
+  then update §§3, 4, 5, and 10 with the folder-consent, denylist, and
+  read-only-MCP boundaries, and keep the regression tests tied to those
+  normative rules. Until then, treat this live feature as a tracked
+  spec-implementation divergence.
+
+### I2 — The deliberate registered-ancestor precedence has no regression test
+
+- **severity:** minor
+- **location:** `src/neurobase/core/enable.py:56-64`; `tests/test_auto_enable.py:105-160`
+- **issue:** The resolve-first code returns a manually registered ancestor for a
+  newly opened nested Git repository, so the child is captured into the
+  ancestor project rather than auto-registered as its own project. ADR-0019
+  documents this exception at lines 183-188, despite D40 otherwise describing
+  one project per repo, but the suite has no nested-repository/registered-parent
+  case. A later resolution-policy refactor can therefore silently reverse this
+  explicit precedence (or reintroduce the surprising fold) without a failing
+  test.
+- **suggested direction:** Add a focused nested-Git-repository test that
+  registers the parent, opens the child under an auto-enable root, and asserts
+  the intended slug/registry result; if the product instead requires D40's
+  one-project-per-repo behavior, change the ordering and ADR together.
+
+**Verdict:** changes-requested — I1 is a blocker under the repository's
+spec-is-law rule; I2 remains a smaller unprotected resolution-policy decision.

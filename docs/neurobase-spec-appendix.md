@@ -500,8 +500,16 @@ no preamble.
 
 ## 3. Recall contract (Claude adapter, SessionStart hook)
 
-- stdin: hook JSON (uses `cwd`); resolve project via the registry; **fail-safe:
-  ANY error or no-project or no-nodes ⇒ emit nothing, exit 0.**
+- stdin: hook JSON (uses `cwd`); resolve the project via the registry, **or by
+  folder-scoped auto-enable (§10)** when the cwd is an unregistered git repo
+  under an `auto_enable_roots` directory — which registers it and creates its
+  memory tree, so the first session in a qualifying repo injects nothing (no
+  nodes yet) and the next one injects normally; **fail-safe: ANY error or
+  no-project or no-nodes ⇒ emit nothing, exit 0.** A **denylisted** repo (§10)
+  resolves to nothing here even when already registered — the denylist gates
+  *automatic* injection. The MCP `recall` prompt (§13) reuses this assembly but
+  resolves **read-only**: it honors the denylist and never auto-enables, so a
+  read can neither mutate the registry nor create a tree.
 - Emit on stdout:
 ```json
 {"hookSpecificOutput": {"hookEventName": "SessionStart",
@@ -526,7 +534,9 @@ no preamble.
 - stdin: `{session_id, transcript_path, cwd, reason}`. CLI test flags
   `--transcript PATH`, `--cwd DIR` override.
 - **Deterministic, no LLM. Every code path exits 0** — never wedge teardown.
-- Opt-in: write only if the resolved project's memory tree exists.
+- Opt-in: write only if the resolved project's memory tree exists **or the repo
+  qualifies for folder-scoped auto-enable (§10), which creates the tree**. A
+  **denylisted** repo (§10) never captures, even when already registered.
 - Parse the transcript (JSONL, one event per line):
   - Skip lines with `isSidechain: true` (subagent turns).
   - `type=="user"`: extract typed text only — string content, or the joined
@@ -801,6 +811,10 @@ sources = ["startup", "clear"]   # Claude SessionStart matcher (§7)
 
 [redact]
 extra_patterns = []              # regex strings appended to the §10 table
+
+[enable]
+auto_enable_roots = []           # dirs under which a git repo self-registers (below)
+denylist = []                    # wins over roots; gates AUTOMATIC capture + injection
 ```
 
 API-key sourcing (API backends only): `NEUROBASE_API_KEY` env >
@@ -811,6 +825,51 @@ service `neurobase`, username = the provider env-var name the entry stands in
 for (`ANTHROPIC_API_KEY`, later `OPENAI_API_KEY`). Any keyring failure (no
 backend, locked keychain, missing entry) is treated as "no key" and falls
 through — the lookup never prompts or raises into the caller.
+
+### Folder-scoped auto-enable (ADR-0019, D39–D42)
+`neurobase enable` is per-repo consent. `[enable].auto_enable_roots` relocates
+that consent to a **directory**: name a folder once, and any git repo beneath it
+is registered as its own project — and given its memory tree — the first time a
+hook fires there. **Empty roots (the default) = per-repo opt-in only**, i.e. the
+behavior §3/§4/§5 described before this feature.
+
+Resolution order at every automatic entry point (session-start injection, both
+scribes' capture):
+
+1. **Denylist first, and it wins.** A cwd under a `denylist` entry resolves to
+   nothing — it neither auto-enables nor keeps capturing when already registered.
+   The gate is **prospective**: it stops new capture and automatic injection, and
+   does **not** gate explicit MCP tools or CLI commands, nor purge memory already
+   captured.
+2. **Registered project next.** An existing registry match wins over
+   auto-enable. Consequence, deliberate: when an **ancestor** of a new repo is
+   already registered (`~/Projects` itself, or a monorepo root), a brand-new
+   child repo under an `auto_enable_root` folds into the ancestor's project by
+   longest-prefix match rather than getting its own. "Registered wins" is the
+   rule; D40's one-project-per-repo describes the auto-enable path, not this
+   precedence.
+3. **Auto-enable last**, only for a genuinely unregistered cwd that is a git repo
+   under a root and not denylisted.
+
+Constraints on the lists: entries MUST be **absolute or `~`-prefixed**; a
+relative path would resolve against the hook process's launch cwd — a
+non-deterministic scope — and is skipped. A non-list scalar is coerced, never
+treated as a bare path (a scalar `"/"` would otherwise scope capture to the whole
+filesystem).
+
+Auto-enable **fails closed to `None`**, never raising into a hook: a store schema
+newer than the binary, a slug collision against a different registered root, an
+un-sluggable repo name, a corrupt `registry.toml`, or any filesystem error while
+writing the tree or registry all skip the repo silently. Ordering within the
+write is normative — the **tree is created before the registry entry**, so a
+failure can never leave a registered-but-treeless project, which would match
+resolution forever and silently kill capture. Registry mutation happens through a
+`WRITE` handle so the D11 guard runs first (see the chokepoint below).
+
+Known residual (ADR-0019 F7, accepted): two *different* repos' first sessions
+racing can have one `tmp+replace` clobber the other's just-added entry. The file
+never tears, and the dropped repo self-registers on its next session — one repo
+can be unregistered for one session. No locking is introduced for this.
 
 ### store.toml
 At `<root>/store.toml`: `schema = 1`, `created_at = <ISO8601>`. `neurobase

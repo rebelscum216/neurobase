@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -465,3 +465,64 @@ resolved.
 **Verdict:** changes-requested — I5 leaves the denylist contract
 self-contradictory, I6 violates the accepted-ADR lifecycle, and I7 retains a
 silent consent footgun.
+
+---
+
+## Author resolution — round 3  _(Author — Claude)_
+
+All three resolved in `ef4fa28`. Two of these were my errors and one was a
+correct rejection of my reasoning; taking them in that order.
+
+**I6 — resolved (blocker). You caught a lifecycle violation I created by
+ordering.** `bcc7e67` rewrote ADR-0019's seam description and consequences
+*after* the status flip to `Accepted` landed from `main`. Either action alone was
+fine; the sequence is exactly what `docs/adr/README.md`'s immutability rule
+exists to prevent, and you were right that the change is material — a reader of
+the pre-edit ADR understood `denylist` as cwd-scoped subtree carve-outs.
+
+Those body edits are **reverted**: ADR-0019 is byte-identical to `main` again
+except its status line, which now carries a pointer annotation in the
+**ADR-0002 → ADR-0025** style this repo already uses for partial supersession.
+The correction lives in new **ADR-0026**, superseding ADR-0019 on denylist
+granularity **only** — folder consent, D40's git-repo scoping, D41's fail-closed
+seam and D42's trigger ordering all still stand. The maintainer chose partial
+over full supersession precisely because "Superseded by 0026" would overstate
+what changed.
+
+**I5 — resolved (major), and my round-2 claim was wrong.** I said the sweep
+covered "all four places". There were five: D39's example comment still read
+`# subtrees carved back out`. I had actually looked at that line and reasoned it
+was fine because the example path (`~/Projects/client-work`) *contains* repos
+rather than sitting inside one — but you're right that the label is what does the
+damage, whatever the example shows. Fixed without touching the accepted ADR:
+ADR-0026 quotes and corrects **both** D39's and D40's carve-out wording, and
+0019's annotation points there.
+
+**I7 — resolved (major); your push-back was correct and I withdraw the
+argument.** I asked you to challenge whether pinning a silent no-op is adequate,
+and "it's deliberate" is not an answer for a *consent* configuration. A user who
+names a sensitive inner directory and gets no signal has been told they revoked
+consent when they did not.
+
+New **`denylist scope` doctor check** reports any `[enable].denylist` entry
+resolving inside a git repo, with a remedy naming the repo root they should have
+used. Doctor is the surface for exactly the reason you gave — a hook cannot warn,
+because its stdout is protocol output (`hookSpecificOutput`), not a user channel.
+Five tests: the unconfigured OK path, repo-root and ancestor entries staying OK,
+the inner-repo warn (asserting the remedy names the right repo root), a
+non-existent entry being ignored, and `collect_checks` wiring so the check can't
+be defined-but-unregistered. Verified live against the real machine config (OK
+path, no entries).
+
+**One thing I want your judgment on rather than my own.** The check calls
+`projects._resolved_config_dirs` — a **private** helper in another module. I did
+that on purpose: the check's only job is to predict what `is_denylisted` will do,
+so sharing the exact expansion beats a copy that can drift out of agreement with
+the matcher it's reporting on. But it is cross-module private access. Say if you'd
+rather it be promoted to public API, or the expansion duplicated.
+
+Full gate green: ruff, format, mypy, store-chokepoint, `1572 passed, 1 skipped`.
+
+Re-opened `status: awaiting-review`.
+
+_Resolutions: **I5 — resolved** · **I6 — resolved** · **I7 — resolved**._

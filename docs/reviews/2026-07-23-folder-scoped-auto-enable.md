@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -253,3 +253,55 @@ described as an accepted, self-healing risk.
 
 **Verdict:** changes-requested — I1 is a blocker under the repository's
 spec-is-law rule; I2 remains a smaller unprotected resolution-policy decision.
+
+---
+
+## Author resolution — independent pass  _(Author — Claude)_
+
+Both resolved in `ad69d45`. I1 is the finding four self-review rounds could not
+have produced: every one of them checked the code against the *ADR*, and none
+checked it against the *spec sections the ADR promised to update*. That is the
+blind-spot argument made concrete, and it is why this pass was worth running a
+week late.
+
+**I1 — resolved (the spec moved to match the code).** Maintainer decision, taken
+explicitly rather than by default: ADR-0019 is Accepted, the behavior has been
+live since PR #5, and folding the sections in was already the ADR's own committed
+next step — so reverting a week of shipped behavior to match a stale contract
+would have been the wrong direction. Changes:
+
+- **§3** — resolution is now "via the registry, **or** by folder-scoped
+  auto-enable (§10)", with the first-session-injects-nothing consequence stated,
+  and the denylist named as a gate on *automatic* injection. Also pins what your
+  finding called the read-only-MCP boundary: the §13 `recall` prompt reuses the
+  §3 assembly but resolves **read-only** — honors the denylist, never
+  auto-enables, so a read can neither mutate the registry nor create a tree.
+- **§4** — the opt-in line becomes "the resolved project's memory tree exists
+  **or the repo qualifies for folder-scoped auto-enable (§10), which creates the
+  tree**". **§5 needed no edit**: it already inherits by reference ("same
+  bounds/redaction/empty-skip/exit-0/opt-in rules as §4"). Flagging that rather
+  than leaving you to wonder whether §5 was missed.
+- **§10** — gains the `[enable]` keys in the config block and a normative
+  subsection: the denylist-first resolution order, the registered-ancestor
+  precedence, the absolute-or-`~` requirement (a relative entry resolves against
+  the hook's launch cwd) and scalar coercion, fail-closed-to-`None` on every
+  named failure, the **normative tree-before-registry write ordering**, and F7's
+  lost-registration race as an explicitly accepted residual.
+
+**I2 — resolved, and your claim is confirmed by mutation.** Added
+`test_registered_ancestor_wins_over_auto_enabling_a_nested_repo`: a registered
+parent, a genuinely separate git repo created inside it, asserting the child
+folds into the ancestor and gets neither its own registry entry nor its own tree.
+Then reversed the precedence in `enable.py` so auto-enable wins over a registered
+ancestor — **that mutation fails this test and only this test**, which is exactly
+your point that the behavior was documented but unpinned.
+
+**Scope note.** No production code changed. The diff is spec + one test + this
+baton; `enable.py` was mutated only temporarily for the check above and restored
+(`git diff` on it is empty).
+
+Full gate green: ruff, format, mypy, store-chokepoint, `1566 passed, 1 skipped`.
+
+Re-opened `status: awaiting-review`.
+
+_Resolutions: **I1 — resolved** · **I2 — resolved**._

@@ -6,8 +6,10 @@
   [`docs/reviews/2026-07-23-folder-scoped-auto-enable.md`](../reviews/2026-07-23-folder-scoped-auto-enable.md)
 - **Supersedes:** **[ADR-0019](0019-folder-scoped-auto-enable.md), denylist
   granularity only.** D39's `"subtrees carved back out"` framing and D40's
-  "a sensitive subtree can be carved out" both imply a `denylist` entry can name a
-  directory *inside* a repository. It cannot. Everything else in ADR-0019 —
+  "a sensitive subtree can be carved out" both imply that naming a directory
+  *inside* a repository carves that subtree out of it. It does not — such an entry
+  does not gate the repo containing it (though it does gate repos nested beneath
+  it). Everything else in ADR-0019 —
   folder-scoped consent, D40's git-repo scoping, D41's fail-closed seam, D42's
   trigger ordering — stands unchanged.
 
@@ -86,9 +88,9 @@ documentation, plus the new `doctor` visibility.
 
 ## Consequences
 
-- **Spec §10** states the repo-scoped rule, the "an entry inside a repo has no
-  effect" consequence, and the rationale — it is now the normative home of the
-  denylist contract.
+- **Spec §10** states the root-at-or-beneath rule, its consequence that an entry
+  inside a repo does not gate *that* repo, the nested-repo qualification, and the
+  rationale — it is now the normative home of the denylist contract.
 - **ADR-0019 is annotated, not retired** (the ADR-0002 → ADR-0025 precedent). Its
   D39 example comment and D40 carve-out sentence remain as authored, because an
   Accepted ADR is immutable ([ADR README](README.md)); this ADR is where the
@@ -97,7 +99,9 @@ documentation, plus the new `doctor` visibility.
   lifecycle violation, reverted.
 - **`doctor` gains a check** and therefore a new way to be noisy: a user with a
   deliberate inner-repo entry sees a warning every run. Judged correct — the entry
-  genuinely does nothing, so the noise is proportionate to the surprise.
+  does not gate the repo containing it, which is what a reader of the path would
+  expect it to do, so the noise is proportionate to the surprise. (It may still
+  gate repos nested beneath it; the warning says so rather than calling it inert.)
 - **Not addressed here:** making inner-repo entries actually work (cwd/subtree
   scoping). That is a behavior change with live-consent implications and belongs
   in its own ADR if anyone wants it; the test above ensures it cannot happen by

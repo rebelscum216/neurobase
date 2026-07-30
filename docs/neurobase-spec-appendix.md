@@ -815,8 +815,8 @@ extra_patterns = []              # regex strings appended to the §10 table
 [enable]
 auto_enable_roots = []           # dirs under which a git repo self-registers (below)
 denylist = []                    # wins over roots; gates AUTOMATIC capture + injection
-                                 # REPO-SCOPED: name a repo root or an ancestor;
-                                 # a path inside a repo does nothing (below)
+                                 # REPO-SCOPED: gates a repo iff that repo's root
+                                 # is at or beneath the entry (below)
 ```
 
 API-key sourcing (API backends only): `NEUROBASE_API_KEY` env >

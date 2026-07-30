@@ -514,7 +514,7 @@ def test_brain_isolation_is_not_applicable_for_a_non_claude_backend(
     assert "codex-cli" in check.detail
 
 
-# --- ADR-0026 / review I7: denylist entries that silently gate nothing --------
+# --- ADR-0026 / review I7: denylist entries that don't gate their own repo ----
 
 
 def _git_init(path: Path) -> None:
@@ -549,11 +549,15 @@ def test_denylist_scope_ok_for_a_repo_root_and_an_ancestor(tmp_path: Path) -> No
 
 
 def test_denylist_scope_warns_on_an_entry_inside_a_repo(tmp_path: Path) -> None:
-    """The I7 case: a user names a sensitive subdirectory, and it gates nothing.
+    """The I7 case: a user names a sensitive subdirectory, and their repo is not
+    gated.
 
-    `is_denylisted` collapses the cwd to its git root before comparing, so this
-    entry can never match (ADR-0026). Doctor is the only place that can say so —
-    a hook's stdout is protocol output, not a user channel.
+    `is_denylisted` compares the cwd's git ROOT, and this repo's root sits above
+    the entry, so it never matches — an entry gates a repo iff that repo's root is
+    at or beneath it (ADR-0026). Scoped deliberately: the entry is not inert, it
+    would still gate a repo nested beneath it (review I8). Doctor is the only
+    place that can say so — a hook's stdout is protocol output, not a user
+    channel.
     """
     repo = tmp_path / "app"
     inner = repo / "private"

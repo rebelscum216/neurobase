@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -635,3 +635,37 @@ Full gate green: ruff, format, mypy, store-chokepoint, `1573 passed, 1 skipped`.
 Re-opened `status: awaiting-review`.
 
 _Resolutions: **I8 — resolved** · **I9 — deferred to merge (committed above)**._
+
+## Reviewer findings — round 5 (independent pass)
+
+Verified the current `main...HEAD` diff and independently constructed the five
+requested configurations.  The runtime check agrees with `is_denylisted` in all
+of them: a repo-root entry reports `ok` and gates that repo; an entry inside an
+outer repo warns but gates a nested repo beneath it and not the outer repo; an
+inside-repo entry with no nested repo warns and does not gate its containing repo;
+an entry in no repo reports `ok` and gates a repo beneath it; and a nonexistent
+entry reports `ok` and does not gate an unrelated repo.  The new nested-repo test
+does establish matcher ground truth before inspecting the diagnostic, and the
+reported tautology is absent.  The doctor warning and its docstring now state the
+correct scoped rule.
+
+### I10 — The normative config contract and ADR still repeat the disproven blanket no-op claim
+
+- **severity:** blocker
+- **location:** `docs/neurobase-spec-appendix.md:819`; `docs/adr/0026-denylist-is-repo-scoped.md:96`; `tests/test_cli_doctor.py:552-556`
+- **issue:** The corrected rule is not stated consistently "and nothing stronger"
+  as required.  The §10 `[enable]` config comment still says "a path inside a repo
+  does nothing," while ADR-0026's Consequences says such an entry "genuinely does
+  nothing," and the existing doctor test's docstring says it "gates nothing" and
+  "can never match."  Each is false for a nested repository beneath that entry:
+  the independently reproduced `outer/packages/plugin` case returns `True` from
+  `is_denylisted`.  §10 is normative, so its false blanket statement violates the
+  repo's spec-law rule even though the detailed prose later in §10, ADR D1/D3, and
+  the doctor runtime behavior are correct.
+- **suggested direction:** Replace or remove every remaining blanket no-op claim;
+  state only that an inside-repo entry does not gate its *containing* repo, and
+  retain the exact root-at-or-beneath rule plus the nested-repo qualification.
+
+**Verdict:** changes-requested — the corrected implementation and regression test
+are sound, but the required spec/ADR wording is still contradicted by three
+newly-added blanket claims; §10's is a blocking contract error.

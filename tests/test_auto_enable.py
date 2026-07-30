@@ -88,12 +88,13 @@ def test_policy_denylist_wins_over_root(workspace: Path) -> None:
 
 
 def test_denylist_entry_inside_a_repo_does_not_gate_it(workspace: Path, tmp_path: Path) -> None:
-    """A `denylist` entry naming a directory INSIDE a repo has no effect — the repo
-    still auto-enables and still captures.
+    """A `denylist` entry naming a directory INSIDE a repo does not gate that repo
+    — it still auto-enables and still captures.
 
-    Matching is repo-scoped: `is_denylisted` collapses the cwd to its git root
-    before comparing, so the candidate is always the repo root and a sub-path
-    entry can never match. Independent review I3 caught the spec claiming a
+    An entry gates a repo iff that repo's root is at or beneath it: `is_denylisted`
+    compares the cwd's git ROOT, and this repo's root sits above the entry. Scoped
+    to the containing repo on purpose — such an entry is NOT inert, it would still
+    gate a repo nested beneath it (review I8/I10). Independent review I3 caught the spec claiming a
     cwd-based carve-out; the maintainer's decision was that the docs follow the
     shipped repo-root semantics, because a capture is attributed to the repo's
     project regardless of which subdirectory the session ran in — a subtree entry
@@ -101,7 +102,7 @@ def test_denylist_entry_inside_a_repo_does_not_gate_it(workspace: Path, tmp_path
 
     Pinned deliberately, and asserting the PERMISSIVE outcome, so the limitation
     is a recorded decision rather than an accident: if someone later makes
-    denylist cwd/subtree-scoped, this test fails and forces spec §10, ADR-0019 and
+    denylist cwd/subtree-scoped, this test fails and forces spec §10, ADR-0026 and
     the config comment to be updated with it.
     """
     root = tmp_path / "store"

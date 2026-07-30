@@ -4,11 +4,33 @@ status: awaiting-review   # round 2: self-review findings resolved; independent 
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
-diff: git diff main...HEAD
+diff: git diff 60bb6f9^1...60bb6f9^2   # PR #5 as merged; the branch is gone (see Retroactive context)
 created: 2026-07-23
 ---
 
 # Review: Folder-scoped auto-enable — consent once at a directory, not per repo
+
+> **Retroactive review context (added 2026-07-30).** This review is being run
+> **after the fact**. The branch `feat/folder-scoped-auto-enable` was merged into
+> `main` on 2026-07-23 as **PR #5** (merge commit `60bb6f9`), and the branch and
+> its worktree were deleted on 2026-07-30 during cleanup. So the original
+> `git diff main...HEAD` in the frontmatter is now **empty and useless** — for a
+> merged branch, three-dot diff against `main` yields nothing. The reviewable
+> unit is the PR as merged: `git diff 60bb6f9^1...60bb6f9^2`, verified to match
+> the key-file list in the brief below.
+>
+> **What this changes about the review.** Findings cannot block a merge that
+> already happened, and the code has been live for a week. Findings therefore
+> become **follow-up work** — a tracked gap, a fix branch, or an accepted risk —
+> not a gate. That is the whole reason the pass is still worth running: rounds 1–4
+> below are *author self-review*, which this baton itself says cannot substitute
+> for an independent pass because it shares the author's blind spots.
+>
+> **Drift since the merge, worth knowing while reviewing.** `recall_common.py`
+> and `tests/test_recall_common.py` have both been modified since by the
+> in-flight `feat/recall-header-search-fallback` branch (not yet on `main`), and
+> ADR-0019's status is being flipped `Proposed → Accepted` on a separate docs
+> branch. Neither changes the PR #5 diff under review.
 
 ## Brief  _(Author — Claude)_
 

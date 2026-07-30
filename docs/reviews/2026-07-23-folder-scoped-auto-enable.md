@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -305,3 +305,51 @@ Full gate green: ruff, format, mypy, store-chokepoint, `1566 passed, 1 skipped`.
 Re-opened `status: awaiting-review`.
 
 _Resolutions: **I1 — resolved** · **I2 — resolved**._
+
+---
+
+## Reviewer findings — round 2 (independent pass)
+
+Verified `main...HEAD` against the live seam and call sites. The MCP `recall`
+prompt calls `build_context()` with its default `auto_enable=False`, opens only
+`READ` handles, and is wrapped at the prompt boundary; its read-only claim is
+accurate. §5's explicit inheritance of §4's “opt-in rules” also carries the
+new §4 auto-enable rule. The I2 mutation was independently checked: making
+auto-enable win over a registered ancestor makes exactly
+`test_registered_ancestor_wins_over_auto_enabling_a_nested_repo` fail in
+`tests/test_auto_enable.py`; the baseline passes after restoration.
+
+### I3 — §10 overstates denylist coverage for a cwd inside a repository
+
+- **severity:** major
+- **location:** `docs/neurobase-spec-appendix.md:833-836`; `src/neurobase/core/projects.py:156-160`
+- **issue:** The new normative order says “A cwd under a `denylist` entry
+  resolves to nothing.” The implementation does not evaluate the cwd for a Git
+  checkout: `is_denylisted()` first collapses it to `git_common_root(cwd)` and
+  compares that repository root to the configured entries. Thus, with repo
+  `/work/app`, denylist `/work/app/private`, and hook cwd
+  `/work/app/private`, the candidate is `/work/app`, not under the denylist,
+  and automatic capture/injection proceeds. That is a material consent-policy
+  difference from the specified cwd-based carve-out, and the wording is not
+  accurate enough to enforce the intended boundary.
+- **suggested direction:** Decide whether denylist is repository-root-scoped
+  (then rewrite §10 and the config/ADR wording consistently) or cwd/subtree
+  scoped (then evaluate the original cwd too); add a regression test for the
+  chosen nested-directory case.
+
+### I4 — ADR-0019 remains marked Proposed despite the resolution’s Accepted decision
+
+- **severity:** minor
+- **location:** `docs/adr/0019-folder-scoped-auto-enable.md:3`; `docs/reviews/2026-07-23-folder-scoped-auto-enable.md:274-276`
+- **issue:** The resolution says the maintainer accepted ADR-0019 and relies on
+  that decision to make the spec follow the live behavior, but the ADR’s own
+  status field still says `Proposed`. The governing decision record therefore
+  contradicts the resolution and leaves the basis for the new normative spec
+  text ambiguous.
+- **suggested direction:** Update ADR-0019’s status to `Accepted` (and any
+  applicable ADR index entry) in the same resolution series, or amend the
+  resolution if acceptance has not occurred.
+
+**Verdict:** changes-requested — §10’s denylist wording does not match the
+implemented Git-root policy, and the ADR status must reflect the stated
+acceptance decision.

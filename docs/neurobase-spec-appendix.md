@@ -815,6 +815,8 @@ extra_patterns = []              # regex strings appended to the §10 table
 [enable]
 auto_enable_roots = []           # dirs under which a git repo self-registers (below)
 denylist = []                    # wins over roots; gates AUTOMATIC capture + injection
+                                 # REPO-SCOPED: name a repo root or an ancestor;
+                                 # a path inside a repo does nothing (below)
 ```
 
 API-key sourcing (API backends only): `NEUROBASE_API_KEY` env >
@@ -836,11 +838,22 @@ behavior §3/§4/§5 described before this feature.
 Resolution order at every automatic entry point (session-start injection, both
 scribes' capture):
 
-1. **Denylist first, and it wins.** A cwd under a `denylist` entry resolves to
-   nothing — it neither auto-enables nor keeps capturing when already registered.
-   The gate is **prospective**: it stops new capture and automatic injection, and
-   does **not** gate explicit MCP tools or CLI commands, nor purge memory already
-   captured.
+1. **Denylist first, and it wins.** Matching is **repo-scoped**: the cwd is
+   collapsed to its **git root** (falling back to the resolved cwd outside a
+   repo), and *that* candidate is what must sit under a `denylist` entry. A
+   matching repo resolves to nothing — it neither auto-enables nor keeps capturing
+   when already registered. The gate is **prospective**: it stops new capture and
+   automatic injection, and does **not** gate explicit MCP tools or CLI commands,
+   nor purge memory already captured.
+
+   **A `denylist` entry naming a path *inside* a repo has no effect** — it cannot
+   carve a subtree out of a repo, because the compared candidate is always the
+   repo root. Denylist the repo root, or an ancestor of it. This is deliberate,
+   not a limitation to route around: consent is granted per repo (`enable`) and
+   per folder (`auto_enable_roots`), so it is revoked at the same granularity —
+   and a capture is attributed to the repo's project no matter which subdirectory
+   the session ran in, so a subtree entry could never deliver the protection its
+   path implies. It would read as consent that silently does nothing.
 2. **Registered project next.** An existing registry match wins over
    auto-enable. Consequence, deliberate: when an **ancestor** of a new repo is
    already registered (`~/Projects` itself, or a monorepo root), a brand-new

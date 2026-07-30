@@ -87,6 +87,46 @@ def test_policy_denylist_wins_over_root(workspace: Path) -> None:
     assert projects.auto_enable_root_for(repo, [str(workspace)], []) == repo.resolve()
 
 
+def test_denylist_entry_inside_a_repo_does_not_gate_it(workspace: Path, tmp_path: Path) -> None:
+    """A `denylist` entry naming a directory INSIDE a repo has no effect — the repo
+    still auto-enables and still captures.
+
+    Matching is repo-scoped: `is_denylisted` collapses the cwd to its git root
+    before comparing, so the candidate is always the repo root and a sub-path
+    entry can never match. Independent review I3 caught the spec claiming a
+    cwd-based carve-out; the maintainer's decision was that the docs follow the
+    shipped repo-root semantics, because a capture is attributed to the repo's
+    project regardless of which subdirectory the session ran in — a subtree entry
+    could not deliver the protection its path implies.
+
+    Pinned deliberately, and asserting the PERMISSIVE outcome, so the limitation
+    is a recorded decision rather than an accident: if someone later makes
+    denylist cwd/subtree-scoped, this test fails and forces spec §10, ADR-0019 and
+    the config comment to be updated with it.
+    """
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    inner = repo / "private"
+    inner.mkdir()
+
+    # Denylisting a path *inside* the repo, then running a hook from that very
+    # directory, does NOT gate it.
+    slug = resolve_or_auto_enable(
+        root, inner, auto_enable_roots=[str(workspace)], denylist=[str(inner)]
+    )
+    assert slug == "app"
+    assert projects.load_registry(root)["app"] == [str(repo.resolve())]
+
+    # Denylisting the repo ROOT is what actually gates it.
+    other_root = tmp_path / "store2"
+    assert (
+        resolve_or_auto_enable(
+            other_root, inner, auto_enable_roots=[str(workspace)], denylist=[str(repo)]
+        )
+        is None
+    )
+
+
 def test_policy_tilde_and_missing_paths_are_safe(workspace: Path) -> None:
     repo = _make_repo(workspace / "app")
     # A non-existent configured root matches nothing rather than raising.

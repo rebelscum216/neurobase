@@ -38,3 +38,6 @@ htmlcov/
 # Codex inject-file ever lands inside a working tree, keep it out of git.
 AGENTS.override.md
 /neurobase/
+
+# Codex review-relay transcripts (`codex exec -o`) — local artifacts, never committed.
+.codex-review-last.txt

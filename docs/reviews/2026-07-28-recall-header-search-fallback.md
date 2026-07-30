@@ -1,6 +1,6 @@
 ---
 slug: recall-header-search-fallback
-status: changes-requested
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/recall-header-search-fallback
@@ -177,3 +177,68 @@ Verification run:
 **Verdict:** changes-requested — the wording is present and the gate is green,
 but the new §3 `MUST` is not enforceable as written and the longer header
 regresses valid small-cap recall into a header-only fragment.
+
+---
+
+## Author resolution — round 1  _(Author — Claude)_
+
+All three resolved across `c85966c` (spec/docs/`_assemble`) and `8cf5fa3` (tests).
+F2 was correct and the reproduction was exact — thank you for running `_assemble`
+directly at `cap=300` rather than trusting the green suite, because the suite was
+the problem.
+
+**F1 — resolved (the normative subject moved to what Neurobase controls).** You
+were right that a `MUST` on the reading model's conclusion is unenforceable and
+therefore can't have an enforcing test, which makes it a principle-1 violation
+regardless of the prompt text being present. §3 now binds the **header text
+Neurobase emits** — that the node is a summary and that `memory_search` is the
+escalation — which is testable and tested. "Absence from the node is not proof of
+absence from the store" is demoted to explicitly non-normative *rationale*, and
+the "(when available)" requirement stays normative since it describes emitted
+text. The complete directive is pinned in the shared recall tests.
+
+**F2 — resolved (the header is now indivisible).** `_assemble` returns
+`str | None`: when the cap cannot fit the whole header plus at least one
+character of body, it returns `None` and `emit()`'s existing `if not content`
+means nothing is injected — rather than the header-only fragment you reproduced.
+Truncation now applies to a node **body** only (`body[:room]`), never to the
+assembled string. Spec §3 states the indivisibility rule and scopes truncation to
+bodies; `_assemble`'s docstring carries the reasoning.
+
+On your "define and enforce a minimum viable cap": we did **not** add a config
+validator. The minimum viable cap is a function of `len(header)`, which varies
+with the `memory_dir` path, so a static `max_chars` floor would be either wrong
+for long paths or needlessly strict for short ones. Fail-safe at assembly time
+covers every path including a config we never validated. Say so if you'd rather
+have the explicit floor as well.
+
+**F3 — resolved.** `docs/how-it-works.md` now scopes the "proven" claim to what
+ADR-0005 actually live-verified — the defensive framing and the
+`hookSpecificOutput.additionalContext` delivery — and labels the closing
+retrieval-fallback sentence an unevaluated retrieval instruction with no
+behavioral verification.
+
+**On the tests, including a result worth flagging against ourselves.** The old
+`test_small_configured_cap_is_honored` asserted the pre-F2 contract, so it was
+replaced, not repaired. The five replacements derive their caps from
+`len(header)` rather than hardcoding — your point that a fixed 300 means
+different things under `/tmp/n` and a real store is exactly how this stayed
+invisible.
+
+We then mutation-checked them by reverting `_assemble` to its pre-F2 form.
+**Only one of the five fails there:** `test_cap_too_small_for_the_header_injects_nothing`,
+which catches the header-only fragment. The other four pass under *both* forms,
+because `(header + _JOINER + body)[:cap]` and `header + _JOINER + body[:room]`
+are the same string whenever the header itself fits — the two diverge only once
+the cap is too small for the header. So four of them characterize the contract
+going forward but are **not** F2 regression pins, and one is. That is recorded in
+the module docstring and in a mutation note on the truncation test rather than
+left for the next reader to discover. Flagging it here because "five new tests"
+would otherwise read as five times the protection it actually is.
+
+Full gate green: ruff, format, mypy, store-chokepoint, `1559 passed, 1 skipped`,
+coverage 92.22%.
+
+Re-opened `status: awaiting-review` for round 2.
+
+_Resolutions: **F1 — resolved** · **F2 — resolved** · **F3 — resolved**._

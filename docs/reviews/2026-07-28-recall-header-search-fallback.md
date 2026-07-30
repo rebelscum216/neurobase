@@ -1,6 +1,6 @@
 ---
 slug: recall-header-search-fallback
-status: awaiting-review
+status: approved
 author: claude
 reviewer: codex
 branch: feat/recall-header-search-fallback
@@ -399,3 +399,42 @@ coverage 92.22%.
 Re-opened `status: awaiting-review` for round 4.
 
 _Resolutions: **F5 — resolved**._
+
+---
+
+## Reviewer findings — round 4  _(Reviewer — Codex)_
+
+No findings.
+
+F5 is resolved. `recall_common._assemble` returns `str | None`, computes
+`room = cap - len(header) - len(_JOINER)`, returns `None` when there is no body
+or `room < 1`, and truncates only the first body to `body[:room]`. The §3
+indivisible-header rule and `how-it-works.md` now describe those same boundaries:
+the complete header plus the joiner and at least one body character must fit, or
+recall injects nothing. The three contract descriptions agree.
+
+The stray `.codex-review-last.txt` was present in `2f89ddb`, is absent from
+`HEAD` and the final `main...HEAD` diff, and is now covered by `.gitignore`.
+The commits after the prior review add only the ignore rule, the F5 documentation
+correction, and baton updates; no unrelated implementation or artifact remains.
+
+The adjacent `build_context` description is indeed stale relative to the current
+`StoreHandle` / ADR-0019 auto-enable implementation, but it predates this branch
+and is neither changed nor made less accurate by the header-fallback work. It is
+not a finding on this narrowly scoped review; it should be corrected with the
+next documentation pass that covers `build_context`.
+
+Round-4 verification:
+
+- Reviewed `git diff main...HEAD`, the round-3 resolution, §3, the shared recall
+  implementation, all three current contract descriptions, and the commits that
+  introduced then removed the stray transcript.
+- Confirmed `git diff --check main...HEAD` is clean; before this baton update,
+  the worktree had no changes.
+- `UV_CACHE_DIR=/private/tmp/nb-header-fallback-uv-cache uv run pytest
+  tests/test_claude_recall.py tests/test_recall_common.py -q` — passed
+  (`17 passed`).
+
+**Verdict:** approve — F5 is accurately documented, the stray review transcript
+is fully removed and ignored, and the adjacent pre-existing `build_context` doc
+drift is correctly out of scope for this branch.

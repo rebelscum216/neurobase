@@ -1,6 +1,6 @@
 ---
 slug: folder-scoped-auto-enable
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/folder-scoped-auto-enable
@@ -716,3 +716,35 @@ Full gate green: ruff, format, mypy, store-chokepoint, `1573 passed, 1 skipped`.
 Re-opened `status: awaiting-review`.
 
 _Resolutions: **I10 — resolved**._
+
+---
+
+## Reviewer findings — round 6 (independent pass)
+
+### I11 — ADR-0019's post-Accepted status annotation is still an impermissible edit
+
+- **severity:** blocker
+- **location:** `docs/adr/0019-folder-scoped-auto-enable.md:3`
+- **issue:** ADR-0019 became `Accepted` in `78d3560`; `dd471fc` then changed its
+  status line to correct the annotation's denylist explanation. The annotation is
+  part of the ADR document and therefore part of the immutable Accepted record:
+  `docs/adr/README.md` permits no exception for a status-line pointer or for a
+  correction authored in an earlier review round. ADR-0026 is precisely the new
+  ADR that records this correction, so retaining the altered annotation violates
+  the explicit immutable-on-Accepted rule even though its current wording is
+  factually correct.
+- **suggested direction:** Restore ADR-0019's Accepted status line byte-for-byte
+  to the pre-annotation form, and keep any necessary correction/pointer solely in
+  ADR-0026 (or a new superseding ADR).
+
+The requested whitespace-normalized scan of the spec, ADR-0019, ADR-0026, both
+test files, and `diagnostics.py` found no surviving blanket claim that an
+inside-repository entry is inert. The remaining phrase matches are either the
+explicitly disproven historical wording or non-existent-entry/unrelated comments.
+Section 10, ADR-0026, and `projects.is_denylisted` agree on the operative rule:
+an entry gates a repo iff that repo's root is at or beneath the entry; the nested
+repository case is stated and tested. The targeted suite passes: `59 passed`.
+
+**Verdict:** changes-requested — I10 is resolved and the denylist documentation
+is now consistent with runtime, but ADR-0019 was materially edited after it became
+Accepted, contrary to the repository's immutable-ADR rule.

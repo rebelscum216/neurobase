@@ -1,6 +1,6 @@
 # ADR-0019: Folder-scoped auto-enable — consent once at a directory, not per repo
 
-- **Status:** Accepted — **denylist granularity revised by [ADR-0026](0026-denylist-is-repo-scoped.md)** (D39's "subtrees carved back out" and D40's "a sensitive subtree can be carved out" imply that naming a directory *inside* a repo carves that subtree out of it; matching is repo-scoped, so it does not gate that repo). Everything else below stands.
+- **Status:** Accepted
 - **Date:** 2026-07-23
 - **Resolves:** the per-repo `enable` friction; relocates the opt-in gate (spec §3/§4/§5/§10)
 - **Supersedes:** none

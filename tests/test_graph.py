@@ -429,6 +429,29 @@ def test_an_invalid_registry_slug_is_skipped_not_fatal(root: Path, handle: Store
     assert [f.slug for f in g.facts] == ["a-fact"]
 
 
+def test_a_registry_that_does_not_parse_is_empty_not_fatal(root: Path, handle: StoreHandle) -> None:
+    """The sweep reads the registry *before* its per-project fail-soft loop, so a
+    corrupt ``registry.toml`` has to be contained at the read itself. Spec §10:
+    registry parseability is a separate, fail-soft concern — reads "treat it as
+    empty". ``projects.load_registry`` parses without a guard, so an unguarded
+    caller lets ``tomllib.TOMLDecodeError`` escape the whole graph."""
+    write_fact(root, "a-fact", provenance=[])
+    (root / "registry.toml").write_text('[projects."proj"\nroots = [')
+
+    assert graph.memory_graph(handle) == graph.MemoryGraph((), (), (), ())
+
+
+def test_an_unreadable_registry_is_empty_not_fatal(root: Path, handle: StoreHandle) -> None:
+    """The other half of the same contract: ``load_registry`` reads the file
+    before it parses it, so the ``OSError`` path needs the same containment."""
+    write_fact(root, "a-fact", provenance=[])
+    registry = root / "registry.toml"
+    registry.unlink()
+    registry.mkdir()  # a directory where the file belongs — read_text raises OSError
+
+    assert graph.memory_graph(handle) == graph.MemoryGraph((), (), (), ())
+
+
 def test_an_explicitly_named_invalid_project_raises(handle: StoreHandle) -> None:
     """Fail-soft covers a hostile store, not a caller's typo: an empty graph and
     a bad slug must stay distinguishable."""

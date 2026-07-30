@@ -19,9 +19,15 @@ cli/             orchestration, presentation, consent/diff/backup choreography
 
 1. **`core/`** owns the on-disk store (`store.py`), the project registry
    (`projects.py`), config (`config.py`), redaction (`redact.py`), wikilink
-   regeneration (`linkify.py`), backups (`backups.py`), and search
-   (`search.py`). It knows about markdown, TOML, and the filesystem — nothing
-   about agents, LLMs, or the CLI.
+   regeneration (`linkify.py`), backups (`backups.py`), search (`search.py`),
+   and the provenance graph (`graph.py`). It knows about markdown, TOML, and the
+   filesystem — nothing about agents, LLMs, or the CLI.
+
+   `graph.py` is a **read-only** join over records core already owns — curated
+   frontmatter and the core-owned curator journal (`store.CURATOR_LOG`). It sits
+   in `core/` on the `search.py` precedent and **must not import `recommender/`**
+   (an upward import); the fact→proposal half of the app's graph is composed in
+   the webui route layer, which may legally import both core and the mid tier.
 2. **`brain/`** is the one package that talks to an LLM, behind a single
    `plan_json`/`text` interface (`base.py`) with backend auto-detection
    (`select.py`). It depends on `core/` (config, for backend selection) and

@@ -224,6 +224,9 @@ class StoreHandle:
     def list_curated(self, project: str, active_only: bool = True) -> list[store.Document]:
         return store.list_curated(self.root, project, active_only)
 
+    def list_tombstoned(self, project: str) -> list[store.Document]:
+        return store.list_tombstoned(self.root, project)
+
     def soft_delete_curated(self, project: str, slug: str) -> Path:
         return store.soft_delete_curated(self.root, project, slug)
 

@@ -467,6 +467,41 @@ def test_soft_delete_moves_to_tombstones(root: Path) -> None:
     assert "tombstoned_at" in doc.frontmatter
 
 
+def test_list_tombstoned_returns_tombstones_sorted_by_slug(root: Path) -> None:
+    store.ensure_tree("proj", root)
+    for slug in ("fact-b", "fact-a"):
+        store.upsert_curated(root, "proj", slug, f"body {slug}")
+        store.soft_delete_curated(root, "proj", slug)
+
+    docs = store.list_tombstoned(root, "proj")
+
+    assert [d.file_path.stem for d in docs] == ["fact-a", "fact-b"]
+    assert all(d["status"] == "tombstoned" for d in docs)
+
+
+def test_list_tombstoned_excludes_slugs_still_active(root: Path) -> None:
+    """Spec §1's resolution rule as a MUST for readers of ``.tombstones/``: when
+    both copies exist the slug is **active** and the tombstone is residue. The
+    exclusion lives in the enumerator, so no caller can forget it."""
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "topic-x", "v1")
+    store.soft_delete_curated(root, "proj", "topic-x")
+    store.upsert_curated(root, "proj", "topic-x", "v2")  # resurrected
+
+    assert (store.memory_dir("proj", root) / ".tombstones" / "topic-x.md").exists()
+    assert store.list_tombstoned(root, "proj") == []
+
+
+def test_list_tombstoned_is_fail_soft_and_empty_when_absent(root: Path) -> None:
+    assert store.list_tombstoned(root, "proj") == []  # no tree at all
+    store.ensure_tree("proj", root)
+    store.upsert_curated(root, "proj", "fact-a", "body")
+    store.soft_delete_curated(root, "proj", "fact-a")
+    (store.memory_dir("proj", root) / ".tombstones" / "broken.md").write_text("no frontmatter")
+
+    assert [d.file_path.stem for d in store.list_tombstoned(root, "proj")] == ["fact-a"]
+
+
 def test_prune_tombstones_respects_grace_period(root: Path) -> None:
     store.ensure_tree("proj", root)
     mem = store.memory_dir("proj", root)

@@ -211,6 +211,13 @@ residue. `list_curated` reads only `curated/`, so every current reader resolves
 this by construction; any reader of `.tombstones/` (e.g. a lineage/graph reader)
 **MUST** exclude slugs present in `curated/`.
 
+`list_tombstoned(project)` is the **only** enumerator of `.tombstones/`, and it
+applies that exclusion itself — the MUST is discharged once, in the enumerator,
+rather than re-derived by each caller. It returns tombstoned facts sorted by
+slug; unparseable or unreadable files are skipped, never fatal (the `list_curated`
+posture). Callers that want the tombstoned facts *shown* opt in explicitly (e.g.
+`core.graph.memory_graph(..., include_tombstoned=True)`).
+
 **No unowned deletion of `.tombstones/<slug>`.** An active+tombstoned pair is
 *indistinguishable on disk* from the midpoint of an in-flight
 `soft_delete_curated`. `.tombstones/<slug>.md` is a shared path that a racing
@@ -960,15 +967,31 @@ schema-independent by design — see the maintenance exception below.
   `registry.toml` is *not* folded into the schema guard: registry reads
   (`load_registry`, `resolve_project`) treat it as empty, and `doctor` may resolve a
   project directly from the registry when `store.toml` itself is corrupt and no handle
-  can open.
+  can open. That fail-soft behaviour lives **in `load_registry` itself**, not in each
+  reader — a rule every caller has to remember is one a future caller will forget.
+  "Corrupt" covers **valid TOML of the wrong shape**, not just a failed parse: a
+  `projects` that is not a table, an entry that is not a table, or a `roots` list
+  holding a non-string are all hand-editable and otherwise detonate *later* than the
+  read — inside `Path()`, on the capture path. A wrongly-shaped **entry** is skipped
+  and the rest of the registry is kept (one mangled entry untracks that project, it
+  does not kill capture for every other one — the same posture §12 takes for a
+  malformed project tree); a `projects` that is not a table has nothing to salvage
+  and reads as empty.
+  **Read-for-rewrite is the one exception and reads strictly:** `register_project`
+  parses through the raw reader, because treating an unparseable *or* skippable
+  registry as empty would rewrite the file and silently drop every other project's
+  roots. A corrupt registry therefore raises there — `TOMLDecodeError`, `OSError`,
+  or `projects.RegistryShapeError`; `core/enable.py` catches all three and fails
+  closed, per the auto-enable posture above.
 
 **Enforcement.** Production store-tree and registry access (`src/neurobase/`) goes
 through `open_store(...)` + a `StoreHandle`. The CI guard
 `scripts/check_store_chokepoint.py` fails the gate when a module **outside** the three
 implementation modules (`core/store.py`, `core/store_handle.py`, `core/projects.py`)
 calls a raw-`root` store/registry **accessor** — `memory_dir`, `ensure_tree`,
-`list_raw` / `list_curated`, `write_raw`, `upsert_curated`, `write_node`,
-`rebuild_index`, `load_registry`, `register_project`, `resolve_project`, … (whether
+`list_raw` / `list_curated` / `list_tombstoned`, `write_raw`, `upsert_curated`,
+`write_node`, `rebuild_index`, `load_registry`, `register_project`,
+`resolve_project`, … (whether
 reached as `store.x` / `projects.x`, via a dotted module, or by a direct/relative
 import) — or references the `store.toml` / `registry.toml` metadata filenames. The
 guard keys on those accessors and literals, **not** on path shape: a handle-derived

@@ -4,9 +4,12 @@ path must obtain before touching the store.
 ``open_store()`` is the single place the D11 schema guard lives (spec §10:
 *"refuse to operate on a schema newer than the binary"*). It reads and validates
 ``<root>/store.toml`` once and hands back a ``StoreHandle``. Because holding a
-handle is proof the schema was already checked, the guard can no longer be
-forgotten at an individual call site — the defect recorded as G1
-(``docs/known-gaps.md``).
+handle is proof the schema was already checked, a call site that takes a handle
+cannot forget the guard — the defect recorded as G1 (``docs/known-gaps.md``).
+Every production caller now does; making that the *only* way to reach the store is
+ADR-0015's deferred signature-removal step, so until it lands the raw-``root``
+functions still exist beneath these methods and a CI regression check (step 5,
+``scripts/check_store_chokepoint.py``) is what catches the ordinary relapse.
 
 **Migration steps 1–2 (ADR-0015).** Step 1 introduced ``open_store()`` and the
 handle alongside the existing ``root: Path`` store API in

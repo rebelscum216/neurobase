@@ -202,10 +202,12 @@ tolerance.
 **Enforcement.** The chokepoint only works if the handle is unavoidable:
 
 - `StoreHandle.__init__` is private; `open_store()` is the sole entrypoint.
-- Every store and project API takes a `StoreHandle`, not a raw `root: Path` —
-  `memory_dir`, `load_registry`, `register_project`, `resolve_project`,
-  `list_raw` / `list_curated` / `write_raw` / `upsert_curated` / `write_node` /
-  `rebuild_index`, and the recommender's corpus/ledger accessors.
+- Every store and project API *offers* a `StoreHandle` form, not a raw `root: Path`,
+  and every production caller uses it — `memory_dir`, `load_registry`,
+  `register_project`, `resolve_project`, `list_raw` / `list_curated` / `write_raw` /
+  `upsert_curated` / `write_node` / `rebuild_index`, and the recommender's
+  corpus/ledger accessors. The raw-`root` forms still *exist* beneath them until the
+  next bullet lands, so this is a completed migration, not yet an enforced signature.
 - The raw-`Path` signatures are removed (not merely deprecated) — a lingering
   overload re-arms the same footgun. **This step is deferred, not done** (see
   *Consequences*): it is what would make the chokepoint genuinely unavoidable, and
@@ -266,14 +268,19 @@ mapping `schema is None` → "not initialized" (warn), `schema > MAX` → "unsup
 
 ## Consequences
 
-- **G1 closes at the type level.** A new call site cannot touch the store without an
-  `open_store()`, so the next author *cannot* forget the guard — the compiler (well,
-  the type checker + CI) forces it. `init`'s mutate-before-guard, `mcp serve`'s
-  no-guard, and `status --recommender`'s early return all resolve as a consequence
-  of requiring the handle, not by patching each in isolation.
-- **The pre-guard registry read disappears.** `resolve_project`/`load_registry`
-  require a handle, so the pervasive "read `registry.toml` before the guard" pattern
-  can no longer compile.
+- **G1 closes at the type level — once the signature removal lands.** That is the
+  intended end state: a new call site could not touch the store without an
+  `open_store()`, and the type checker would force it. What has shipped is the
+  migration plus a regression check, so today the next author is *discouraged*, not
+  prevented — see the deferred bullet under *Enforcement*, and the residual account
+  in G1 and spec §10. `init`'s mutate-before-guard, `mcp serve`'s no-guard, and
+  `status --recommender`'s early return all resolve as a consequence of requiring
+  the handle, not by patching each in isolation.
+- **The pre-guard registry read disappears from production.**
+  `resolve_project`/`load_registry` are reached through a handle everywhere that
+  ships, so the pervasive "read `registry.toml` before the guard" pattern is gone
+  from the tree. Re-introducing it still compiles while the raw signatures remain;
+  the CI check is what catches the ordinary case.
 - **`doctor` de-duplicates.** One schema comparison (D26); the drift risk the
   known-gaps entry flags is removed.
 - **Cost is one validation per invocation.** `open_store()` reads/parses

@@ -1,8 +1,12 @@
 """Tests for the ADR-0015 step-5 store-chokepoint guard (``scripts/check_store_chokepoint.py``).
 
-The guard closes G1's *accessor* class: production code must reach the store-tree /
-registry accessors through ``open_store(...)`` + a ``StoreHandle``, never a raw-``root``
-call. (The ``init --agent`` and ``uninstall --purge-store`` lifecycle commands are
+The guard is a conservative regression check over G1's *accessor* class: production code
+must reach the store-tree / registry accessors through ``open_store(...)`` + a
+``StoreHandle``, never a raw-``root`` call, and this check fails the gate when one of the
+*enumerated* spellings reappears. It has recorded static misses and false positives (see
+the guard's own docstring) — closing the class outright is ADR-0015's deferred
+signature-removal step, not this. (The ``init --agent`` and ``uninstall --purge-store``
+lifecycle commands are
 command-guarded instead — a ``READ``/``PURGE`` handle at the command — ADR-0015 step 4d;
 they are outside this accessor guard's scope.) These tests exercise the REAL guard
 module (imported by path, like ``test_redact_audit``) so the check the developer runs is
@@ -30,9 +34,13 @@ def _details(relpath: str, source: str) -> list[str]:
 
 def test_current_src_tree_has_no_violations() -> None:
     """The whole shipped ``src/neurobase`` tree passes — production reaches the
-    store-tree/registry accessors through the handle, so the guard enforces a true
-    invariant, not aspirational (the lifecycle commands are command-guarded, outside
-    this accessor guard's scope)."""
+    store-tree/registry accessors through the handle (the lifecycle commands are
+    command-guarded, outside this accessor guard's scope).
+
+    What this proves is bounded: the current tree is clean *in the spellings the guard
+    enumerates*. Because the known misses are real (see
+    ``test_known_static_misses_are_recorded_not_caught``), a green result here is
+    evidence that the invariant holds today, not that it cannot be broken."""
     failures: list[str] = []
     for path in sorted(guard.SRC.rglob("*.py")):
         relpath = path.relative_to(guard.SRC).as_posix()
@@ -406,6 +414,11 @@ def test_flags_an_accessor_in_a_decorator_of_a_shadowing_function() -> None:
         "from neurobase.core import projects\n\n"
         "ROOT = None\n"
         "project_api = projects\n\n"
+        # Defined, not assumed: as a bare name this fixture was F821 and so could not
+        # have reached a green gate on its own — which made the "lint-clean" premise
+        # below false for exactly this one (Codex P2-SAFETY-SECURITY-013, round 9).
+        "def keep_decorator_input(value):\n"
+        "    return lambda fn: fn\n\n"
         "@keep_decorator_input(project_api.resolve_project(ROOT, ROOT))\n"
         "def decorated(project_api):\n"
         "    return project_api\n"

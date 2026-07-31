@@ -287,9 +287,9 @@ def _project_check(handle: StoreHandle | None, root: Path, cwd: Path) -> Check:
     (``scripts/check_store_chokepoint.py``) by (file, name). It is legitimate here
     because ``registry.toml`` is a separate concern from the store-schema chokepoint
     (ADR-0015 registry carve-out, F1), so resolving a project without a validated
-    handle must still work when ``store.toml`` is corrupt. The guard enforces the
-    store/registry **accessor + metadata-literal** invariant in ``src/`` (spec §10);
-    it is not an exhaustive raw-root detector.
+    handle must still work when ``store.toml`` is corrupt. The guard checks the
+    enumerated store/registry **accessor** spellings + metadata literals in ``src/``
+    (spec §10); it is not an exhaustive raw-root detector.
 
     **Containment is checked before resolution** (Codex P2-SAFETY-SECURITY-010,
     round 5). An out-of-store ``registry.toml`` selects nothing, so resolution

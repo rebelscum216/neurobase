@@ -150,9 +150,11 @@ opens a read-only `DOCTOR` handle instead of re-implementing the comparison (D26
 `uninstall --purge-store` opens a `PURGE` handle before deleting (D25 — wired in 4d,
 which also made `init --agent` open a `READ` handle before installing hooks). The
 pre-guard registry-read
-pattern can no longer compile — `resolve_project`/`load_registry` production callers
-go through the handle. The step-5 guard forbids the raw-`root` store/registry
-**accessors** and the `store.toml`/`registry.toml` literals outside the three
+pattern is gone from production — `resolve_project`/`load_registry` callers all go
+through the handle (re-introducing one still *compiles*, since the raw-`root`
+signatures remain; that removal is the deferred step below). The step-5 guard fails
+the gate on the **enumerated spellings** of the raw-`root` store/registry
+**accessors** and on the `store.toml`/`registry.toml` literals outside the three
 implementation modules. Three documented raw-`root` residuals remain outside that
 accessor coverage (none an unguarded write to schema-versioned content — spec §10):
 `doctor`'s three corrupt-`store.toml` reads (`resolve_project` + `registry_is_contained`
@@ -167,12 +169,17 @@ schema). The literal removal of the raw-`Path` `store.py`/`projects.py` signatur
 (they remain the low-level implementation the handle methods delegate to, and the test
 suite's store-setup helpers) is deferred. **That deferral is where the residual risk
 lives, and the CI guard does not remove it** (Codex `P2-SAFETY-SECURITY-013`, PR #11
-rounds 5–7): the guard is a *conservative, enumerated syntactic regression guard*, not a
+rounds 5–9): the guard is a *conservative, enumerated syntactic regression guard*, not a
 proof of impossibility. Three review rounds each found one more lint-clean spelling that
 reached a listed accessor while the check printed OK — a public path helper, a reassigned
-module alias, then tuple unpacking. Recorded static misses: tuple unpacking, a class-held
-alias, a named-expression alias, and an alias bound before its import in traversal order;
-rebinding an alias to a non-module is a false positive (parameter shadowing is handled).
+module alias, then tuple unpacking — and a fourth found that the *fix* for a false
+positive had introduced three fresh misses of its own. Recorded static misses: tuple
+unpacking, a class-held alias, a named-expression alias, and an alias bound before its
+import in traversal order. Recorded false positives: rebinding an alias to a non-module
+later in a file, and a **parameter** — of a function, async function, or lambda — that
+merely reuses an alias name (the round-7 special case for that was removed in round 8,
+because un-binding across a whole `FunctionDef` AST suppressed decorators, defaults,
+eager annotations and a nested `global`, which resolve outside the parameter's scope).
 So the guard stops the **ordinary** reintroduction — a new module reaching for a familiar
 accessor — and the signature removal is what would make omission actually impossible.
 See spec §10 and ADR-0015 for the same limit in the same words.

@@ -931,9 +931,13 @@ Store-tree and registry access obtains a validated `StoreHandle` from
 `open_store(root, mode)` (`core/store_handle.py`) before touching the store.
 `open_store` is the **one** place the D11 schema comparison runs — "refuse to operate
 on a schema newer than the binary" is enforced at the boundary, not per command, so a
-new call site cannot forget it. The handle's constructor is private; `open_store` is the
-sole entry point. The store-tree and registry **accessors** (below) are all behind the
-handle and CI-enforced. The two lifecycle commands run the D11 guard too, command-side
+call site that goes through the handle cannot forget it. The handle's constructor is
+private; `open_store` is the sole entry point. Every production caller of the
+store-tree and registry **accessors** (below) was converted onto the handle, and the CI
+guard described under *Enforcement* keeps the ordinary regression out — but the
+raw-`root` signatures still exist (their removal is deferred), so a *new* call site is
+not yet mechanically prevented from reaching one. See "What that guard does and does
+not prove" below. The two lifecycle commands run the D11 guard too, command-side
 (ADR-0015 step 4d): `init --agent` opens a `READ` handle at its entry before installing
 hooks; `uninstall --purge-store` opens a `PURGE` handle immediately before deleting the
 root. Both are command-guarded (not accessor-CI-enforced), like the recommender

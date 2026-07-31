@@ -31,6 +31,35 @@ exactly match what is mechanically enforceable:
   direct/relative import (``from ..core.store import memory_dir``);
 - the store-metadata filename literals ``"store.toml"`` / ``"registry.toml"``.
 
+**What this check IS — and what it is not** _(Codex P2-SAFETY-SECURITY-013, round 7)._
+This is a **conservative, enumerated syntactic regression guard**. It recognizes the
+listed accessor names reached through the *enumerated* receiver spellings below. It is
+**not** a proof that raw-``root`` access is impossible, and it is **not** free of false
+positives. Three rounds of review each found one more lint-clean spelling that reached a
+listed accessor with this check printing OK (a public path helper, a reassigned module
+alias, then tuple unpacking), which is the evidence for stating the limit rather than
+re-asserting the guarantee:
+
+- **Known static misses** — reachable, lint-clean, and NOT flagged: **tuple unpacking**
+  (``project_api, _ = projects, None``), a **class-held alias** (``class API: module =
+  projects``), a named-expression alias, and an alias bound *before* its import in
+  traversal order. Making these fail would need a scope- and dataflow-aware
+  implementation; adding one spelling per review round demonstrably does not converge.
+- **Known false positive** — the alias sets are flat, so a name rebound to a
+  non-module later in a file stays treated as the module. (Function-*parameter*
+  shadowing is handled — see ``_visit_function`` — because it hit the sanctioned
+  ``handle.load_registry()`` pattern; the general case is not.)
+- **Out of scope by design:** anything dynamic — ``globals()[...]``,
+  ``importlib.import_module``. ``import *`` needs no handling here: ruff rejects it with
+  F403/F405, so it cannot reach a green gate.
+
+**Where the real guarantee comes from.** The unavoidability of the chokepoint rests on
+ADR-0015's *deferred* step — removing the raw-``Path`` signatures from ``core/store.py``
+and ``core/projects.py`` so there is nothing for any spelling to reach. Until that lands,
+this check is what stops the **ordinary** reintroduction (a new module reaching for a
+familiar accessor), and it should be read as exactly that much. See spec §10 and
+ADR-0015, which state the same limit in the same words.
+
 **What is deliberately *not* matched** (and why the contract is scoped to accessors,
 not "any store path from a bare root"): appending a subdir to a *handle-derived* path
 (``handle.memory_dir(p) / "nodes"``) is the sanctioned pattern; and a bare
@@ -253,6 +282,47 @@ class _Visitor(ast.NodeVisitor):
         if node.value is not None:
             self._bind_alias([node.target], node.value)
         self.generic_visit(node)
+
+    # --- parameter shadowing (Codex round 7) -------------------------------
+    #
+    # The alias sets are flat — this visitor has no symbol table — so a
+    # module-level `project_api = projects` made EVERY later `project_api` a module
+    # receiver, including a parameter that merely reuses the name:
+    #
+    #     project_api = projects                       # module level
+    #     def probe(project_api: StoreHandle, cwd):
+    #         return project_api.resolve_project(cwd)  # a HANDLE. Falsely flagged.
+    #
+    # That is a false positive on the sanctioned pattern, introduced by the round-6
+    # alias fix — and a guard that fails legitimate code is worse than one that
+    # misses, because the fix for a false positive is to stop trusting the guard.
+    # Un-binding a shadowed name for the function's own subtree costs a few lines
+    # and removes the class. It is NOT general scope-awareness: a nested rebinding,
+    # a comprehension variable or a class-body shadow are still flat. The contract
+    # in the docstring says so rather than implying otherwise.
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        a = node.args
+        params = {
+            arg.arg
+            for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+            if arg is not None
+        }
+        shadowed_store = self.store_names & params
+        shadowed_projects = self.projects_names & params
+        self.store_names -= shadowed_store
+        self.projects_names -= shadowed_projects
+        try:
+            self.generic_visit(node)
+        finally:
+            self.store_names |= shadowed_store
+            self.projects_names |= shadowed_projects
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
 
     def _flag(self, lineno: int, name: str, detail: str) -> None:
         if (self.relpath, name) in ALLOW:

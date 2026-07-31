@@ -155,6 +155,22 @@ shape recurs:
    deliberately: a second guard above could disagree with the one below, and two
    containment definitions that can drift is the failure this ADR's whole design
    avoids.
+2b. **And the enforcement model cannot be made universal one spelling at a time**
+   _(round 7)._ Closing (2) by listing the names was still not enough: a **reassigned
+   module alias** (`project_api = projects`) reached the helper with the checker printing
+   OK, and closing *that* left **tuple unpacking** and a **class-held alias** — while the
+   alias fix itself introduced a **false positive** on parameter shadowing, flagging the
+   sanctioned `handle.load_registry()` pattern. Three rounds, three more spellings. The
+   conclusion recorded here deliberately is that **the claim was wrong, not just the
+   code**: an AST checker with no scope or dataflow semantics cannot support a universal
+   "omission is impossible / no false positives" contract, and adding one form per review
+   round does not converge on one. So step 5 is now described everywhere — here, in the
+   guard's own docstring, in spec §10 and in G1 — as a **conservative, enumerated
+   syntactic regression guard** with its residuals named. **The unavoidability guarantee
+   rests on the deferred signature-removal step below, not on this check.** If that step
+   is ever cancelled rather than deferred, this ADR's core claim needs revisiting, not
+   another alias form.
+
 2. **The enforcement model must be able to SEE the exemption.** The first fix promoted
    `_registry_path` to a public `registry_path` so the guard could name the file it was
    proving. But `scripts/check_store_chokepoint.py` matches accessors **by name**, and
@@ -267,7 +283,9 @@ mapping `schema is None` → "not initialized" (warn), `schema > MAX` → "unsup
   never a startup failure. **This ADR is the proposal; the spec appendix is the
   law** — fold these in when implementing.
 - **Follow-up for known-gaps.** On accept, mark G1 `fixed` (link the migration PRs)
-  once step 4 lands; the CI check (step 5) is what keeps it fixed.
+  once step 4 lands; the CI check (step 5) is what keeps the *ordinary* reintroduction
+  out — see the round-7 note above for what it does and does not prove, and why the
+  deferred signature removal is still the load-bearing part.
 
 ## Alternatives considered
 

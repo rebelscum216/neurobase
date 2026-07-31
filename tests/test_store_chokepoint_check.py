@@ -347,6 +347,78 @@ def test_an_unrelated_assignment_does_not_become_a_receiver() -> None:
     assert _details("webui/other.py", src) == []
 
 
+def test_a_shadowing_parameter_is_not_treated_as_the_module_alias() -> None:
+    """The false positive the alias fix introduced (Codex round 7).
+
+    The alias sets are flat, so a module-level `project_api = projects` made every
+    later `project_api` a module receiver — including a parameter that merely reuses
+    the name, whose value is a validated `StoreHandle`. That flagged
+    `project_api.resolve_project(cwd)`: **the sanctioned pattern this guard exists to
+    push people toward.** A guard that fails legitimate code is worse than one that
+    misses, because the response to a false positive is to stop trusting the guard."""
+    src = (
+        "from neurobase.core import projects\n"
+        "from neurobase.core.store_handle import StoreHandle\n\n"
+        "project_api = projects\n\n"
+        "def probe(project_api: StoreHandle, cwd):\n"
+        "    return project_api.resolve_project(cwd)\n"
+    )
+    assert _details("webui/other.py", src) == []
+
+
+def test_a_shadowing_parameter_is_handled_for_async_functions_too() -> None:
+    src = (
+        "from neurobase.core import projects\n\n"
+        "project_api = projects\n\n"
+        "async def probe(project_api, cwd):\n"
+        "    return project_api.resolve_project(cwd)\n"
+    )
+    assert _details("adapters/x.py", src) == []
+
+
+def test_the_shadow_does_not_leak_past_the_function() -> None:
+    """The un-binding is scoped to that function's subtree and restored after, so
+    shadowing in one function cannot launder a real alias use in the next."""
+    src = (
+        "from neurobase.core import projects\n\n"
+        "project_api = projects\n\n"
+        "def shadowed(project_api):\n"
+        "    return project_api\n\n"
+        "def after(root):\n"
+        "    return project_api.load_registry(root)\n"
+    )
+    details = _details("webui/other.py", src)
+    assert len(details) == 1 and "projects.load_registry" in details[0]
+
+
+def test_known_static_misses_are_recorded_not_caught() -> None:
+    """The honest contract, made executable (Codex P2-SAFETY-SECURITY-013, round 7).
+
+    This guard is a **conservative, enumerated syntactic regression guard**, not proof
+    that raw-root access is impossible. Three review rounds each found one more
+    lint-clean spelling that reached a listed accessor with the check printing OK, so
+    the limit is now stated rather than the guarantee re-asserted — in the guard's
+    docstring, spec §10, ADR-0015 and G1.
+
+    These two forms are the recorded residual. Asserting them keeps the documentation
+    honest **and self-invalidating**: if someone later makes the checker scope- and
+    dataflow-aware, this test fails loudly and the four prose sites must be updated
+    with it. It is a record of a known limit, never an endorsement of it — the real
+    guarantee is ADR-0015's deferred removal of the raw-`Path` signatures."""
+    tuple_unpacking = (
+        "from neurobase.core import projects\n\n"
+        "project_api, ignored = projects, None\n\n"
+        "def probe(root):\n    return project_api._registry_path(root)\n"
+    )
+    class_attribute = (
+        "from neurobase.core import projects\n\n"
+        "class API:\n    module = projects\n\n"
+        "def probe(root):\n    return API.module._registry_path(root)\n"
+    )
+    assert _details("webui/other.py", tuple_unpacking) == []
+    assert _details("webui/other.py", class_attribute) == []
+
+
 def test_doctor_registry_is_contained_is_allowlisted() -> None:
     """Doctor's no-handle branch must be able to tell an uncontained registry from an
     absent one even when ``store.toml`` is corrupt, so it has no handle to ask."""

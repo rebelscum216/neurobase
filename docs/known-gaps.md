@@ -161,8 +161,17 @@ config-backup facility (`backups.backup_files`/`restore_backup`), a schema-indep
 maintenance exception (opaque config-file copies to/from `<root>/backups/`, safe on any
 schema). The literal removal of the raw-`Path` `store.py`/`projects.py` signatures
 (they remain the low-level implementation the handle methods delegate to, and the test
-suite's store-setup helpers) is deferred; the CI guard is what makes production
-accessor-level omission impossible in the meantime.
+suite's store-setup helpers) is deferred. **That deferral is where the residual risk
+lives, and the CI guard does not remove it** (Codex `P2-SAFETY-SECURITY-013`, PR #11
+rounds 5–7): the guard is a *conservative, enumerated syntactic regression guard*, not a
+proof of impossibility. Three review rounds each found one more lint-clean spelling that
+reached a listed accessor while the check printed OK — a public path helper, a reassigned
+module alias, then tuple unpacking. Recorded static misses: tuple unpacking, a class-held
+alias, a named-expression alias, and an alias bound before its import in traversal order;
+rebinding an alias to a non-module is a false positive (parameter shadowing is handled).
+So the guard stops the **ordinary** reintroduction — a new module reaching for a familiar
+accessor — and the signature removal is what would make omission actually impossible.
+See spec §10 and ADR-0015 for the same limit in the same words.
 
 **Residual gaps — CLOSED by ADR-0015 step 4d** (`docs/reviews/2026-07-23-lifecycle-guards.md`).
 The step-5 review (Codex, round 2) found two lifecycle paths the accessor conversion

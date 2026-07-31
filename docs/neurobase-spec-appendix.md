@@ -1010,7 +1010,8 @@ schema-independent by design — see the maintenance exception below.
 
 **Enforcement.** Production store-tree and registry access (`src/neurobase/`) goes
 through `open_store(...)` + a `StoreHandle`. The CI guard
-`scripts/check_store_chokepoint.py` fails the gate when a module **outside** the three
+`scripts/check_store_chokepoint.py` fails the gate on the enumerated spellings (see the
+limits below) when a module **outside** the three
 implementation modules (`core/store.py`, `core/store_handle.py`, `core/projects.py`)
 calls a raw-`root` store/registry **accessor** — `memory_dir`, `ensure_tree`,
 `list_raw` / `list_curated` / `list_tombstoned`, `write_raw`, `upsert_curated`,
@@ -1022,8 +1023,26 @@ import) — or references the `store.toml` / `registry.toml` metadata filenames.
 guard keys on those accessors and literals, **not** on path shape: a handle-derived
 `handle.memory_dir(p) / "nodes"` is fine, and a bare `root / "projects" / … / "memory"`
 layout is not shape-distinguishable from the Claude app's own
-`~/.claude/projects/<x>/memory`, so it is not matched (the accessor contract is exactly
-what is mechanically enforceable without false positives).
+`~/.claude/projects/<x>/memory`, so it is not matched.
+
+**What that guard does and does not prove.** It is a **conservative, enumerated
+syntactic regression guard**: it recognizes the listed accessor names through an
+enumerated set of receiver spellings (attribute, dotted module, direct/relative/aliased
+import, and simple module aliases bound by assignment). It is **not** a proof that
+raw-`root` access is impossible, and it is **not** free of false positives. Three review
+rounds each surfaced one further lint-clean spelling that reached a listed accessor while
+the check printed OK — a public path helper, a reassigned module alias, then tuple
+unpacking — which is why this now states the limit instead of re-asserting the guarantee.
+Recorded residuals: **tuple unpacking**, a **class-held alias**, a named-expression
+alias, and an alias bound before its import in traversal order are static misses;
+rebinding a module alias to a non-module later in a file is a false positive (parameter
+shadowing specifically *is* handled, because it hit the sanctioned `handle.x()` pattern).
+Dynamic forms (`globals()[...]`, `importlib.import_module`) are out of scope; `import *`
+needs no handling because ruff rejects it (F403/F405) before the gate.
+**The unavoidability guarantee therefore rests on ADR-0015's deferred step** — removing
+the raw-`Path` signatures so there is nothing for any spelling to reach. Until that
+lands, this check is what stops the *ordinary* reintroduction, and should be read as
+exactly that much.
 
 Some raw-`root` constructions **remain** outside the accessor guard's coverage, in three
 kinds — none is an unguarded write to **schema-versioned store content** (`memory/`,

@@ -356,7 +356,7 @@ The single source of truth for what "CI green" means, invoked identically by `ma
   1. `("ruff check", ["uv", "run", "ruff", "check", "."])` — lint.
   2. `("ruff format --check", ["uv", "run", "ruff", "format", "--check", "."])` — formatting (check-only, does not rewrite files).
   3. `("mypy src tests", ["uv", "run", "mypy", "src", "tests"])` — type checking, run against both source and test code.
-  4. `("store-chokepoint", ["uv", "run", "python", "scripts/check_store_chokepoint.py"])` — the ADR-0015 guard that every store write goes through the chokepoint.
+  4. `("store-chokepoint", ["uv", "run", "python", "scripts/check_store_chokepoint.py"])` — the ADR-0015 regression guard that no production module reaches a raw-`root` store/registry accessor through one of the spellings it enumerates. It is a conservative syntactic check with recorded misses and false positives, not proof that the chokepoint is unavoidable — see the script's docstring and spec §10.
   5. `("pytest --cov", ["uv", "run", "pytest", "--cov=src/neurobase", "--cov-branch", "--cov-report=term-missing"])` — the test suite, run under coverage. Coverage rides along with the existing test run rather than adding a second pytest invocation. The floor lives in `pyproject.toml` (`[tool.coverage.report] fail_under`), so dropping below it exits non-zero and fails the gate exactly like a failing test.
   6. `("node --test tests/js", ["node", "--test", "tests/js/*.test.mjs"])` — the behaviour suite for the graph renderer's client-side JavaScript, which Python cannot execute. Added in Phase G after a source-assertion "test" stayed green while the complexity claim it named was false.
 

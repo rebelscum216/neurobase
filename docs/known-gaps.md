@@ -34,8 +34,12 @@ This file exists because nothing else in `docs/` was the right home for it:
 - **status:** fixed (ADR-0015 — the `StoreHandle` chokepoint; migration steps 1–5 +
   4d, `docs/reviews/2026-07-2*-*handle*.md`, `*-lifecycle-guards.md`). Every command that
   touches **schema-versioned store content** (`memory/`, `registry.toml`) now runs the
-  D11 guard: the store-tree/registry **accessor** class is closed and CI-enforced by
-  `scripts/check_store_chokepoint.py`, and the lifecycle commands open the appropriate
+  D11 guard: every production caller of the store-tree/registry **accessors** was moved
+  onto `open_store(...)` + handle methods, and `scripts/check_store_chokepoint.py` is a
+  conservative regression check that keeps the *ordinary* reintroduction out (it
+  enumerates spellings and has recorded misses — it is not exhaustive enforcement; the
+  unavoidability step, removing the raw-`Path` signatures, stays deferred — see
+  *Resolution*), and the lifecycle commands open the appropriate
   handle command-side (guided `init` = `WRITE`; `init --agent` = `READ`; `uninstall
   --purge-store` = `PURGE`). The config-backup facility is a schema-independent
   maintenance exception (opaque config copies; its non-purge-uninstall/`--restore-backup`

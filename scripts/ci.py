@@ -9,7 +9,7 @@ tool and uv has nothing to resolve for it:
     ruff check .                    # lint
     ruff format --check .           # formatting
     mypy src tests                  # types
-    check_store_chokepoint.py       # every store write goes through the chokepoint
+    check_store_chokepoint.py       # regression check: no enumerated raw-root accessor
     pytest --cov …                  # tests + coverage (fails under the pyproject floor)
     node --test tests/js/*.test.mjs # the shipped renderer's behaviour (see below)
 

@@ -36,8 +36,9 @@ are not sessions (matching the ranker's ``startswith("raw/")`` filter);
 Two deviations from the 2026-07-16 plan, both forced by what landed since:
 
 - ``memory_graph`` takes a **``StoreHandle``**, not a raw ``root: Path``. ADR-0015
-  made the handle the store chokepoint and ``scripts/check_store_chokepoint.py``
-  fails the gate on a raw-root accessor outside the three implementation modules —
+  made the handle the store chokepoint, and ``scripts/check_store_chokepoint.py``
+  fails the gate on the enumerated raw-root accessor spellings outside the three
+  implementation modules (a conservative regression check, not a proof) —
   ``core/graph.py`` is not one of them, and should not be: it is a *reader*, and a
   reader that skipped the schema guard is exactly what the chokepoint exists to
   prevent.

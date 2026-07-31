@@ -207,10 +207,18 @@ tolerance.
   `list_raw` / `list_curated` / `write_raw` / `upsert_curated` / `write_node` /
   `rebuild_index`, and the recommender's corpus/ledger accessors.
 - The raw-`Path` signatures are removed (not merely deprecated) — a lingering
-  overload re-arms the same footgun.
-- A **CI check** (AST-based) forbids constructing store paths from a bare root or
-  reading `registry.toml` / `store.toml` / `memory/` outside `core/store.py`,
-  `core/store_handle.py`, and `core/projects.py`.
+  overload re-arms the same footgun. **This step is deferred, not done** (see
+  *Consequences*): it is what would make the chokepoint genuinely unavoidable, and
+  until it lands the guarantee rests on it rather than on the CI check below.
+- A **CI check** (AST-based) fails the gate when a module outside `core/store.py`,
+  `core/store_handle.py` and `core/projects.py` names a raw-`root` store/registry
+  **accessor** through one of an *enumerated* set of receiver spellings, or writes a
+  `store.toml` / `registry.toml` literal. It keys on those names, **not** on path
+  shape — it does not detect store paths built from a bare root, because that shape is
+  indistinguishable from the Claude app's own `~/.claude/projects/<x>/memory`. It is a
+  conservative regression check with recorded static misses and false positives, not a
+  proof of unreachability; the residuals are enumerated in the guard's docstring, in
+  spec §10, and in G1.
 
 **D24 — MCP failures surface as structured tool errors (spec §13).**
 `build_server()` opens a `READ` handle. A newer-schema store must **not** raise at

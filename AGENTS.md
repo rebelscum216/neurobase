@@ -233,7 +233,7 @@ uv run pytest               # run the suite — the contract enforcer
 uv run ruff check .         # lint
 uv run ruff format .        # format
 uv run mypy src tests       # types (lenient to start)
-uv run python scripts/check_store_chokepoint.py   # every store write via the chokepoint
+uv run python scripts/check_store_chokepoint.py   # regression check: no enumerated raw-root accessor
 node --test 'tests/js/*.test.mjs'                 # the graph renderer's behaviour (Node 22+)
 uv run pre-commit install   # optional: enable the pre-commit hooks
 

@@ -347,48 +347,101 @@ def test_an_unrelated_assignment_does_not_become_a_receiver() -> None:
     assert _details("webui/other.py", src) == []
 
 
-def test_a_shadowing_parameter_is_not_treated_as_the_module_alias() -> None:
-    """The false positive the alias fix introduced (Codex round 7).
+def test_parameter_shadowing_is_a_recorded_false_positive() -> None:
+    """The known false positive, made executable (Codex P2-SAFETY-SECURITY-013, round 8).
 
-    The alias sets are flat, so a module-level `project_api = projects` made every
+    The alias sets are flat, so a module-level `project_api = projects` makes every
     later `project_api` a module receiver — including a parameter that merely reuses
-    the name, whose value is a validated `StoreHandle`. That flagged
-    `project_api.resolve_project(cwd)`: **the sanctioned pattern this guard exists to
-    push people toward.** A guard that fails legitimate code is worse than one that
-    misses, because the response to a false positive is to stop trusting the guard."""
-    src = (
+    the name, whose value is a validated `StoreHandle`. So the *sanctioned* pattern is
+    flagged when the parameter happens to share the alias's name.
+
+    Round 7 "fixed" this by un-binding the name for the whole `FunctionDef` subtree.
+    Round 8 removed that fix and this test inverted, because an AST subtree is not a
+    Python scope: the un-binding suppressed three real violation shapes (see the three
+    tests below) to silence one cosmetic failure — a strictly worse trade for a
+    regression guard. Renaming the parameter is the workaround; a symbol table is the
+    only real fix, and it is deliberately out of scope.
+
+    This is a characterization test, not a sanction: if the checker ever grows real
+    scope awareness these assertions fail loudly and the prose sites must move with
+    them."""
+    sync = (
         "from neurobase.core import projects\n"
         "from neurobase.core.store_handle import StoreHandle\n\n"
         "project_api = projects\n\n"
         "def probe(project_api: StoreHandle, cwd):\n"
         "    return project_api.resolve_project(cwd)\n"
     )
-    assert _details("webui/other.py", src) == []
-
-
-def test_a_shadowing_parameter_is_handled_for_async_functions_too() -> None:
-    src = (
+    asynchronous = (
         "from neurobase.core import projects\n\n"
         "project_api = projects\n\n"
         "async def probe(project_api, cwd):\n"
         "    return project_api.resolve_project(cwd)\n"
     )
-    assert _details("adapters/x.py", src) == []
+    # Lambda parameters were never covered by the round-7 fix either, so this spelling
+    # false-positived throughout — it is the same class, now stated as one.
+    lambda_form = (
+        "from neurobase.core import projects\n\n"
+        "project_api = projects\n\n"
+        "probe = lambda project_api, cwd: project_api.resolve_project(cwd)\n"
+    )
+    for src in (sync, asynchronous, lambda_form):
+        details = _details("webui/other.py", src)
+        assert len(details) == 1 and "projects.resolve_project" in details[0]
 
 
-def test_the_shadow_does_not_leak_past_the_function() -> None:
-    """The un-binding is scoped to that function's subtree and restored after, so
-    shadowing in one function cannot launder a real alias use in the next."""
+# --- what the round-7 shadow fix had suppressed (Codex round 8) -------------
+#
+# Each of these resolves in the *enclosing* scope, not under the parameter binding,
+# yet each lives under the `FunctionDef` node — which is why un-binding across that
+# subtree turned real violations into silent passes. They are lint-clean and
+# production-shaped: ruff rejects an accessor call in a *default* (B008), but not
+# these.
+
+
+def test_flags_an_accessor_in_a_decorator_of_a_shadowing_function() -> None:
+    """A decorator expression is evaluated in the enclosing scope, before the function
+    exists — the parameter of the function it decorates cannot shadow anything in it."""
+    src = (
+        "from neurobase.core import projects\n\n"
+        "ROOT = None\n"
+        "project_api = projects\n\n"
+        "@keep_decorator_input(project_api.resolve_project(ROOT, ROOT))\n"
+        "def decorated(project_api):\n"
+        "    return project_api\n"
+    )
+    details = _details("webui/other.py", src)
+    assert len(details) == 1 and "projects.resolve_project" in details[0]
+
+
+def test_flags_an_accessor_in_an_eagerly_evaluated_annotation() -> None:
+    """An annotation on the very parameter that shadows the alias still resolves in the
+    enclosing scope (absent `from __future__ import annotations`)."""
+    src = (
+        "from neurobase.core import projects\n\n"
+        "ROOT = None\n"
+        "project_api = projects\n\n"
+        "def annotated(project_api: project_api.resolve_project(ROOT, ROOT)):\n"
+        "    return project_api\n"
+    )
+    details = _details("webui/other.py", src)
+    assert len(details) == 1 and "projects.resolve_project" in details[0]
+
+
+def test_flags_an_accessor_reached_through_a_nested_global_declaration() -> None:
+    """`global` explicitly bypasses the enclosing function's parameter binding, so the
+    inner reference is the module-level alias however the outer parameter is named."""
     src = (
         "from neurobase.core import projects\n\n"
         "project_api = projects\n\n"
-        "def shadowed(project_api):\n"
-        "    return project_api\n\n"
-        "def after(root):\n"
-        "    return project_api.load_registry(root)\n"
+        "def outer(project_api):\n"
+        "    def inner(root, cwd):\n"
+        "        global project_api\n"
+        "        return project_api.resolve_project(root, cwd)\n"
+        "    return inner\n"
     )
     details = _details("webui/other.py", src)
-    assert len(details) == 1 and "projects.load_registry" in details[0]
+    assert len(details) == 1 and "projects.resolve_project" in details[0]
 
 
 def test_known_static_misses_are_recorded_not_caught() -> None:
@@ -402,8 +455,8 @@ def test_known_static_misses_are_recorded_not_caught() -> None:
 
     These two forms are the recorded residual. Asserting them keeps the documentation
     honest **and self-invalidating**: if someone later makes the checker scope- and
-    dataflow-aware, this test fails loudly and the four prose sites must be updated
-    with it. It is a record of a known limit, never an endorsement of it — the real
+    dataflow-aware, this test fails loudly and every prose site describing the limit
+    must be updated with it. It is a record of a known limit, never an endorsement of it — the real
     guarantee is ADR-0015's deferred removal of the raw-`Path` signatures."""
     tuple_unpacking = (
         "from neurobase.core import projects\n\n"

@@ -5,9 +5,12 @@ The ``StoreHandle`` chokepoint (ADR-0015) only closes G1 if it is *unavoidable*:
 production code must reach the store through a validated handle, never by calling a
 raw-``root`` store/registry accessor or referencing the store-metadata filenames.
 Steps 3/4a/4b converted every production caller of the store-tree/registry **accessors**
-onto ``open_store(...)`` + handle methods; this check is what keeps them there — a new
-call site that reintroduces a raw-``root`` accessor fails CI instead of silently
-re-opening the hole. (The ``init --agent`` and ``uninstall --purge-store`` lifecycle
+onto ``open_store(...)`` + handle methods; this check is what catches the **ordinary**
+regression — a new call site that reintroduces a raw-``root`` accessor through one of
+the *enumerated* spellings below fails CI instead of silently re-opening the hole. It
+does not make the hole unreachable; see "What this check IS" below for the spellings it
+is known to miss, and where the real guarantee comes from.
+(The ``init --agent`` and ``uninstall --purge-store`` lifecycle
 commands run the D11 guard command-side — a ``READ`` handle before installing hooks, a
 ``PURGE`` handle before deleting — ADR-0015 step 4d. The config-backup facility
 (``backups.backup_files``/``restore_backup``) is a schema-independent maintenance
@@ -17,9 +20,9 @@ purge deliberately skips the backup entirely — see spec §10.)
 **Scope (deliberately ``src/`` only).** The raw-``root`` functions still *exist* on
 ``core.store`` / ``core.projects`` — the ADR's "remove the signatures" step is
 deferred (they remain the low-level implementation the handle methods delegate to,
-and the test suite's store-setup helpers). This guard enforces the invariant where
-it matters — production modules under ``src/neurobase/`` — and exempts the three core
-modules that ARE the store/registry implementation.
+and the test suite's store-setup helpers). This guard runs where it matters —
+production modules under ``src/neurobase/`` — and exempts the three core modules that
+ARE the store/registry implementation.
 
 **What is forbidden** outside the exempt modules — the *accessor* contract, stated to
 exactly match what is mechanically enforceable:
@@ -31,24 +34,32 @@ exactly match what is mechanically enforceable:
   direct/relative import (``from ..core.store import memory_dir``);
 - the store-metadata filename literals ``"store.toml"`` / ``"registry.toml"``.
 
-**What this check IS — and what it is not** _(Codex P2-SAFETY-SECURITY-013, round 7)._
+**What this check IS — and what it is not** _(Codex P2-SAFETY-SECURITY-013, rounds 7–8)._
 This is a **conservative, enumerated syntactic regression guard**. It recognizes the
 listed accessor names reached through the *enumerated* receiver spellings below. It is
 **not** a proof that raw-``root`` access is impossible, and it is **not** free of false
 positives. Three rounds of review each found one more lint-clean spelling that reached a
 listed accessor with this check printing OK (a public path helper, a reassigned module
-alias, then tuple unpacking), which is the evidence for stating the limit rather than
-re-asserting the guarantee:
+alias, then tuple unpacking); a fourth found that the *fix* for a false positive had
+introduced three new misses of its own. That is the evidence for stating the limit
+rather than re-asserting the guarantee:
 
 - **Known static misses** — reachable, lint-clean, and NOT flagged: **tuple unpacking**
   (``project_api, _ = projects, None``), a **class-held alias** (``class API: module =
   projects``), a named-expression alias, and an alias bound *before* its import in
   traversal order. Making these fail would need a scope- and dataflow-aware
   implementation; adding one spelling per review round demonstrably does not converge.
-- **Known false positive** — the alias sets are flat, so a name rebound to a
-  non-module later in a file stays treated as the module. (Function-*parameter*
-  shadowing is handled — see ``_visit_function`` — because it hit the sanctioned
-  ``handle.load_registry()`` pattern; the general case is not.)
+- **Known false positives** — the alias sets are flat, with no symbol table:
+  - a name rebound to a non-module later in a file stays treated as the module;
+  - a **parameter that merely reuses an alias name** — of a function, an async
+    function, or a lambda — is still read as the module, so the *sanctioned*
+    ``handle.resolve_project(...)`` pattern is flagged when the parameter happens to be
+    called ``project_api``. Round 7 special-cased this by un-binding the name for the
+    ``FunctionDef`` subtree; round 8 **removed** that, because an AST subtree is not a
+    Python scope — decorators, defaults and eager annotations resolve in the enclosing
+    scope, and a nested ``global`` bypasses the parameter, so the un-binding suppressed
+    three real violation shapes to fix one cosmetic failure. Renaming the parameter is
+    the workaround; a symbol table is the only real fix, and it is out of scope here.
 - **Out of scope by design:** anything dynamic — ``globals()[...]``,
   ``importlib.import_module``. ``import *`` needs no handling here: ruff rejects it with
   F403/F405, so it cannot reach a green gate.
@@ -283,46 +294,34 @@ class _Visitor(ast.NodeVisitor):
             self._bind_alias([node.target], node.value)
         self.generic_visit(node)
 
-    # --- parameter shadowing (Codex round 7) -------------------------------
+    # --- parameter shadowing is NOT handled (Codex P2-SAFETY-SECURITY-013, round 8) ---
     #
-    # The alias sets are flat — this visitor has no symbol table — so a
-    # module-level `project_api = projects` made EVERY later `project_api` a module
-    # receiver, including a parameter that merely reuses the name:
+    # Round 7 tried to fix the false positive below by un-binding a shadowed name for
+    # the whole `FunctionDef` subtree. That was WRONG, and round 8 removed it: **an AST
+    # subtree is not a Python scope.** A function's decorators, defaults and eagerly
+    # evaluated annotations resolve in the *enclosing* scope before the function object
+    # exists, and a nested `global` explicitly bypasses the parameter binding — yet all
+    # of them live under the `FunctionDef` node. Un-binding therefore SUPPRESSED real
+    # violations (verified false negatives, each lint-clean and production-shaped):
     #
-    #     project_api = projects                       # module level
-    #     def probe(project_api: StoreHandle, cwd):
-    #         return project_api.resolve_project(cwd)  # a HANDLE. Falsely flagged.
+    #     project_api = projects
+    #     @keep_decorator_input(project_api.resolve_project(ROOT, ROOT))   # enclosing scope
+    #     def decorated(project_api): ...
     #
-    # That is a false positive on the sanctioned pattern, introduced by the round-6
-    # alias fix — and a guard that fails legitimate code is worse than one that
-    # misses, because the fix for a false positive is to stop trusting the guard.
-    # Un-binding a shadowed name for the function's own subtree costs a few lines
-    # and removes the class. It is NOT general scope-awareness: a nested rebinding,
-    # a comprehension variable or a class-body shadow are still flat. The contract
-    # in the docstring says so rather than implying otherwise.
-
-    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        a = node.args
-        params = {
-            arg.arg
-            for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
-            if arg is not None
-        }
-        shadowed_store = self.store_names & params
-        shadowed_projects = self.projects_names & params
-        self.store_names -= shadowed_store
-        self.projects_names -= shadowed_projects
-        try:
-            self.generic_visit(node)
-        finally:
-            self.store_names |= shadowed_store
-            self.projects_names |= shadowed_projects
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._visit_function(node)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._visit_function(node)
+    #     def annotated(project_api: project_api.resolve_project(ROOT, ROOT)): ...
+    #
+    #     def outer(project_api):
+    #         def inner(root, cwd):
+    #             global project_api                    # bypasses the parameter
+    #             return project_api.resolve_project(root, cwd)
+    #
+    # Trading three false negatives for one false positive is the wrong direction for a
+    # regression guard, and making it correct means the scope-aware implementation this
+    # check deliberately is not. So parameter shadowing — of an ordinary function, an
+    # async function, or a lambda (whose parameters the round-7 fix never covered
+    # anyway, so lambdas false-positived throughout) — is recorded as a known FALSE
+    # POSITIVE class in the module docstring, alongside the flat-alias-set rebinding it
+    # is a special case of. The honest limit, not a suppressed one.
 
     def _flag(self, lineno: int, name: str, detail: str) -> None:
         if (self.relpath, name) in ALLOW:
@@ -392,7 +391,9 @@ def main() -> int:
         return 1
 
     print(
-        "store-chokepoint: OK — no raw-root store/registry access outside the exempt core modules."
+        "store-chokepoint: OK — no raw-root store/registry access in the enumerated "
+        "spellings\n(a conservative regression check, not proof of unreachability — "
+        "see the module docstring)."
     )
     return 0
 

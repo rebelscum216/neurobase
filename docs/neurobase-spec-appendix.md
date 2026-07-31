@@ -1035,8 +1035,11 @@ the check printed OK — a public path helper, a reassigned module alias, then t
 unpacking — which is why this now states the limit instead of re-asserting the guarantee.
 Recorded residuals: **tuple unpacking**, a **class-held alias**, a named-expression
 alias, and an alias bound before its import in traversal order are static misses;
-rebinding a module alias to a non-module later in a file is a false positive (parameter
-shadowing specifically *is* handled, because it hit the sanctioned `handle.x()` pattern).
+rebinding a module alias to a non-module later in a file is a false positive, as is a
+**parameter** (of a function, async function, or lambda) that merely reuses an alias
+name — a round-7 special case for that was removed in round 8, because un-binding the
+name across the whole `FunctionDef` AST suppressed decorators, defaults, eager
+annotations and a nested `global`, which resolve outside the parameter's scope.
 Dynamic forms (`globals()[...]`, `importlib.import_module`) are out of scope; `import *`
 needs no handling because ruff rejects it (F403/F405) before the gate.
 **The unavoidability guarantee therefore rests on ADR-0015's deferred step** — removing

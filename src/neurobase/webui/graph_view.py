@@ -181,9 +181,20 @@ def _artifact_state(root: Path, doc: store.Document, slug: str) -> str | None:
     error must cost that one node its badge, not the whole graph. ``None`` reads
     downstream as "state unknown", which is the truthful answer and the one the UI
     already has to handle for a proposal that was never accepted.
+
+    **``UnsupportedSchemaError`` is the one exception that must NOT be softened.**
+    ``artifact_state`` re-derives candidate targets under every registered project
+    root, which **reopens the store** — so unlike every other read on this route,
+    a D11 schema refusal can be raised *here*, after the request-boundary
+    ``open_store`` already succeeded (the store can advance mid-request). Spec §10
+    /D11 says the binary refuses to operate on a newer schema and §14 requires the
+    UI to run that check; swallowing it let the front door keep reading and
+    rendering after the boundary said stop (Codex P1-SAFETY-SECURITY-007).
     """
     try:
         return proposals.artifact_state(root, doc, slug)
+    except store.UnsupportedSchemaError:
+        raise  # D11: the refusal is the point — never degrade it to a badge
     except Exception:  # noqa: BLE001 - one node's badge is never worth the home page
         return None
 

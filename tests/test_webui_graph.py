@@ -265,56 +265,12 @@ def test_javascript_object_keys_do_not_blank_the_canvas(tmp_path: Path) -> None:
     assert client.get("/graph", params={"node": "__proto__"}).status_code == 200
 
 
-def test_the_client_side_lookup_maps_are_null_prototype(tmp_path: Path) -> None:
-    """A **source** assertion, not a behavioural one: there is no JS runtime in
-    this gate, so the guard above proves the ids reach the page intact but cannot
-    prove the client survives them. This pins the one line that makes it true, so
-    replacing `Object.create(null)` with `{}` fails here rather than in a browser.
-    """
-    template = Path(graph_view.__file__).parent / "templates" / "graph.html"
-    source = template.read_text(encoding="utf-8")
-    for name in ("byId", "adj", "cells", "edgesByNode"):
-        assert re.search(rf"\b{name}\s*=\s*(\w+\s*\|\|\s*)?Object\.create\(null\)", source), (
-            f"{name} must be a null-prototype map"
-        )
-
-
-def _graph_template() -> str:
-    return (Path(graph_view.__file__).parent / "templates" / "graph.html").read_text(
-        encoding="utf-8"
-    )
-
-
-def test_repulsion_bounds_bucket_occupancy_not_just_cells_searched(tmp_path: Path) -> None:
-    """**Source assertion — the honest label.** This gate has no JS runtime, so
-    nothing here executes the renderer; see the revision note. It pins the one
-    invariant that makes the O(n) claim true.
-
-    The uniform grid bounds how many *cells* are searched, not how many nodes land
-    in one, and the layout deliberately packs each project into its own cluster —
-    so a dense cluster degenerates toward O(n²). Measured on the review host
-    before the cap: 16.2M pair comparisons (346ms) at 2,100 nodes, 60.8M (1.13s)
-    at 4,000 (Codex P2-UX-API-CONTRACT-005).
-    """
-    source = _graph_template()
-    assert "MAX_NEIGHBOURS" in source, "per-node repulsion must be capped"
-    # The cap has to gate the inner pair loop, not merely be declared.
-    assert re.search(r"b < bucket\.length && seen < MAX_NEIGHBOURS", source)
-    assert re.search(r"seen\+\+", source)
-
-
-def test_ambient_motion_is_time_limited_so_an_idle_graph_parks(tmp_path: Path) -> None:
-    """**Source assertion**, same caveat. `frame()` used to reschedule
-    unconditionally for anyone without `prefers-reduced-motion`, so an untouched
-    visible graph repainted at display refresh rate forever — the "parks itself"
-    comment above it was simply untrue."""
-    source = _graph_template()
-    assert re.search(r"idleFrames > 2 && \(reduced \|\| lastT >= driftUntil\)", source), (
-        "the park condition must apply to non-reduced-motion users too"
-    )
-    assert re.search(r"driftUntil = now\(\) \+ DRIFT_MS", source), "interaction must re-arm drift"
-    # Every interaction path must wake unconditionally now that all users park.
-    assert "if (reduced) wake()" not in source
+# The three source assertions that used to sit here are gone. They regexed
+# `graph.html` for constants and stayed green while the complexity claim one of
+# them named was false (Codex P2-TEST-GAP-006, round 2). The renderer now has a
+# real behaviour suite that executes the shipped script — `tests/js/`, run by
+# `node --test` as a required step in `scripts/ci.py`. The Python side keeps only
+# what Python can actually observe: that the ids reach the page intact (above).
 
 
 def test_payload_is_not_html_escaped_into_invalid_json(client: TestClient) -> None:
@@ -427,6 +383,71 @@ def test_a_symlinked_raw_dir_leaks_no_session_identity(tmp_path: Path) -> None:
     payload = _payload(html)
     assert _kinds(payload, "session") == []
     assert len(_kinds(payload, "fact")) == 1  # the real fact is still drawn
+
+
+def test_a_symlinked_curator_journal_mints_no_session_or_edge(tmp_path: Path) -> None:
+    """The journal is a **fourth** enumeration channel, and the worst of the four:
+    it needs no external file to point at. Its `consumed` entries become resolved
+    `SessionNode` identity directly, and its `edges` mint **journal**-sourced
+    attribution — the highest-trust edge the graph draws, the one the inspector
+    labels as recorded-by-the-curator (Codex P2-SAFETY-SECURITY-001, round 2).
+    Round 2's fix skipped it on an "inside the store by construction" argument
+    that a symlink disproves."""
+    root = tmp_path / "store"
+    store.ensure_tree(PROJECT, root)
+    projects.register_project(root, tmp_path / PROJECT, slug=PROJECT)
+    store.upsert_curated(root, PROJECT, "real-fact", "an ordinary in-store fact")
+
+    outside = tmp_path / "outside-journal.jsonl"
+    outside.write_text(
+        json.dumps(
+            {
+                "fold": {
+                    "consumed": [
+                        {
+                            "file": "2026-07-01T09-00-00Z_claude_deadbeef.md",
+                            "session_id": "EXTERNAL-JOURNAL-SID",
+                            "agent": "EXTERNAL-JOURNAL-AGENT",
+                            "captured_at": "2031-01-01T00:00:00Z",
+                        }
+                    ],
+                    "edges": {"real-fact": ["2026-07-01T09-00-00Z_claude_deadbeef.md"]},
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    journal = root / "projects" / PROJECT / "memory" / store.CURATOR_LOG
+    journal.unlink(missing_ok=True)
+    journal.symlink_to(outside)
+
+    html = (
+        TestClient(build_app(root), base_url="http://127.0.0.1:8765").get("/graph?orphans=1").text
+    )
+    for secret in ("EXTERNAL-JOURNAL-SID", "EXTERNAL-JOURNAL-AGENT", "2031-01-01"):
+        assert secret not in html
+    payload = _payload(html)
+    assert _kinds(payload, "session") == []
+    assert payload["edges"] == [], "an out-of-store journal must mint no attribution"
+    assert len(_kinds(payload, "fact")) == 1  # the real fact still renders
+
+
+def test_an_ordinary_journal_still_supplies_its_edges(tmp_path: Path) -> None:
+    """The other half — the containment check must not cost Slice A its journal."""
+    root = tmp_path / "store"
+    store.ensure_tree(PROJECT, root)
+    projects.register_project(root, tmp_path / PROJECT, slug=PROJECT)
+    raw = _capture(root, "sess-folded", _BODY)
+    store.upsert_curated(root, PROJECT, "folded", "x")
+    journal = root / "projects" / PROJECT / "memory" / store.CURATOR_LOG
+    journal.write_text(
+        json.dumps({"fold": {"edges": {"folded": [raw.name]}}}) + "\n", encoding="utf-8"
+    )
+
+    payload = graph_view.graph_payload(open_store(root, StoreMode.READ), root)
+    edge = next(e for e in payload["edges"] if e["kind"] == "session")
+    assert edge["source"] == "journal"
 
 
 def test_containment_holds_at_the_core_graph_boundary(tmp_path: Path) -> None:
@@ -673,6 +694,30 @@ def test_a_never_accepted_proposal_has_no_artifact_state(store_root: Path) -> No
     payload = graph_view.graph_payload(handle, store_root)
     node = _node(payload, "p:just-proposed")
     assert node["artifact"] is None and node["status"] == "proposed"
+
+
+def test_a_schema_refusal_during_liveness_is_not_softened_into_a_badge(
+    store_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D11 is a refusal, not a degradation. `artifact_state` **reopens the store**
+    while re-deriving candidate targets, so a newer-schema `store.toml` can raise
+    `UnsupportedSchemaError` from *inside* composition — after the request-boundary
+    `open_store` already succeeded. The fail-soft wrapper swallowed it and the
+    route's broad guard would have swallowed a re-raise too, so the front door kept
+    reading and rendering after spec §10/§14 said stop (Codex
+    P1-SAFETY-SECURITY-007)."""
+
+    def refuse(*_args: object, **_kwargs: object) -> str:
+        raise store.UnsupportedSchemaError("store.toml: schema 99 is newer than this binary")
+
+    _proposal(store_root, "accepted-one", status="accepted")
+    monkeypatch.setattr(graph_view.proposals, "artifact_state", refuse)
+    client = TestClient(build_app(store_root), base_url="http://127.0.0.1:8765")
+
+    response = client.get("/graph")
+    assert response.status_code == 409, "a D11 refusal must reach the typed schema page"
+    assert "accepted-one" not in response.text, "no store state may render after the refusal"
+    assert "could not be read" not in response.text, "409 is not the degraded graph"
 
 
 def test_an_unreadable_artifact_probe_costs_one_badge_not_the_page(

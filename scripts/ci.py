@@ -8,6 +8,7 @@ is identical whether you invoke it locally or on a GitHub Actions runner:
     ruff format --check .   # formatting
     mypy src tests          # types
     pytest --cov …          # tests + coverage (fails under the pyproject floor)
+    node --test tests/js/   # the shipped renderer's behaviour (see below)
 
 Both local dev (``make ci`` / this script) and every matrix job in
 ``.github/workflows/ci.yml`` call this file, so the two can never drift: add or
@@ -61,15 +62,37 @@ CHECKS: list[tuple[str, list[str]]] = [
             "--cov-report=term-missing",
         ],
     ),
+    # `templates/graph.html` ships ~700 lines of client logic that Python cannot
+    # execute, and round 2 of the Phase G review proved source assertions about it
+    # are worthless: a regex test stayed green while the O(n) layout claim it
+    # named was false at 66.7M scans / 4,000 nodes. So the renderer gets a real
+    # behaviour gate — bounded layout work, park/wake scheduling, prototype-key
+    # safety — driven against the shipped script.
+    #
+    # Node is a DECLARED dependency of the gate, not an optional extra: a test
+    # that skips when a runtime is missing is vacuity with extra steps, which is
+    # the exact failure this suite exists to close. `main()` fails the gate if
+    # node is absent rather than passing quietly. Still zero-install — `node
+    # --test` and two files, no npm, no package.json, no node_modules.
+    ("node --test tests/js", ["node", "--test", "tests/js/*.test.mjs"]),
 ]
+
+# Tools the gate cannot run without. `uv` has always been one; `node` became one
+# when the renderer got a behaviour suite (above).
+REQUIRED_TOOLS = {
+    "uv": "https://docs.astral.sh/uv/",
+    "node": "https://nodejs.org/ (v18+, for `node --test` — no npm install needed)",
+}
 
 
 def main() -> int:
-    if shutil.which("uv") is None:
-        print(
-            "error: `uv` is not on PATH. Install it — https://docs.astral.sh/uv/ — then re-run.",
-            file=sys.stderr,
-        )
+    missing = [(tool, url) for tool, url in REQUIRED_TOOLS.items() if shutil.which(tool) is None]
+    if missing:
+        for tool, url in missing:
+            print(
+                f"error: `{tool}` is not on PATH. Install it — {url} — then re-run.",
+                file=sys.stderr,
+            )
         return 127
 
     results: list[tuple[str, bool, float]] = []

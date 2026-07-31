@@ -298,8 +298,32 @@
     n.y = c[1] + Math.sin(t) * rr;
   });
 
+  /* Own cell first, then the eight neighbours — see the note in the loop. Fixed
+     order, so the layout is reproducible. */
+  var OFFSETS = [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1],
+                 [-1, -1], [1, -1], [-1, 1], [1, 1]];
+  /* The hard bound on grid entries one node may examine per iteration, so layout
+     work is O(nodes · ITER · MAX_SCAN) whatever the density.
+
+     64 with ITER=30 rather than a tighter cap over more passes: seeing more of the
+     neighbourhood per pass converges faster than sweeping a narrow view repeatedly.
+     Measured across the (ITER, MAX_SCAN) grid at 2,100 nodes — 90×48 → 362ms/364
+     overlapping pairs, 45×48 → 181ms/377, 30×64 → 145ms/241. The chosen pair is
+     the only one that beats the ORIGINAL uncapped loop on both axes at once
+     (346ms and 572 overlapping pairs), so bounding the work also improved the
+     picture instead of trading it away. */
+  var MAX_SCAN = 64;
+  /* Total grid entries examined during layout. Exists so the scaling test can
+     assert a real bound on work rather than regex the source for a constant —
+     the round-2 lesson: a source assertion stayed green while the complexity
+     claim it "guarded" was false. Read by the test harness, harmless in a
+     browser. */
+  var RELAX_SCANS = 0;
+
+  /* Relaxation. 30 passes, each bounded — see MAX_SCAN above for why the pass
+     count came down when the per-pass view widened. */
   (function relax() {
-    var ITER = 90;
+    var ITER = 30;
     for (var it = 0; it < ITER; it++) {
       var k = 1 - it / ITER;             // cooling factor
       // spring along edges
@@ -315,23 +339,39 @@
          cell is the interaction radius, so only the 9 cells around a node can
          hold anything close enough to push it.
 
-         The grid bounds how many cells are *searched*; it does not bound how many
-         nodes land in one. A store is not uniformly distributed — the layout
-         deliberately packs each project into its own cluster — so a single dense
-         cluster degenerates back toward O(n²): measured at 16.2M pair comparisons
-         (346ms) for 2,100 nodes and 60.8M (1.13s) for 4,000, which is a visible
-         main-thread stall on `?orphans=1` and gets worse every week the store
-         grows (Codex P2-UX-API-CONTRACT-005).
+         The grid bounds how many *cells* are searched, not how many nodes land in
+         one, and the layout deliberately packs each project into its own cluster —
+         so a dense cluster degenerates toward O(n²). Two things are needed to fix
+         that, and the first attempt only did one of them:
 
-         So occupancy is bounded too: within a cell, a node repels at most
-         `MAX_NEIGHBOURS` others. That caps the work at O(n · 9 · MAX_NEIGHBOURS)
-         — genuinely linear, whatever the density. The cap is legitimate physics,
-         not a shortcut: repulsion falls off inside a radius this small, and past
-         a couple of dozen crowded neighbours the sum is already dominated by the
-         cluster-centre pull below. It stays deterministic because bucket order is
-         node order (`nodes` is iterated in index order when filling `cells`), so
-         the same store always caps the same pairs. */
-      var R = 0.075, MAX_NEIGHBOURS = 24, cells = Object.create(null);
+         1. BOUND WHAT IS INSPECTED, NOT WHAT IS APPLIED. Counting successful
+            pushes is not a bound: with `q.i <= p.i` skipping earlier occupants and
+            buckets filled in ascending node order, a late node walks an unbounded
+            prefix of ineligible entries before it can reach a single eligible one.
+            Measured with a push-counter cap: 21.18M inspections at 2,100 nodes and
+            66.73M at 4,000 — nodes ×1.90, work ×3.15, still superlinear (Codex
+            P2-UX-API-CONTRACT-005, round 2). `scanned` therefore increments on
+            EVERY entry examined, before any skip can `continue` past it.
+
+         2. DROP PAIR-UNIQUENESS, WHICH IS WHAT FORCED THE PREFIX WALK. Each node
+            now pushes only *itself* away from what it sees. Every pair is still
+            visited from both ends across the sweep, so the relative separation
+            change per pair is unchanged — this is the same physics, not a weaker
+            force, and it removes the `q.i <= p.i` test that made the scan
+            unbounded. (Positions update as the sweep proceeds rather than all at
+            once; deterministic either way, and it settles slightly faster.)
+
+         Own cell FIRST, then the eight neighbours: under a cap, what a node can
+         afford to look at should be the nodes most likely to be touching it.
+         Scanning in raw `cx-1..cx+1` order spends the budget on a diagonal
+         neighbour while the node's own crowded cell goes unread — which is how the
+         first cap made separation *worse* (~1,869 overlapping-radius pairs at
+         2,100 nodes against 572 before it).
+
+         Deterministic: bucket contents are in node-index order, `OFFSETS` is a
+         fixed sequence, and nothing here reads a clock or a random. Same store,
+         same picture, every reload. */
+      var R = 0.075, RSQ = R * R, cells = Object.create(null);
       for (var i = 0; i < nodes.length; i++) {
         var n0 = nodes[i];
         var key = ((n0.x / R) | 0) + "," + ((n0.y / R) | 0);
@@ -339,24 +379,28 @@
       }
       for (var i2 = 0; i2 < nodes.length; i2++) {
         var p = nodes[i2];
-        var cx = (p.x / R) | 0, cy = (p.y / R) | 0, seen = 0;
-        for (var gx = cx - 1; gx <= cx + 1 && seen < MAX_NEIGHBOURS; gx++) {
-          for (var gy = cy - 1; gy <= cy + 1 && seen < MAX_NEIGHBOURS; gy++) {
-            var bucket = cells[gx + "," + gy];
-            if (!bucket) continue;
-            for (var b = 0; b < bucket.length && seen < MAX_NEIGHBOURS; b++) {
-              var q = bucket[b];
-              if (q.i <= p.i) continue;  // each pair once, and never self
-              var dx2 = q.x - p.x, dy2 = q.y - p.y;
-              var d2 = Math.hypot(dx2, dy2);
-              if (d2 > R || d2 === 0) continue;
-              seen++;
-              var push = (R - d2) * 0.5 * k;
-              var vx = (dx2 / d2) * push, vy = (dy2 / d2) * push;
-              p.x -= vx; p.y -= vy; q.x += vx; q.y += vy;
-            }
+        var cx = (p.x / R) | 0, cy = (p.y / R) | 0, scanned = 0;
+        for (var o = 0; o < OFFSETS.length && scanned < MAX_SCAN; o++) {
+          var bucket = cells[(cx + OFFSETS[o][0]) + "," + (cy + OFFSETS[o][1])];
+          if (!bucket) continue;
+          for (var b = 0; b < bucket.length && scanned < MAX_SCAN; b++) {
+            var q = bucket[b];
+            scanned++;                 // EVERY entry examined, before any skip
+            if (q === p) continue;
+            /* Reject on SQUARED distance so the common case — an entry in range
+               of the cell but not of the node — never pays a square root. With
+               the pair-uniqueness skip gone, every scanned entry reaches this
+               test, so it is the hot line of the whole layout. */
+            var dx2 = p.x - q.x, dy2 = p.y - q.y;
+            var dsq = dx2 * dx2 + dy2 * dy2;
+            if (dsq > RSQ || dsq === 0) continue;
+            var d2 = Math.sqrt(dsq);
+            var push = (R - d2) * 0.5 * k;
+            p.x += (dx2 / d2) * push;
+            p.y += (dy2 / d2) * push;
           }
         }
+        RELAX_SCANS += scanned;        // instrumentation; see the test harness
       }
       /* Pull back toward the node's own project cluster, then clamp *inside*
          the loop: clamping only at the end lets nodes pile up against the
@@ -932,6 +976,25 @@
   });
   var initial = new URL(window.location.href).searchParams.get("node");
   if (initial && byId[initial]) selectNode(initial, { history: false });
+
+  /* Test seam. The renderer is an IIFE with no module boundary, so a harness
+     driving the *shipped* script has no other way to observe layout work or
+     scheduling. Deliberately the only export, read-only in spirit, and inert in a
+     browser — nothing in the page reads it back. Round 2 established that source
+     assertions about this file are worthless (one stayed green while the
+     complexity claim it guarded was false), so these are the values
+     `tests/js/graph_layout.test.js` asserts against. */
+  window.__nbGraphProbe = {
+    relaxScans: RELAX_SCANS,
+    nodeCount: nodes.length,
+    maxScan: MAX_SCAN,
+    nodes: nodes,
+    byId: byId,
+    adj: adj,
+    isParked: function () { return rafId === null; },
+    wake: wake,
+    kindLabel: kindLabel
+  };
 })();
 </script>
 {% endif %}

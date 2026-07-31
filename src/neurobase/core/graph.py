@@ -179,8 +179,23 @@ def _read_fold_records(handle: StoreHandle, project: str) -> list[dict[str, Any]
     or malformed line, or a line whose ``fold`` is not an object are all skipped
     rather than raised. The journal is an append-only audit trail written outside
     any transaction (spec §2 states it **may have gaps**), so a reader that
-    raised on one bad line would lose every good one after it."""
+    raised on one bad line would lose every good one after it.
+
+    **Contained like every other read here.** Round 2's fix argued the journal was
+    inside the store "by construction" and skipped the check — wrong, under the
+    same threat model already applied to ``raw/`` and ``curated/``:
+    ``.curator-log.jsonl`` itself, ``memory/``, or the project directory can each
+    be a symlink. An out-of-store journal is *worse* than a stray document,
+    because it needs no external file to point at: its ``consumed`` entries become
+    resolved :class:`SessionNode` identity directly, and its ``edges`` mint
+    **journal-sourced** attribution — the highest-trust edge this graph draws, the
+    one the inspector labels as recorded-by-the-curator (Codex
+    P2-SAFETY-SECURITY-001, round 2). ``contains`` fails closed, so an unreadable
+    or looping path reads as "no journal", which is already this function's
+    fail-soft answer."""
     path = handle.memory_dir(project) / store.CURATOR_LOG
+    if not handle.contains(path):
+        return []
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):

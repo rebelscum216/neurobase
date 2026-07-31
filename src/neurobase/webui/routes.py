@@ -205,8 +205,14 @@ def _graph_home(request: Request) -> Response:
     for the same reason, and a hand-edited ``provenance: 5`` raises ``TypeError``
     deep in ``core/graph.py``, which a narrow ``(OSError, ValueError)`` would let
     500 the front door while every other surface still renders.
-    ``UnsupportedSchemaError`` stays loud: ``open_store`` raises it *before* the
-    guard below, so it reaches ``unsupported_schema_handler`` untouched (D11).
+    ``UnsupportedSchemaError`` stays loud, and is re-raised **explicitly** rather
+    than relying on where it is thrown. It was true that only the
+    request-boundary ``open_store`` above could raise it — until accepted-proposal
+    liveness was added: ``proposals.artifact_state`` reopens the store while
+    re-deriving candidate targets, so a D11 refusal can now arrive from *inside*
+    composition, and the broad guard would quietly turn spec §10/§14's "refuse to
+    operate" into a degraded 200 (Codex P1-SAFETY-SECURITY-007). Position is not a
+    guarantee; the ``raise`` is.
     """
     root = _root(request)
     handle = open_store(root, StoreMode.READ)
@@ -215,6 +221,8 @@ def _graph_home(request: Request) -> Response:
     degraded = False
     try:
         payload = graph_view.graph_payload(handle, root, include_orphan_sessions=orphans)
+    except store.UnsupportedSchemaError:
+        raise  # D11 → unsupported_schema_handler's typed 409, never a soft page
     except Exception:  # noqa: BLE001 - the home page must never 500 on bad data
         payload = {"nodes": [], "edges": [], "counts": {}, "projects": []}
         degraded = True

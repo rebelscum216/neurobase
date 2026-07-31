@@ -366,14 +366,15 @@ should be closed in the same change, since it needs the same ownership.
 
 ### G5 — the curator's brain call is indistinguishable from a replayed curator prompt, so the model refuses it
 
-- **status:** open — fix in flight on `fix/plan-system-untrusted-fence` (both
-  halves below implemented, local gate green; **not** merged, and the live
-  evidence is thin — see *Verification status*).
-- **severity:** major — **`curate` cannot complete a pass.** Planning fails on
-  every attempt, so no raw is consumed and no curated fact is written. The memory
-  pipeline is stalled end to end and `doctor`'s `curate health` stays red.
-  Self-reinforcing: the failure is *caused by* curated content, and cannot be
-  fixed by curating.
+- **status:** **fixed** — both halves landed on `main` in `6402ced` ("the curator
+  stops refusing itself (G5) — fence + harness isolation", implementation
+  `978df6c`). The untrusted-data fence is present in `curator/engine.py`
+  (`PLAN_SYSTEM`) and `curator/distill.py`. See *Residual* below: the fix is
+  scoped to `claude-cli`, and one unexplained behaviour was never chased.
+- **severity (historical):** was major — `curate` could not complete a pass.
+  **No longer true.** Corrected 2026-07-31 (see *Post-merge verification*); this
+  entry described the pipeline as stalled end to end long after it had been
+  unstalled, which cost at least one later session real diagnostic time.
 - **found:** 2026-07-29 by Claude, via the bounded `curate --if-stale` diagnostic
   pass that resequencing item 3 had been waiting on since 2026-07-27. It had been
   masked for weeks: ~2,057 prior failures were the quota exhaustion from the
@@ -576,6 +577,29 @@ as the store does — at 52 facts it was already a quarter of the default cap, a
 the fence itself pushed the one-raw floor from 1,327 to 2,673 bytes (which is why
 `ONE_RAW_PER_BATCH` in `test_curate_budget.py` needed recalibrating to 2724).
 
+**Post-merge verification — 2026-07-31.** Four `curate` passes across four
+projects (`messageman`, `urbyn`, `ccgolf`, `neurobase`), the first three on the
+`claude-cli` brain and a later pair on `codex-cli`, all returned `status: ok`
+with real folds; the store went from 52 unconsumed raws to zero and gained 18
+facts. `doctor`'s `curate health` is green. Planning refusals were not observed
+on either backend. Whatever the residual below, the headline defect this entry
+describes — *the curator refuses its own plan call* — does not reproduce.
+
+**Residual (why this is `fixed` and not closed-and-forgotten).** Two things this
+entry's fix does **not** cover, neither of which is the refusal:
+
+1. **Scope is `claude-cli` only.** ADR-0025's harness isolation has no Codex
+   equivalent, and the adversarial-payload regression has never been run against
+   it — that is **G6**, still open, and it must not be read as covered by G5's
+   `fixed`.
+2. **The empty-result nondeterminism was never explained.** Unstripped `claude -p`
+   calls occasionally returned an empty result string that every guard in
+   `ClaudeCLIBrain._once` accepted. The fence made the refusals stop, but nothing
+   established that the empty-result path was the *same* phenomenon. It has not
+   recurred and is not worth chasing speculatively — but if a future pass dies
+   again at `plan JSON did not parse … char 0`, start here rather than assuming
+   a fresh bug.
+
 ---
 
 ### G6 — the Codex brain backend has no equivalent of ADR-0025's harness isolation
@@ -626,3 +650,58 @@ whatever `codex exec` offers for a real system-instruction slot, MCP suppression
 and tool suppression, plus the adversarial-payload regression. Until then, treat
 "G5 is fixed" as **claude-cli only** — that scope is stated in ADR-0025 and must
 not be widened by implication.
+
+---
+
+### G7 — the write-lock negative control fails intermittently in CI, and not in the direction its own model predicts
+
+- **status:** open.
+- **severity:** minor — no product code is implicated. The cost is trust: it
+  reddens CI on changes that cannot possibly have caused it (it first bit on a
+  **docs-only** commit), which trains readers to wave failures through on the
+  branch they are least able to check.
+- **found:** 2026-07-31 by Claude, on `feat/webui-phase-g-graph` commit
+  `7298b8d` (a single added markdown file). `py3.13 · ubuntu-latest` failed; the
+  other three matrix jobs passed, and the identical code had gone green ×4 on
+  the parent commit twenty minutes earlier. Re-running that one job cleared it.
+
+**Symptom.** `tests/test_store_lock.py::test_probe_has_teeth_without_lock`:
+
+```
+AssertionError: assert 352 < (8 * 40)
+```
+
+**Why this is not simply "a flaky timing test".** The test is the negative
+control for the ADR-0023 project write lock: it runs the same workload *without*
+the lock and asserts the counter ends **below** the total, so that the locked
+test above it proves something. Its docstring is explicit — "if this ever passes
+at the exact total, the probe above proves nothing".
+
+The failure value is **352 against a ceiling of 320**. The mechanism the test
+models — lost updates from a widened read-modify-write window — can only drive
+the counter *down*. `_rmw` reads, sleeps 0.6 ms, then `write_text`s `value + 1`,
+and `write_text` truncates, so a torn read yields an empty or short prefix and
+therefore a *smaller* value; the helper's own comment says it is written to
+"undercount rather than crash". Nothing in that model produces 352.
+
+**So the mechanism is unknown, and this entry deliberately does not guess one.**
+An obvious candidate — the test body executing twice against a `tmp_path` that
+was not recreated, so a second run resumed from ~320 — fits the arithmetic but
+was **not** confirmed, and the pytest tmp dir in the log carries the first-run
+suffix (`test_probe_has_teeth_without_l0`). Do not treat that as the answer.
+
+**Fix direction.** Two separable pieces:
+
+1. **Diagnose the over-count before touching the threshold.** A negative control
+   that fails *above* its ceiling is reporting something the test does not model,
+   and raising the bound would bury it. Have the test print the per-worker
+   increment count and the final value on failure, so the next occurrence is
+   self-describing rather than needing this entry.
+2. **Make the control deterministic rather than timing-dependent.** Proving the
+   lock has teeth does not require winning a race: a barrier that forces every
+   unlocked worker to read before any of them writes would demonstrate the lost
+   update every time, on any runner, and remove the whole class of flake.
+
+Until then, a lone failure of this test on a change that cannot have caused it
+should be re-run (`gh run rerun <run-id> --job <job-id>`), not investigated as a
+regression — but a failure alongside *any* other should be believed.

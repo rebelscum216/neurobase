@@ -86,28 +86,90 @@ function rmsRadius(nodes) {
   return Math.sqrt(sum / nodes.length);
 }
 
-/* Stated startup budgets. These are wall-clock, so they are the softest guard
- * here — the scan-count and linearity assertions above are the real ones. They
- * are set at roughly 2x the measured time on this host so slower CI hardware has
- * headroom, while a return to quadratic (which was 1,256ms at 4,000) still fails.
+/* Wall-clock perf, measured SCALE-FREE.
  *
- * Measured on the review host, in this Node sandbox:
- *              before this fix    now
- *   2,100      346ms              145ms
- *   4,000      1,256ms            264ms
+ * The previous version of this asserted absolute budgets — 350ms at 2,100 nodes
+ * and 650ms at 4,000 — derived as "roughly 2x the time measured on this host".
+ * That cannot work as a cross-hardware gate, and CI proved it: a macOS runner is
+ * ~3.5x slower than the author's laptop, so healthy code measured 926ms there and
+ * failed the 650ms line. It failed on the py3.13 cell and passed on py3.11 of the
+ * SAME runner image — and the Python version cannot affect a `node --test` run,
+ * so the test was measuring runner contention, not the renderer.
+ *
+ * Its stated justification had silently inverted, too. The comment claimed "a
+ * return to quadratic (1,256ms at 4,000) still fails" — but 1,256ms was also a
+ * laptop number. On that CI runner a quadratic regression would land near
+ * 3,200ms, so a 650ms line says nothing about quadratic there; it only says the
+ * machine was busy.
+ *
+ * What IS hardware-independent is the RATIO between two sizes timed in the same
+ * process on the same machine: contention and CPU speed scale both ends. Each
+ * size is timed best-of-3, because timing noise only ever ADDS time, which makes
+ * the minimum the robust estimator.
+ *
+ * The threshold is derived from measurement, not from the 3.63x you would predict
+ * for quadratic — because wall-clock is a DAMPED signal. Per-run fixed costs
+ * (building the payload, constructing 4,000 node objects, harness setup) scale
+ * linearly and dilute the superlinear component. Removing BOTH scan bounds to
+ * restore the uncapped loop measured 3.29x in scans but only 2.64x in time.
+ *
+ *     healthy      1.77 - 1.91   best-of-3, six runs on this host
+ *     uncapped     2.64          (scans 3.29x, damped to 2.64x in time)
+ *     ceiling      2.30          20% above healthy, 13% below the real regression
+ *
+ * THREE GUARDS, EACH CATCHING WHAT THE OTHERS STRUCTURALLY CANNOT — do not
+ * collapse them:
+ *
+ *   - "scans grow linearly" is the PRIMARY guard: deterministic, hardware-free,
+ *     and more sensitive than this one. It fired at 2.30x scans on a partial
+ *     mutation (inner bound removed) that this timing test did not catch at all.
+ *     If you are tempted to tighten the ratio below, tighten that instead.
+ *   - This test catches superlinear work OUTSIDE the instrumented relaxation
+ *     loop — a new O(n^2) pass elsewhere in layout would not move `relaxScans`
+ *     by one, and no scan-count assertion could ever see it.
+ *   - The absolute backstop after it catches a UNIFORM slowdown — expensive work
+ *     per scan leaves both the scan count and this ratio unchanged while every
+ *     size gets slower together.
  */
-test("startup layout stays inside its budget at 2,100 nodes (the real store size)", () => {
-  const started = process.hrtime.bigint();
-  runGraph(makePayload(2100));
-  const ms = Number(process.hrtime.bigint() - started) / 1e6;
-  assert.ok(ms < 350, `layout took ${ms.toFixed(1)}ms at 2,100 nodes (budget 350ms)`);
+const RATIO_CEILING = 2.3;
+
+/** Best-of-`runs` wall-clock ms for `fn`. Min, because noise only adds time. */
+function fastestMs(fn, runs = 3) {
+  let best = Infinity;
+  for (let i = 0; i < runs; i++) {
+    const started = process.hrtime.bigint();
+    fn();
+    best = Math.min(best, Number(process.hrtime.bigint() - started) / 1e6);
+  }
+  return best;
+}
+
+test("layout TIME scales linearly with node count, not quadratically", () => {
+  runGraph(makePayload(500)); // warm-up: the first run pays JIT compilation
+  const small = fastestMs(() => runGraph(makePayload(2100)));
+  const large = fastestMs(() => runGraph(makePayload(4000)));
+  const ratio = large / small;
+
+  assert.ok(
+    ratio <= RATIO_CEILING,
+    `layout time grew ${ratio.toFixed(2)}x (${small.toFixed(0)}ms -> ${large.toFixed(0)}ms) ` +
+      `while nodes grew 1.90x — healthy is 1.77-1.91, the uncapped loop was 2.64, ` +
+      `ceiling ${RATIO_CEILING}`,
+  );
 });
 
-test("startup layout stays inside its budget at 4,000 nodes", () => {
-  const started = process.hrtime.bigint();
-  runGraph(makePayload(4000));
-  const ms = Number(process.hrtime.bigint() - started) / 1e6;
-  assert.ok(ms < 650, `layout took ${ms.toFixed(1)}ms at 4,000 nodes (budget 650ms)`);
+test("layout is not catastrophically slow in absolute terms", () => {
+  // Deliberately NOT a perf budget — the ratio above is the perf guard. This
+  // catches only what a ratio structurally cannot see: a UNIFORM slowdown, where
+  // some expensive per-node work scales with everything else and leaves the ratio
+  // at ~1.9 while every size gets 10x slower.
+  //
+  // So it is set from the slowest healthy measurement ever OBSERVED (926ms on a
+  // contended macOS CI runner), not from a multiple of this laptop's number —
+  // ~5x that, which no amount of runner contention has approached. If this ever
+  // fires, the answer is to investigate, not to raise the number.
+  const ms = fastestMs(() => runGraph(makePayload(4000)));
+  assert.ok(ms < 5000, `layout took ${ms.toFixed(0)}ms at 4,000 nodes — something is badly wrong`);
 });
 
 test("bounding the work did not clump the graph", () => {

@@ -106,7 +106,11 @@ def enable(
     handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
     try:
         project_slug = handle.register_project(resolved_cwd, slug=slug)
-    except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
+    except (
+        projects.ProjectInsideStoreError,
+        projects.ProjectSlugCollisionError,
+        store.InvalidSlugError,
+    ) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
     mem = handle.ensure_tree(project_slug)

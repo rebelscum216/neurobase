@@ -25,6 +25,17 @@ class ProjectSlugCollisionError(ValueError):
     """The slugified name already maps to a different root."""
 
 
+class ProjectInsideStoreError(ValueError):
+    """The repo root that would be registered lies at or under the store root.
+
+    Registering the store as a project makes the curator capture its own output
+    into itself. The check lives at the registry write (:func:`register_project`)
+    rather than at any one front door because the path that gets *registered* is
+    not the path a caller submits — it is that path collapsed to its git common
+    root — so a check performed before the collapse validates a different path
+    than the one written (Codex F2, round 2)."""
+
+
 class RegistryShapeError(ValueError):
     """``registry.toml`` parsed as TOML but is not a registry: ``projects`` is not
     a table, an entry is not a table, or a ``roots`` list holds a non-string.
@@ -143,6 +154,30 @@ def git_common_root(cwd: Path) -> Path | None:
     return common_dir.resolve().parent
 
 
+def project_root_for(cwd: Path) -> Path:
+    """The path :func:`register_project` will actually register for ``cwd`` — its
+    git common root, or its resolved self when it isn't in a repo.
+
+    Public because a caller that wants to derive the slug or create the tree
+    *before* committing the registry entry must do so from the **same** path the
+    registry will hold. Deriving from the submitted path instead lets the two
+    disagree: submitting a linked worktree produced a tree under the worktree's
+    name and a registry entry under the repo's (Codex F2, round 2)."""
+    return git_common_root(cwd) or cwd.resolve()
+
+
+def is_inside_store(project_root: Path, root: Path) -> bool:
+    """Whether an **already-collapsed** ``project_root`` (from
+    :func:`project_root_for`) sits at or under the store root.
+
+    The predicate form of the refusal :func:`register_project` raises. A caller
+    that creates the memory tree *before* writing the registry needs it: the
+    authoritative raise happens at the registry write, by which point a tree would
+    already exist for a project that is about to be refused. Pass the collapsed
+    root — checking a pre-collapse path is the F2 defect itself."""
+    return _is_within(project_root, root.expanduser().resolve())
+
+
 def derive_slug(project_root: Path, slug: str | None = None) -> str:
     """The slug :func:`register_project` would assign for ``project_root``,
     validated but **without** writing the registry.
@@ -172,8 +207,23 @@ def register_project(root: Path, cwd: Path, slug: str | None = None) -> str:
     file from ``{}`` and silently drop every other project's roots. A corrupt
     registry raises here instead — ``core/enable.py`` already catches
     ``TOMLDecodeError``/``OSError`` and fails closed, which is the documented
-    auto-enable posture."""
-    project_root = git_common_root(cwd) or cwd.resolve()
+    auto-enable posture.
+
+    Raises :class:`ProjectInsideStoreError` when the collapsed root is at or under
+    ``root``. That guard is **here**, at the single registry write, not in any
+    caller: the registered path is ``cwd`` collapsed to its git common root, so a
+    caller checking ``cwd`` is checking a different path. A linked worktree living
+    outside the store whose common root *is* the store passed a caller-side check
+    and then registered the store root itself; the web UI, ``neurobase enable``,
+    and auto-enable all shared that hole (Codex F2, round 2)."""
+    project_root = project_root_for(cwd)
+    if is_inside_store(project_root, root):
+        raise ProjectInsideStoreError(
+            f"{project_root} is at or under the Neurobase store ({root}) — registering "
+            "it would make the curator capture its own output. This is the path that "
+            "would actually be registered; for a git worktree it is the repo's common "
+            "root, not the directory given."
+        )
     final_slug = derive_slug(project_root, slug)
     registry = _read_registry(root)
     existing_roots = registry.get(final_slug, [])

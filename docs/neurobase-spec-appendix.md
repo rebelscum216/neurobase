@@ -2329,8 +2329,19 @@ captured memory**, so it carries rules the read surfaces do not.
   the slug, create the **tree**, then write the **registry** entry — so a
   part-way failure can never leave a registered-but-treeless project. A
   submitted path **MUST** be absolute (a relative one would resolve against the
-  *server's* cwd), **MUST** already be a directory, and **MUST NOT** be at or
-  under the store root. `add-root` on an unregistered slug answers 404 — a stale
+  *server's* cwd) and **MUST** already be a directory.
+- **The store-containment refusal binds the path that is actually registered,
+  not the path submitted.** `register_project` collapses its argument to the
+  git *common* root, so those are different paths whenever a linked worktree is
+  given: a worktree living outside the store whose common root **is** the store
+  passed a submitted-path check and registered the store root itself. The guard
+  therefore lives at the single registry write (`projects.register_project`
+  raising `ProjectInsideStoreError`), which binds the web UI, `neurobase
+  enable`, and auto-enable together; a caller creating the memory tree first
+  **MUST** additionally pre-check with `projects.is_inside_store` on the
+  *collapsed* root, or a refusal leaves a stray tree. Slug derivation and tree
+  creation **MUST** use that same collapsed root, or tree and registry entry
+  land under different names. `add-root` on an unregistered slug answers 404 — a stale
   link must not become a create.
 - `POST /projects/{slug}/remove-root` — drop one root, matched as an **exact
   string** against the registry (never a resolved path: a root whose directory
@@ -2346,8 +2357,14 @@ captured memory**, so it carries rules the read surfaces do not.
   removes `<root>/projects/<slug>/` via `StoreHandle.delete_project_tree`, which
   validates the slug (`^[a-z0-9-]+$`) *and* re-proves containment after
   resolution, so neither a crafted slug nor a symlinked project directory can
-  direct the removal outside the store. Store-wide proposals and the ledger are
-  **not** cascaded (see known-gaps G9), and the confirmation page says so.
+  direct the removal outside the store. That refusal raises `ValueError`, and the
+  route **MUST** attempt the tree removal *before* the registry write and answer
+  a typed 409 on refusal: deregistering first meant a **refused** delete still
+  performed an unrequested deregistration and returned a raw 500. Ordering the
+  writes this way makes "refused ⇒ nothing changed" structural rather than
+  dependent on a separate pre-check staying in sync. Store-wide proposals and the
+  ledger are **not** cascaded (see known-gaps G9), and the confirmation page says
+  so.
 - Every mutation here inherits the loopback + same-origin + CSRF gate above; no
   route re-implements it.
 

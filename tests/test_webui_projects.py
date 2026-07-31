@@ -9,6 +9,8 @@ the most attention — a mismatched confirmation must leave *everything* in plac
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -468,3 +470,100 @@ def test_the_delete_route_still_refuses_an_invalid_slug(
 ) -> None:
     _add_bad_slug_entry(store_root, tmp_path)
     assert client.get("/projects/bad_slug/delete").status_code == 404
+
+
+# --- Codex F2 (round 2): the checked path is not the registered path ---------
+#
+# `_validate_folder` checks the *submitted* path; `register_project` writes that
+# path collapsed to its git common root. A linked worktree outside the store whose
+# common root IS the store passed the check and then registered the store root
+# itself — the exact self-capture §14 forbids.
+
+
+def _store_repo_with_outside_worktree(store_root: Path, tmp_path: Path) -> Path:
+    """A git repo AT the store root, plus a linked worktree outside it."""
+    store_root.mkdir(parents=True, exist_ok=True)
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *a],
+        cwd=store_root,
+        check=True,
+        capture_output=True,
+    )
+    run("init", "-q", ".")
+    (store_root / "f.txt").write_text("x", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-qm", "x")
+    worktree = tmp_path / "outside-worktree"
+    run("worktree", "add", "-q", str(worktree), "-b", "wt")
+    return worktree
+
+
+def test_a_worktree_collapsing_into_the_store_is_refused(
+    client: TestClient, app: Starlette, store_root: Path, tmp_path: Path
+) -> None:
+    worktree = _store_repo_with_outside_worktree(store_root, tmp_path)
+    assert not worktree.resolve().is_relative_to(store_root.resolve())  # passes the naive check
+    response = _post(client, app, "/projects/add", path=str(worktree))
+    assert response.status_code == 400
+    assert "capture its own output" in response.text
+    assert "store" not in projects.load_registry(store_root)
+
+
+def test_a_refused_worktree_leaves_no_stray_tree(
+    client: TestClient, app: Starlette, store_root: Path, tmp_path: Path
+) -> None:
+    """`ensure_tree` runs before the registry write, so a refusal caught only at the
+    write would still have created a tree for a project that never registers."""
+    worktree = _store_repo_with_outside_worktree(store_root, tmp_path)
+    _post(client, app, "/projects/add", path=str(worktree))
+    assert not (store_root / "projects" / "outside-worktree").exists()
+    assert not (store_root / "projects" / "store").exists()
+
+
+def test_add_registers_the_repo_root_not_the_submitted_worktree(
+    client: TestClient, app: Starlette, store_root: Path, tmp_path: Path
+) -> None:
+    """The benign half of the same collapse: tree and registry must agree on one
+    slug, derived from the path that is actually registered."""
+    repo = tmp_path / "realrepo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *a],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    run("init", "-q", ".")
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-qm", "x")
+    worktree = tmp_path / "a-worktree"
+    run("worktree", "add", "-q", str(worktree), "-b", "wt")
+
+    response = _post(client, app, "/projects/add", path=str(worktree))
+    assert response.status_code == 303
+    assert list(projects.load_registry(store_root)["realrepo"]) == [str(repo.resolve())]
+    assert (store_root / "projects" / "realrepo" / "memory").is_dir()
+    assert not (store_root / "projects" / "a-worktree").exists()
+
+
+# --- Codex F3 (round 2): a refused delete must change nothing ----------------
+
+
+def test_a_refused_delete_leaves_the_registry_and_the_target_untouched(
+    client: TestClient, app: Starlette, store_root: Path, tmp_path: Path
+) -> None:
+    """The core guard refuses a project directory that resolves outside the store.
+    The handler used to deregister *first* and not catch that ValueError, so a
+    refused destructive op 500'd with the registry already rewritten."""
+    shutil.rmtree(store_root / "projects" / "proj")
+    outside = tmp_path / "precious"
+    outside.mkdir()
+    (outside / "keep.md").write_text("do not delete me", encoding="utf-8")
+    (store_root / "projects" / "proj").symlink_to(outside, target_is_directory=True)
+
+    response = _post(client, app, "/projects/proj/delete", confirm="proj")
+    assert response.status_code == 409
+    assert "nothing was changed" in response.text
+    assert projects.load_registry(store_root)["proj"]  # still registered
+    assert (outside / "keep.md").exists()  # target untouched

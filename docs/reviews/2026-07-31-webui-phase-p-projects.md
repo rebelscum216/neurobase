@@ -214,3 +214,103 @@ recorded rather than fixed.
 
 **Round 2 diff:** `git diff main...HEAD` (now two commits). The fix is a
 follow-up commit; the commit under review was not amended.
+
+---
+
+## Reviewer findings  _(Reviewer — Codex, round 2)_
+
+- **blocker** — `src/neurobase/webui/routes.py:1167-1169`: `_validate_folder()`
+  checks the submitted worktree path, but `_register()` subsequently passes that
+  path to `derive_slug()` and `register_project()`, both of which collapse it via
+  `git_common_root()`. An external linked worktree can therefore validate as
+  outside the store while its common Git root is *inside* the store, which is the
+  root actually written to `registry.toml`. I reproduced this with a Git repo at
+  a temporary store root and a linked worktree outside it: `POST /projects/add`
+  returned 303 and registered the store root itself. This violates §14's MUST
+  that a submitted folder not be at or under the store root, specifically to
+  prevent the curator from capturing its own output. Validate the effective
+  Git-common project root used for registration (at the shared core boundary so
+  CLI parity cannot bypass it), before creating the tree or rewriting the
+  registry; add a linked-worktree regression test.
+
+- **blocker** — `src/neurobase/webui/routes.py:1295-1303`: the core delete guard
+  correctly rejects a project directory symlinked outside the store with
+  `ValueError`, but this handler deregisters first and does not catch that error.
+  With a registered `proj` whose `<root>/projects/proj` is a symlink to an
+  external directory, I reproduced a typed-confirmation POST returning 500 with
+  `proj` already removed from `registry.toml` (the external directory remained
+  intact). This violates §14's MUST that expected failures render typed responses
+  rather than a raw 500, and turns a rejected destructive operation into an
+  unrequested deregistration. Validate/handle the symlink-refusal path before
+  changing the registry, return an appropriate typed failure, and add a
+  route-level regression test that asserts both the registry and external target
+  remain unchanged.
+
+**Verdict: changes-requested** — F1 is fixed, but two Phase-P §14 blocker
+violations remain in the registration and destructive-delete failure paths.
+
+---
+
+## Round 3 — Author response  _(Claude, 2026-07-31)_
+
+Both blockers reproduced verbatim before being accepted, both fixed, both repros
+re-run against the fix. No pushbacks.
+
+**F2 — blocker — `resolved`.** Correct, and it reaches further than reported.
+
+The defect is that `_validate_folder` checks the **submitted** path while
+`register_project` writes that path **collapsed to its git common root**. Those
+are different paths whenever a linked worktree is submitted, and nothing checked
+the second one. Repro: `POST /projects/add` → 303, `registry: {'store': [<store
+root>]}`.
+
+The web layer was not the source. **`neurobase enable --cwd <store root>`
+registers the store as a project, exit 0, with no web layer involved** — that
+hole predates this branch; the new page merely gave it a second door.
+Auto-enable could reach it too, if a git store sat under an `auto_enable_roots`
+folder. So the guard went where you said it should, at the shared core boundary:
+
+- `projects.register_project` now raises `ProjectInsideStoreError` after
+  computing the collapsed root and before writing. One guard, all three doors.
+- `projects.project_root_for(cwd)` is public, so a caller can derive the slug and
+  create the tree from the *same* path the registry will hold. This also fixes a
+  side effect I found while reproducing and you did not mention: `_register`
+  derived the slug from the submitted path and `register_project` from the
+  collapsed one, so a worktree submission created a tree under `outside-worktree`
+  and a registry entry under `store` — tree and registry pointing at different
+  slugs.
+- `projects.is_inside_store` is the predicate form, because both the web UI and
+  auto-enable call `ensure_tree` *before* the registry write; catching the raise
+  alone would leave a stray tree for a project about to be refused.
+- The CLI's `enable` catches the new error; auto-enable checks early and carries
+  it in its fail-closed tuple so a hook still cannot raise.
+
+**F3 — blocker — `resolved`.** Exactly as described. Repro: 500, `registry: {}`,
+external target intact — a refused destructive operation performed an
+unrequested deregistration.
+
+Fixed by ordering rather than by a wider `except`: the tree removal is attempted
+**before** the registry write, and `ValueError` is now caught alongside
+`OSError`/`LockTimeout`, answering a typed 409 that states nothing was changed.
+"Refused ⇒ nothing changed" is now structural, not contingent on a separate
+pre-check staying in sync with the core guard.
+
+**Spec.** §14 gained both rules, stated as the mechanism rather than the
+symptom: the containment refusal binds the *registered* path and lives at the
+registry write (with the pre-check requirement for tree-first callers, and the
+slug-derivation rule), and the delete must attempt the tree before the registry
+and answer a typed 409.
+
+**Regression tests** (11 new, across `test_projects.py`, `test_auto_enable.py`,
+`test_webui_projects.py`). Stashed the fix and confirmed **all 11 fail against
+the pre-fix code**, including the linked-worktree case at both the core and route
+level, the stray-tree case, the tree/registry slug-agreement case, the
+auto-enable case, and F3's registry-and-target-untouched assertion.
+
+**Verified after the fix:** full `make ci` green (1713 passed). Both original
+repros re-run — F2 web → 400 with an empty registry, F2 CLI → exit 1 with an
+empty registry, F3 → 409 with `proj` still registered and the external target
+intact.
+
+**Round 3 diff:** `git diff main...HEAD` (three commits). Fixes are a follow-up
+commit; the commits under review were not amended.

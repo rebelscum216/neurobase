@@ -65,6 +65,14 @@ def resolve_or_auto_enable(
     if repo_root is None:
         return None
 
+    # A store that is itself a git repo under an `auto_enable_roots` folder would
+    # otherwise auto-register itself and have the curator capture its own output.
+    # `register_project` refuses this too and is the authority, but it runs *after*
+    # `ensure_tree` below, so checking here is what keeps a refused repo from leaving
+    # a stray tree behind (Codex F2, round 2).
+    if projects.is_inside_store(repo_root, root):
+        return None
+
     # Qualifies. Everything below is one guarded block, so no partial state survives
     # a failure (review F2/R2-A2). Ordering matters:
     #   1. derive + validate the slug (pure) BEFORE opening the WRITE handle, so an
@@ -90,6 +98,9 @@ def resolve_or_auto_enable(
     except (
         store.UnsupportedSchemaError,
         projects.ProjectSlugCollisionError,
+        # Backstop for the early `is_inside_store` return above — a hook must
+        # fail closed on every path, never raise (spec §4/§5).
+        projects.ProjectInsideStoreError,
         store.InvalidSlugError,
         tomllib.TOMLDecodeError,
         # register_project reads the registry strictly (it is about to rewrite

@@ -1160,13 +1160,38 @@ def _register(request: Request, folder: Path, slug: str | None) -> Response:
     derive and validate the slug first, create the **tree** second, write the
     **registry** entry last — so a failure part-way can never leave a
     registered-but-treeless project, which would match ``resolve_project`` forever,
-    never be retried, and silently kill capture for that repo."""
+    never be retried, and silently kill capture for that repo.
+
+    Everything below works from the **effective** root — ``folder`` collapsed to
+    its git common root — because that is what the registry will hold. Deriving the
+    slug from ``folder`` instead let the tree and the registry entry land under
+    different names when the two differ, which a linked worktree makes happen
+    (Codex F2, round 2). The store-containment refusal is raised by
+    ``register_project`` itself, not re-checked here; a caller-side check would
+    again be checking the pre-collapse path."""
     root = _write_root(request)
     handle = open_store(root, StoreMode.WRITE)
+    effective = projects.project_root_for(folder)
+    # Refuse before ``ensure_tree``: ``register_project`` raises this too and is the
+    # authority, but by the time it runs a tree would already exist for a project
+    # about to be refused.
+    if projects.is_inside_store(effective, root):
+        return _projects_page(
+            request,
+            error=(
+                f"{effective} is at or under the Neurobase store ({root}) — registering "
+                "it would make the curator capture its own output. That is the path that "
+                "would actually be registered; for a git worktree it is the repo's "
+                "common root, not the directory you gave."
+            ),
+            status_code=400,
+        )
     try:
-        derived = projects.derive_slug(folder, slug)
+        derived = projects.derive_slug(effective, slug)
         handle.ensure_tree(derived)
-        registered = handle.register_project(folder, slug=slug)
+        registered = handle.register_project(effective, slug=slug)
+    except projects.ProjectInsideStoreError as exc:
+        return _projects_page(request, error=str(exc), status_code=400)
     except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
         return _projects_page(request, error=str(exc), status_code=409)
     except OSError as exc:
@@ -1293,15 +1318,22 @@ async def _delete_project(request: Request) -> Response:
     # WRITE handle: the D11 schema guard runs at *this* boundary, immediately before
     # the only irreversible action in the app.
     write_handle = open_store(root, StoreMode.WRITE)
-    write_handle.deregister_project(slug)
+    # Tree **first**, registry second. Deregistering first meant a *refused* delete
+    # still performed an unrequested deregistration: `delete_project_tree` raises
+    # `ValueError` when the project directory resolves outside the store (a symlink),
+    # which this handler did not catch — so the request 500'd with the registry
+    # already rewritten (Codex F3, round 2). With this order "refused ⇒ nothing
+    # changed" is structural, not something a separate pre-check has to keep in sync.
     try:
         deleted = write_handle.delete_project_tree(slug)
-    except (OSError, lock.LockTimeout) as exc:
+    except (OSError, ValueError, lock.LockTimeout) as exc:
         return _error_response(
             request,
             409,
-            f"{slug} was deregistered, but its memory tree could not be deleted: {exc}",
+            f"{slug}'s memory tree could not be deleted, so nothing was changed — "
+            f"it is still registered and its memory is intact: {exc}",
         )
+    write_handle.deregister_project(slug)
     detail = "and deleted its memory tree" if deleted else "(it had no memory tree)"
     return _redirect_to("/projects", f"Deregistered {slug} {detail}.")
 

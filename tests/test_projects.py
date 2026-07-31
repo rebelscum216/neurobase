@@ -391,3 +391,60 @@ def test_config_hits_do_not_match_a_sibling_by_string_prefix(tmp_path: Path) -> 
     sibling = tmp_path / "Projects2"
     sibling.mkdir()
     assert projects.auto_enable_hit(sibling, [str(tmp_path / "Projects")]) is None
+
+
+# --- Codex F2 (round 2): the registered path is the collapsed one ------------
+
+
+def test_register_project_refuses_a_repo_at_the_store_root(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(projects.ProjectInsideStoreError):
+        projects.register_project(root, root)
+    assert projects.load_registry(root) == {}
+
+
+def test_register_project_refuses_a_repo_under_the_store_root(root: Path) -> None:
+    inside = root / "projects"
+    inside.mkdir(parents=True)
+    with pytest.raises(projects.ProjectInsideStoreError):
+        projects.register_project(root, inside)
+    assert projects.load_registry(root) == {}
+
+
+def test_register_project_refuses_a_worktree_whose_common_root_is_the_store(
+    root: Path, tmp_path: Path
+) -> None:
+    """The finding itself: the submitted path is outside the store, but the path
+    that would actually be registered — its git common root — is the store."""
+    root.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", ".", cwd=root)
+    (root / "f.txt").write_text("x", encoding="utf-8")
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "add", "-A", cwd=root)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x", cwd=root)
+    worktree = tmp_path / "outside-worktree"
+    _git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=root)
+
+    assert not worktree.resolve().is_relative_to(root.resolve())  # naive check passes
+    with pytest.raises(projects.ProjectInsideStoreError):
+        projects.register_project(root, worktree)
+    assert projects.load_registry(root) == {}
+
+
+def test_project_root_for_collapses_a_worktree_to_its_repo(root: Path, repo: Path) -> None:
+    worktree = repo.parent / "wt"
+    _git("worktree", "add", "-q", str(worktree), "-b", "feature", cwd=repo)
+    assert projects.project_root_for(worktree) == projects.git_common_root(repo)
+
+
+def test_project_root_for_resolves_a_non_git_dir_to_itself(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert projects.project_root_for(plain) == plain.resolve()
+
+
+def test_is_inside_store_is_the_predicate_form_of_the_refusal(root: Path, tmp_path: Path) -> None:
+    assert projects.is_inside_store(root, root) is True
+    assert projects.is_inside_store(root / "projects" / "x", root) is True
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert projects.is_inside_store(outside, root) is False

@@ -40,8 +40,22 @@ def slugify(name: str) -> str:
     return _SLUG_INVALID.sub("-", name.lower()).strip("-")
 
 
-def _registry_path(root: Path) -> Path:
+def registry_path(root: Path) -> Path:
+    """``<root>/registry.toml``.
+
+    Public because containment is enforced on it at the ``StoreHandle`` accessor
+    (Codex P2-SAFETY-SECURITY-010): the registry decides which project namespaces
+    a sweep walks at all, so a symlinked one selects namespaces from outside the
+    store. The guard needs to name the path it is proving, and re-deriving
+    ``root / "registry.toml"`` at the call site would be a second, unvalidated way
+    to name a store path — exactly what ADR-0015's chokepoint exists to prevent.
+    """
     return root / "registry.toml"
+
+
+# Kept as the module-internal spelling so the many existing call sites below read
+# unchanged; both names are the same function.
+_registry_path = registry_path
 
 
 def _load_toml(root: Path) -> dict[str, Any]:

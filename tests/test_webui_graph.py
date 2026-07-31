@@ -72,13 +72,15 @@ def _node(payload: dict, node_id: str) -> dict:
     return next(n for n in payload["nodes"] if n["id"] == node_id)
 
 
-def _capture(root: Path, session_id: str, body: str, *, agent: str = "claude") -> Path:
+def _capture(
+    root: Path, session_id: str, body: str, *, agent: str = "claude", project: str = PROJECT
+) -> Path:
     return store.write_raw(
         root,
-        PROJECT,
+        project,
         agent=agent,
         session_id=session_id,
-        cwd=f"/tmp/{PROJECT}",
+        cwd=f"/tmp/{project}",
         branch="main",
         captured_at=datetime(2026, 7, 1, 9, 0, 0, tzinfo=UTC),
         body=body,
@@ -540,6 +542,122 @@ def test_an_individually_symlinked_proposal_is_contained_but_a_real_one_is_not(
     }, "the ordinary proposal keeps its evidence edge"
 
 
+def _unregistered_project_with_data(root: Path, slug: str, marker: str) -> None:
+    """A project that exists on disk in the store but was never registered.
+
+    Only a registry can select it, which is what makes it the probe for
+    P2-SAFETY-SECURITY-010: if its `marker` reaches the page, an external file
+    chose the namespace.
+    """
+    store.ensure_tree(slug, root)
+    raw = _capture(root, "sess-" + slug, _BODY.replace("teach the shell", marker), project=slug)
+    # The slug must satisfy `store.SLUG_RE`; the loud marker goes in the body,
+    # which is what a leak would actually render.
+    store.upsert_curated(
+        root,
+        slug,
+        "shadow-fact",
+        f"a fact only {slug} has: {marker}",
+        provenance=[f"raw/{raw.name}"],
+    )
+
+
+def test_a_symlinked_registry_selects_no_project(tmp_path: Path) -> None:
+    """The registry is the **sixth** identity channel, and the only one that is a
+    *selector* rather than a document: it decides which project namespaces the
+    all-projects sweep walks at all. Containing the five document enumerations
+    while trusting an external selector leaves the boundary incomplete — Codex's
+    probe had an external registry name an otherwise-unregistered in-store project
+    and the graph emitted its session, fact and edge (P2-SAFETY-SECURITY-010)."""
+    root = tmp_path / "store"
+    store.ensure_tree(PROJECT, root)
+    projects.register_project(root, tmp_path / PROJECT, slug=PROJECT)
+    _capture(root, "sess-real", _BODY)
+    _unregistered_project_with_data(root, "zz-external-namespace", "EXTERNALLY-SELECTED-NAMESPACE")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "registry.toml").write_text(
+        '[projects.zz-external-namespace]\nroots = ["/tmp/zz-external-namespace"]\n',
+        encoding="utf-8",
+    )
+    registry = root / "registry.toml"
+    registry.unlink()
+    registry.symlink_to(outside / "registry.toml")
+
+    response = TestClient(build_app(root), base_url="http://127.0.0.1:8765").get("/graph?orphans=1")
+    assert response.status_code == 200, "an out-of-store registry must not 500 the home page"
+    assert "EXTERNALLY-SELECTED-NAMESPACE" not in response.text
+    assert "zz-external-namespace" not in response.text
+
+    # Asserted on the composed payload, not the HTML: with no project selected the
+    # template renders the empty state and embeds no payload script at all, so
+    # scraping the page could not tell "selected nothing" from "rendered nothing".
+    payload = graph_view.graph_payload(open_store(root, StoreMode.READ), root)
+    assert payload["projects"] == [], "an out-of-store registry selects nothing"
+    assert payload["nodes"] == []
+
+
+def test_an_ordinary_registry_still_drives_the_sweep(tmp_path: Path) -> None:
+    """The other half — containment must not cost a legitimate store its projects."""
+    root = tmp_path / "store"
+    store.ensure_tree(PROJECT, root)
+    projects.register_project(root, tmp_path / PROJECT, slug=PROJECT)
+    raw = _capture(root, "sess-real", _BODY)
+    store.upsert_curated(root, PROJECT, "prefer-uv", "a real fact", provenance=[f"raw/{raw.name}"])
+
+    handle = open_store(root, StoreMode.READ)
+    assert PROJECT in handle.load_registry()
+    payload = graph_view.graph_payload(handle, root)
+    assert payload["projects"] == [PROJECT]
+    assert len(_kinds(payload, "fact")) == 1
+    assert len(_kinds(payload, "session")) == 1
+
+
+def test_a_store_root_reached_through_a_symlink_keeps_its_registry(tmp_path: Path) -> None:
+    """`contains()` resolves BOTH sides, so a store whose own root is a symlink
+    (the macOS `/var` → `/private/var` case) must be unaffected. Filed because the
+    010 fix is the first containment check applied to a path built from
+    `self.root` itself rather than to a document under it — the failure mode is
+    refusing an entire legitimate store, not leaking one."""
+    real = tmp_path / "real-store"
+    store.ensure_tree(PROJECT, real)
+    projects.register_project(real, tmp_path / PROJECT, slug=PROJECT)
+    raw = _capture(real, "sess-real", _BODY)
+    store.upsert_curated(real, PROJECT, "prefer-uv", "a real fact", provenance=[f"raw/{raw.name}"])
+    _proposal(real, "in-store-proposal", evidence=[EvidenceRef.curated(PROJECT, "prefer-uv")])
+
+    via_link = tmp_path / "via-link"
+    via_link.symlink_to(real, target_is_directory=True)
+
+    handle = open_store(via_link, StoreMode.READ)
+    assert PROJECT in handle.load_registry(), "a symlinked store root must keep its registry"
+    payload = graph_view.graph_payload(handle, via_link)
+    assert payload["projects"] == [PROJECT]
+    assert [n["label"] for n in _kinds(payload, "proposal")] == ["in-store-proposal"]
+
+
+def test_registry_containment_holds_at_the_handle_boundary(tmp_path: Path) -> None:
+    """Filed at the layer the fix lives in. Twelve call sites reach
+    `handle.load_registry()` — search, enable, MCP, CLI, corpus, the emitters, the
+    app shell and four routes — and `_artifact_state` reopens the store, so a
+    graph-only guard would be bypassed by the liveness path alone."""
+    root = tmp_path / "store"
+    store.ensure_tree(PROJECT, root)
+    projects.register_project(root, tmp_path / PROJECT, slug=PROJECT)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "registry.toml").write_text(
+        '[projects.zz-external-namespace]\nroots = ["/tmp/zz-external-namespace"]\n',
+        encoding="utf-8",
+    )
+    registry = root / "registry.toml"
+    registry.unlink()
+    registry.symlink_to(outside / "registry.toml")
+
+    assert open_store(root, StoreMode.READ).load_registry() == {}
+
+
 def test_containment_holds_at_the_core_graph_boundary(tmp_path: Path) -> None:
     """Filed at the layer the fix lives in: every caller of `memory_graph` — the
     graph page, and anything built on it later — gets contained nodes, rather
@@ -759,6 +877,22 @@ def test_a_proposed_rule_is_not_called_a_skill(store_root: Path) -> None:
     handle = open_store(store_root, StoreMode.READ)
     payload = graph_view.graph_payload(handle, store_root)
     assert _node(payload, "p:always-uv")["type"] == "rule"
+
+
+def test_the_legend_and_aria_label_do_not_call_a_rule_a_skill(store_root: Path) -> None:
+    """004 fixed the *inspector*; the legend and the canvas's accessible label are
+    the user's FIRST description of what the amber diamond means, and a rule draws
+    the same diamond (Codex P3-UX-API-CONTRACT-012). Asserted on rendered HTML —
+    the page is the deliverable here, not an unexecutable claim about it."""
+    _proposal(store_root, "always-uv", kind="rule")
+    html = (
+        TestClient(build_app(store_root), base_url="http://127.0.0.1:8765")
+        .get("/graph?orphans=1")
+        .text
+    )
+    assert "skill / rule" in html, "the legend must not name only one of the two kinds"
+    assert "proposals (skills and rules)" in html
+    assert "curated facts, and skills" not in html
 
 
 def test_an_accepted_proposal_is_not_claimed_installed_without_its_artifact(

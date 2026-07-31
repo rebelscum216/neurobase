@@ -80,7 +80,8 @@ CHECKS: list[tuple[str, list[str]]] = [
     # that skips when a runtime is missing is vacuity with extra steps, which is
     # the exact failure this suite exists to close. `main()` fails the gate if
     # node is absent rather than passing quietly. Still zero-install — `node
-    # --test` and two files, no npm, no package.json, no node_modules.
+    # --test` and two files: no npm install, no dependencies, no node_modules.
+    # (The repo's `package.json` is an npm-name reservation, unrelated to this.)
     ("node --test tests/js", ["node", "--test", "tests/js/*.test.mjs"]),
 ]
 

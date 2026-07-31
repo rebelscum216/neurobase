@@ -161,7 +161,12 @@
       <div class="gridlines" aria-hidden="true"></div>
       {% if payload.nodes %}
       <canvas id="graph" tabindex="0" role="application"
-              aria-label="Memory graph: sessions, curated facts, and skills. Use arrow keys to move between nodes and Enter to inspect one.">
+              {# "proposals" covers both kinds: a proposed or accepted RULE draws the
+                 same amber diamond as a skill, so naming only skills here made the
+                 first description of the surface wrong for half of them
+                 (Codex P3-UX-API-CONTRACT-012). The inspector's per-node label,
+                 fixed in P2-CORRECTNESS-004, is what states which one it is. #}
+              aria-label="Memory graph: sessions, curated facts, and proposals (skills and rules). Use arrow keys to move between nodes and Enter to inspect one.">
         <p>This graph is drawn on a canvas. Every node and its connections are
            also reachable as pages: <a href="/sessions">Sessions</a>,
            <a href="/memory">Memory</a>, <a href="/skills">Skills</a>.</p>
@@ -171,7 +176,7 @@
         <span><i class="claude"></i> Claude session</span>
         <span><i class="codex"></i> Codex session</span>
         <span><i class="fact"></i> memory fact</span>
-        <span><i class="skill"></i> skill</span>
+        <span><i class="skill"></i> skill / rule</span>
       </div>
       <div id="tip"><div class="tt"></div><div class="ts"></div></div>
       {% else %}
@@ -359,16 +364,27 @@
             the sweep proceeds rather than all at once; deterministic either way,
             and it settles slightly faster.)
 
-            This is an approximation, not an identity. In an UNCAPPED sweep every
-            pair would be visited from both ends and the per-pair separation
-            change would be unchanged; under `MAX_SCAN` that is not true — a node
-            in a saturated cell exhausts its budget and never reaches some
-            neighbours, so a pair can be seen from one end only. What justifies it
-            is therefore not "the same physics" but the two things actually
-            measured: the work is hard-bounded (`nodes × iterations × MAX_SCAN`),
-            and the resulting layout is at least as well separated as the uncapped
-            loop it replaced — ≤572 overlapping-radius pairs at 2,100 nodes, the
-            original's own number. Both are asserted in `tests/js/`.
+            This is an approximation, and NOT equivalent to the loop it replaced —
+            in two separate ways, both worth stating plainly because each has
+            already been overclaimed once here:
+
+              * Uncapped, this sweep would visit every pair from both ends. Under
+                `MAX_SCAN` it may not: a node in a saturated cell exhausts its
+                budget and never reaches some neighbours, so a pair can be seen
+                from one end only.
+              * Even uncapped, the per-pair separation change is NOT the same as
+                the original's. This is Gauss-Seidel: the first endpoint moves by
+                half the overlap, so when the second is visited it measures an
+                already-changed distance and moves by half of what remains. The
+                pair-unique loop moved both endpoints from the same pre-update
+                distance.
+
+            So the justification is not equivalence to the old dynamics in any
+            form. It is the two things actually measured and asserted in
+            `tests/js/`: the work is hard-bounded (`nodes × iterations ×
+            MAX_SCAN`), and the resulting layout is at least as well separated as
+            the uncapped loop it replaced — ≤572 overlapping-radius pairs at 2,100
+            nodes, the original's own number.
 
          Own cell FIRST, then the eight neighbours: under a cap, what a node can
          afford to look at should be the nodes most likely to be touching it.

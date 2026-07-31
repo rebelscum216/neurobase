@@ -356,12 +356,15 @@ The single source of truth for what "CI green" means, invoked identically by `ma
   1. `("ruff check", ["uv", "run", "ruff", "check", "."])` — lint.
   2. `("ruff format --check", ["uv", "run", "ruff", "format", "--check", "."])` — formatting (check-only, does not rewrite files).
   3. `("mypy src tests", ["uv", "run", "mypy", "src", "tests"])` — type checking, run against both source and test code.
-  4. `("pytest --cov", ["uv", "run", "pytest", "--cov=src/neurobase", "--cov-branch", "--cov-report=term-missing"])` — the test suite, run under coverage. Coverage rides along with the existing test run rather than adding a second pytest invocation. The floor lives in `pyproject.toml` (`[tool.coverage.report] fail_under`), so dropping below it exits non-zero and fails the gate exactly like a failing test.
+  4. `("store-chokepoint", ["uv", "run", "python", "scripts/check_store_chokepoint.py"])` — the ADR-0015 guard that every store write goes through the chokepoint.
+  5. `("pytest --cov", ["uv", "run", "pytest", "--cov=src/neurobase", "--cov-branch", "--cov-report=term-missing"])` — the test suite, run under coverage. Coverage rides along with the existing test run rather than adding a second pytest invocation. The floor lives in `pyproject.toml` (`[tool.coverage.report] fail_under`), so dropping below it exits non-zero and fails the gate exactly like a failing test.
+  6. `("node --test tests/js", ["node", "--test", "tests/js/*.test.mjs"])` — the behaviour suite for the graph renderer's client-side JavaScript, which Python cannot execute. Added in Phase G after a source-assertion "test" stayed green while the complexity claim it named was false.
 
-  Every command is prefixed with `uv run` so it resolves against the `uv`-managed virtualenv and is byte-for-byte identical whether invoked from a developer's shell or a fresh CI runner, without requiring the venv to already be activated.
+  Every command **except the last** is prefixed with `uv run`, so it resolves against the `uv`-managed virtualenv and is byte-for-byte identical whether invoked from a developer's shell or a fresh CI runner, without requiring the venv to already be activated. The Node command is deliberately unwrapped — it is a separate runtime, not a Python entry point. Its argument is a glob expanded by Node's own test runner, not by a shell (`subprocess.run` uses none), which is why the gate requires Node 22: expansion only works from v21, and 22 is what CI pins.
 
-- **`def main() -> int`** (line 47):
-  - Guards on `shutil.which("uv") is None`: if `uv` isn't on `PATH`, prints an install pointer to stderr and returns `127` (the standard "command not found" exit code) without attempting any check.
+- **`def main() -> int`**:
+  - Guards on `REQUIRED_TOOLS` — `uv` **and** `node`: any missing tool prints an install pointer to stderr and returns `127` (the standard "command not found" exit code) without attempting any check.
+  - Then guards on Node's *version* via `_node_version_error()`, returning `127` when it is older than `MIN_NODE_MAJOR` (22). Without this, Node 20 fails with `Could not find '<pattern>'` — loud, so the gate is never falsely green, but it reads like a deleted test file rather than an old runtime. An unreadable `node --version` deliberately fails open: the renderer check itself remains the authoritative compatibility test.
   - Otherwise iterates `CHECKS` in order, running each via `subprocess.run(argv)` (the `# noqa: S603 — fixed, trusted argv` comment documents why the bandit/ruff subprocess-injection warning is suppressed: the argv list is a fixed literal, not user input). **Every check runs regardless of earlier failures** — there is no early exit — so a single invocation surfaces every category of problem at once rather than stopping at the first lint error.
   - Times each check with `time.perf_counter()` and collects `(label, ok, elapsed)` tuples.
   - Prints a `"CI gate summary"` banner listing `[PASS]`/`[FAIL]` per check with elapsed seconds.
@@ -370,7 +373,7 @@ The single source of truth for what "CI green" means, invoked identically by `ma
 
 ### Makefile
 
-Thin local-dev convenience wrapper; the header comment states the design intent explicitly: "The CI gate itself lives in `scripts/ci.py` so local dev and GitHub Actions can't drift — `make ci` just calls it. `make` isn't reliably present on the Windows CI runner, which is exactly why the gate is a plain Python script the workflow invokes directly on all three OSes." This is why CI itself never calls `make` — see `.github/workflows/ci.yml` below, which calls `scripts/ci.py` directly. `.PHONY: ci sync fmt` marks all three targets phony.
+Thin local-dev convenience wrapper; the header comment states the design intent explicitly: "The CI gate itself lives in `scripts/ci.py` so local dev and GitHub Actions can't drift — `make ci` just calls it. `make` isn't reliably present on the Windows CI runner, which is exactly why the gate is a plain Python script the workflow invokes directly on every OS in the matrix." (That comment names Windows because it predates Windows being parked on 2026-07-20; the matrix is currently ubuntu + macos.) This is why CI itself never calls `make` — see `.github/workflows/ci.yml` below, which calls `scripts/ci.py` directly. `.PHONY: ci sync fmt` marks all three targets phony.
 
 - **`ci:`** — `uv run python scripts/ci.py`. Runs the full gate.
 - **`sync:`** — `uv sync`. Installs/refreshes the managed dev environment (including the `dev` dependency group from `pyproject.toml`).
@@ -381,10 +384,10 @@ Thin local-dev convenience wrapper; the header comment states the design intent 
 The GitHub Actions workflow. Triggers on `push` to `branches: [main]` and on every `pull_request`. `concurrency: { group: ci-${{ github.ref }}, cancel-in-progress: true }` ensures superseded runs on the same ref (e.g. successive pushes to the same PR branch) are cancelled rather than queued, saving runner time.
 
 Single job `test`, named `py${{ matrix.python }} · ${{ matrix.os }}`, with `strategy.fail-fast: false` (so one OS/Python combination failing doesn't cancel the others — full matrix visibility on every push) across:
-- `matrix.os: [ubuntu-latest, macos-latest, windows-latest]`
+- `matrix.os: [ubuntu-latest, macos-latest]`
 - `matrix.python: ["3.11", "3.13"]`
 
-— a 3×2 = 6-way matrix. Note `3.11` is the floor declared in `pyproject.toml`'s `requires-python`, and `3.13` is tested as the current upper bound, but `3.12` (also listed in the `classifiers` in `pyproject.toml`) is not explicitly matrixed here — only the floor and one later version are exercised in CI.
+— a 2×2 = 4-way matrix. **Windows was parked on 2026-07-20** (see the comment in the workflow): the app targets macOS, and the first real Windows runner failed on a test-only bug rather than a product one. Re-add if Windows becomes a supported target. Note `3.11` is the floor declared in `pyproject.toml`'s `requires-python`, and `3.13` is tested as the current upper bound, but `3.12` (also listed in the `classifiers` in `pyproject.toml`) is not explicitly matrixed here — only the floor and one later version are exercised in CI.
 
 Steps, per matrix cell:
 1. `actions/checkout@v7` — checks out the repo.

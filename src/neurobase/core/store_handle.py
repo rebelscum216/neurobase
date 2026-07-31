@@ -242,6 +242,31 @@ class StoreHandle:
     # --- registry accessors (core.projects) ----------------------------------
 
     def load_registry(self) -> dict[str, list[str]]:
+        """``{slug: [roots...]}`` for this store — **contained**, then fail-soft.
+
+        The registry is the *selector*, not another document: it decides which
+        project namespaces a sweep walks at all. Containing the five document
+        enumerations (raw, curated, tombstone, journal, proposals) while accepting
+        an external selector leaves the identity boundary incomplete under the
+        same symlink threat model — a symlinked ``registry.toml`` made
+        ``graph_payload`` emit an unregistered project's sessions, facts and edges
+        (Codex P2-SAFETY-SECURITY-010).
+
+        The check belongs **here**, at the shared accessor, rather than in the
+        graph: twelve call sites reach this method — search, enable, MCP, CLI,
+        corpus, the emitters, the app shell and four routes — and
+        ``_artifact_state`` reopens the store to re-derive artifact targets, so a
+        graph-only guard would be bypassed by the liveness path alone.
+
+        An out-of-store registry reads as **empty**, matching what
+        :func:`projects.load_registry` already does for a missing or corrupt one
+        (spec §10): a store with no usable registry has no projects to sweep,
+        which is the truthful answer and one every caller already handles. A store
+        whose own root is reached through a symlink still works, because
+        :meth:`contains` resolves both sides.
+        """
+        if not self.contains(projects.registry_path(self.root)):
+            return {}
         return projects.load_registry(self.root)
 
     def register_project(self, cwd: Path, slug: str | None = None) -> str:

@@ -73,7 +73,7 @@ neurobase/
 ├── Makefile                  ← `make ci` → scripts/ci.py; local dev shortcuts
 ├── .githooks/pre-push        ← opt-in gate guard (git config core.hooksPath .githooks)
 ├── .claude/skills/           ← project skills (e.g. xcode-review, the Author role)
-└── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix; each job runs scripts/ci.py
+└── .github/workflows/ci.yml  ← 2-OS × 2-Python matrix; each job runs scripts/ci.py
 ```
 
 `core/` (Phase 1 + `linkify` Phase 3), `brain/` (Phase 2), `curator/` (Phase
@@ -245,7 +245,8 @@ uv run pytest --cov=src/neurobase --cov-branch --cov-report=term-missing
 is the single source of truth for the six checks (`ruff check` · `ruff format
 --check` · `mypy src tests` · store-chokepoint · `pytest` under coverage ·
 `node --test tests/js/*.test.mjs`); CI invokes that *same* script on the
-3-OS × 2-Python matrix, so local and CI can't drift.
+2-OS × 2-Python matrix (ubuntu + macos; Windows parked 2026-07-20), so local and
+CI can't drift.
 
 **Prerequisites: `uv` and Node 22+.** Node runs `tests/js/`, the behaviour suite
 for the graph renderer's client-side JavaScript — Python cannot execute it, and

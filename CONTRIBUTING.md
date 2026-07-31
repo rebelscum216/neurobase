@@ -23,8 +23,10 @@ config changes, zero telemetry), and the repo layout.
    ```
    The gate needs **`uv` and Node 22+** on `PATH`. Node runs `tests/js/`, the
    behaviour suite for the graph renderer's ~700 lines of client-side
-   JavaScript — no npm, no `package.json`, no `node_modules`, just
-   `node --test` and two files. A missing or too-old runtime **fails** the
+   JavaScript — no npm install, no dependencies, no `node_modules`, just
+   `node --test` and two files. (The repo's `package.json` is an unrelated
+   npm-name reservation; the test suite neither reads nor needs it.) A
+   missing or too-old runtime **fails** the
    gate (exit 127); it is never skipped, because a suite that skips itself
    reads exactly like a suite that passed.
    `scripts/ci.py` is the single source of truth for those six checks; CI

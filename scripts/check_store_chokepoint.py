@@ -26,8 +26,7 @@ exactly match what is mechanically enforceable:
 - calling a raw-``root`` store tree/metadata accessor (``memory_dir``, ``ensure_tree``,
   ``list_raw``, ``list_curated``, ``write_raw``, ``upsert_curated``, ``write_node``,
   ``rebuild_index``, …) or a registry accessor (``load_registry`` /
-  ``register_project`` / ``resolve_project`` / ``remove_root`` /
-  ``deregister_project``) — whether reached as ``store.x`` /
+  ``register_project`` / ``resolve_project``) — whether reached as ``store.x`` /
   ``projects.x``, via a dotted module (``neurobase.core.store.memory_dir``), or by a
   direct/relative import (``from ..core.store import memory_dir``);
 - the store-metadata filename literals ``"store.toml"`` / ``"registry.toml"``.
@@ -92,18 +91,7 @@ STORE_FORBIDDEN = frozenset(
 )
 
 # Raw-``root`` accessors on ``core.projects`` — every one reads/writes registry.toml.
-# The two removals (ADR-0027) are here for the same reason as ``register_project``:
-# they rewrite the whole file, so a caller that reaches them without a validated
-# handle can drop another project's roots from an unguarded store.
-PROJECTS_FORBIDDEN = frozenset(
-    {
-        "load_registry",
-        "register_project",
-        "resolve_project",
-        "remove_root",
-        "deregister_project",
-    }
-)
+PROJECTS_FORBIDDEN = frozenset({"load_registry", "register_project", "resolve_project"})
 
 # Store-metadata filenames — a bare literal is a hand-rolled store path.
 SENSITIVE_LITERALS = frozenset({"store.toml", "registry.toml"})

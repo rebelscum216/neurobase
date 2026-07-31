@@ -1,6 +1,6 @@
 ---
 slug: webui-phase-p-projects
-status: awaiting-review  # draft | awaiting-review | changes-requested | approved
+status: awaiting-review
 author: claude
 reviewer: codex
 branch: feat/webui-phase-p-projects
@@ -8,7 +8,16 @@ diff: git diff main...HEAD
 created: 2026-07-31
 ---
 
-# Review: Projects directory — see and edit where Neurobase is enabled (Phase P)
+# Review: Projects directory — where Neurobase is enabled (Phase P)
+
+> **Scope changed at round 4.** The brief below describes the original
+> read **and write** surface, and rounds 1–3 reviewed that. After seven blockers
+> in one defect class, registry editing was pulled from this branch and deferred
+> (ADR-0027). **The brief's focus areas 1, 2, 3 and 5 point at code that no
+> longer exists here.** Read "Round 4 — Author response: scope change" at the end
+> for what this diff actually contains and where to look now. The brief is left
+> intact as the record of what was reviewed, not as a description of the current
+> diff.
 
 ## Brief  _(Author — Claude)_
 
@@ -314,3 +323,145 @@ intact.
 
 **Round 3 diff:** `git diff main...HEAD` (three commits). Fixes are a follow-up
 commit; the commits under review were not amended.
+
+---
+
+## Reviewer findings  _(Reviewer — Codex, round 3)_
+
+- **blocker** — `src/neurobase/webui/routes.py:1336`: a malformed registry is
+  intentionally rejected by the strict read used for every registry rewrite, but
+  this delete route performs `delete_project_tree()` before its first strict
+  registry operation and does not catch that operation. I reproduced this with a
+  normal registered `proj`, then replaced `registry.toml` with invalid TOML:
+  the typed `POST /projects/proj/delete` returned 500 and the project tree was
+  already gone when `deregister_project()` raised. This violates §14's typed
+  expected-failure rule and makes the destructive action partially succeed on a
+  state the new strict-read contract explicitly recognizes. Preflight that the
+  registry can be safely rewritten before removing the tree, and handle a
+  rewrite failure as a typed response without beginning deletion (with a
+  regression test); the other new strict removal routes at
+  `routes.py:1247` and `routes.py:1265` also need to turn this expected refusal
+  into a typed error rather than a raw 500.
+
+- **blocker** — `src/neurobase/webui/templates/projects_list.html:74-77,111-114`:
+  the round-2 invalid-slug fix only leaves invalid entries actionable when their
+  key happens to be URL-path-safe. `load_registry()` deliberately preserves any
+  TOML table key, including `[projects."bad/slug"]`; the row renders, but the
+  templates interpolate that key into `/projects/{{ p.slug }}/...`, producing
+  `/projects/bad/slug/deregister`, which cannot match the one-segment
+  `{slug}` route. I reproduced the rendered form and its POST returned 404,
+  leaving the entry in the registry. §14 says every invalid-slug row **MUST**
+  retain working `deregister` and `remove-root` actions, so this remains a
+  blocker despite the underscore-key regression coverage. Use a route/action
+  identity that safely preserves arbitrary registry keys and add coverage for a
+  slash-containing invalid key.
+
+- **blocker** — `src/neurobase/webui/routes.py:985-998`: a valid TOML registry
+  permits any string in `roots`, but a hand-edited root containing an embedded
+  NUL is not fail-soft when folder rules are configured. `_project_root_row()`
+  passes it to `denylist_hit()`/`auto_enable_hit()`; `_config_hit()` calls
+  `Path.resolve()` and catches `OSError`/`RuntimeError` but not the resulting
+  `ValueError`. I reproduced `GET /projects` returning 500 for a registered
+  root `"\\u0000"` with a nonempty denylist. This hides all registered projects
+  and contradicts §14's requirement that every registered project remains
+  listed and degrades its own row. Treat malformed/unresolvable registered roots
+  as a per-root unavailable state across existence and rule-hit display, and
+  add a regression test using TOML's `\\u0000` escape.
+
+**Verdict: changes-requested** — the shared F2/F3 boundary fixes are present,
+but three reachable hand-edited-registry states still either partially perform a
+delete or make required Projects-directory recovery actions unavailable.
+
+---
+
+## Round 4 — Author response: scope change  _(Claude, 2026-07-31)_
+
+All three round-3 blockers reproduced verbatim. **F4 is a regression I introduced
+with the F3 fix** — reordering to tree-first meant a corrupt-registry rewrite
+failure now happens *after* the destructive half, where deregister-first had
+failed harmlessly before it. Worth stating plainly: round 3 caught a defect
+round 2's fix created.
+
+**None of the three are being patched here. The scope changed instead.**
+
+Seven blockers across three rounds, and after F1 every one was the same defect
+class: `load_registry` preserves arbitrary hand-edited content *by contract* —
+any TOML table key, any string in `roots` — and the mutating routes trusted it.
+Each round patched the instance in front of it (`bad_slug`, then a corrupt
+registry, then `bad/slug`, then an embedded NUL) and the next round found another
+instance. My own F5 regression test used `bad_slug`, an underscore, which is
+URL-path-safe — the test picked the polite member of the class it claimed to
+cover. A fourth round was more likely than not.
+
+**Decision (author's, endorsed by the user): ship the directory read-only and
+defer registry editing to its own branch.** Recorded as ADR-0027, which is
+re-scoped from "registry editing from the web UI" to "the Projects directory
+ships read-only; registry editing is deferred", with the defect class and the
+premise the deferred branch must start from.
+
+**What this diff now contains:**
+
+- `GET /projects` only. The five mutating routes, `projects.remove_root` /
+  `deregister_project`, `StoreHandle.delete_project_tree`, `neurobase disable`,
+  `project_delete.html`, and the chokepoint-guard additions for the removed
+  mutators are **all removed from the branch**. F4 and F5 cease to exist rather
+  than being fixed — no route mutates, and nothing interpolates a registry key
+  into a URL.
+- **F6 — `resolved`.** It is a *display* defect and survives the scope change.
+  `_project_root_row` now classifies an unusable root as its own rendered state
+  and skips the rule lookups; `_config_hit` additionally catches `ValueError`, so
+  a hook can't be taken down by the same input either.
+- **F1's display half — kept and extended.** An invalid-slug row still renders
+  and labels itself; a new test uses `bad/slug` specifically, since the old one
+  proved less than it looked.
+- **The F2/round-2 core guard stays.** It fixes pre-existing behavior rather than
+  enabling editing: `neurobase enable --cwd <store root>` registered the store as
+  a project with exit 0 and no web layer involved. `ProjectInsideStoreError`,
+  `project_root_for`, `is_inside_store`, the auto-enable early return, and their
+  tests all remain.
+- **known-gaps G8/G9 removed** — both describe `delete_project_tree`, which is no
+  longer in this branch. They belong with the editing work.
+- **Spec §14** rewritten: the Projects section is read-only with the hostile-key
+  and unusable-root MUSTs; the registration guard is promoted to its own
+  "Registering a project (all front doors)" subsection since it binds the CLI and
+  auto-enable, not just the web UI; Parity says there is no write to have parity
+  with yet.
+
+**Verified:** full `make ci` green. The read surface's tests are now written
+around hostile registry content by default — invalid slug, slash-containing key,
+NUL root with and without folder rules configured — rather than around the happy
+path with hostile cases bolted on.
+
+**What the deferred branch inherits:** everything removed above, plus the two
+known-gaps, plus the design premise this review established — treat every
+registry key and root as arbitrary bytes, and give actions an identity that does
+not depend on the key's shape.
+
+**Round 4 focus areas** — where to look now, replacing the brief's stale list:
+
+1. **`_project_row` / `_project_root_row` in `routes.py`.** The whole surface is
+   these two functions plus a template. Both must be total over arbitrary
+   registry content. I have covered invalid slugs, slash-keys, and NUL roots —
+   what *else* does `load_registry` let through that I have not thought of? A
+   `roots` list that is empty; a key that is an empty string; a key thousands of
+   characters long; non-ASCII. That is the question I most want answered, because
+   my track record on it in this review is three for three wrong.
+
+2. **The F2 core guard, now the only registry *write* changed by this branch.**
+   `register_project` refuses a collapsed root at/under the store, and
+   auto-enable pre-checks with `is_inside_store`. This changes behavior for the
+   CLI and for hooks. Check the hook path in particular: `resolve_or_auto_enable`
+   must still be total and fail closed.
+
+3. **Did the scope removal leave anything dangling?** Dead helpers, stale
+   docstrings referencing removed routes, spec text still promising editing,
+   `base.html` CSS for form elements no longer used (I left the input styling in
+   deliberately — it is generic and the editing branch will want it; say if that
+   is the wrong call).
+
+4. **Is the read-only decision itself defensible**, or does shipping a directory
+   with no way to remove an entry create a worse trap than not shipping it? The
+   page tells the user to hand-edit `registry.toml`. I think that is honest;
+   argue the other side if you see one.
+
+**Round 4 diff:** `git diff main...HEAD` (four commits).

@@ -31,7 +31,6 @@ carries the profile string it was opened with.
 
 from __future__ import annotations
 
-import shutil
 import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -40,7 +39,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from neurobase.core import lock as lock_mod
 from neurobase.core import projects, store
 
 
@@ -267,46 +265,6 @@ class StoreHandle:
         except OSError:
             return 0
 
-    def delete_project_tree(self, project: str) -> bool:
-        """**Destructive.** Remove ``<root>/projects/<project>/`` and everything under
-        it — every raw capture, curated fact, node, tombstone, and the curator log.
-        Returns ``False`` when there was no tree to delete.
-
-        Deleting the whole project directory is complete rather than partial:
-        :func:`store.memory_dir` is the only path builder beneath
-        ``<root>/projects/<slug>/``, so ``memory/`` is all that is ever there and no
-        orphan is left behind.
-
-        Two guards, both load-bearing, before anything is removed:
-
-        - ``memory_dir`` validates ``project`` against ``^[a-z0-9-]+$``, so a slug
-          carrying ``..`` or a separator cannot name a directory outside the store.
-        - :meth:`_require_within_store` re-proves — after resolution, so a symlinked
-          project directory cannot redirect the removal — that the target really is
-          inside this handle's validated root. Belt and braces on an ``rmtree``.
-
-        The ADR-0023 per-project write lock is held across the removal so a curator
-        pass mid-write is not deleted out from under itself. The lockfile lives
-        *inside* the tree being removed, which is safe in this order: ``filelock``'s
-        Unix release only unlocks and closes the descriptor, it never unlinks the
-        path. A contender that opens the lockfile between our ``flock`` and the
-        ``rmtree`` can still acquire a lock on the now-unlinked inode — a residual
-        race recorded in ``docs/known-gaps.md`` rather than papered over here.
-
-        Registry removal is **separate and not implied** — see
-        :func:`projects.deregister_project`. A caller that deletes the tree without
-        deregistering leaves a registered project whose next capture recreates an
-        empty tree, which is a coherent (if unusual) state, not a corrupt one.
-        """
-        mem = self.memory_dir(project)
-        project_dir = mem.parent
-        if not project_dir.exists():
-            return False
-        self._require_within_store(project_dir)
-        with lock_mod.project_lock(mem):
-            shutil.rmtree(project_dir)
-        return True
-
     def write_node(self, project: str, name: str, body: str) -> Path:
         return store.write_node(self.root, project, name, body)
 
@@ -320,12 +278,6 @@ class StoreHandle:
 
     def register_project(self, cwd: Path, slug: str | None = None) -> str:
         return projects.register_project(self.root, cwd, slug)
-
-    def remove_root(self, slug: str, project_root: str) -> bool:
-        return projects.remove_root(self.root, slug, project_root)
-
-    def deregister_project(self, slug: str) -> bool:
-        return projects.deregister_project(self.root, slug)
 
     def resolve_project(self, cwd: Path) -> str | None:
         return projects.resolve_project(self.root, cwd)

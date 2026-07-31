@@ -169,28 +169,33 @@ _Done when: the gallery reflects on-disk truth — against today's dev store
 that means both accepted skills render `missing on disk` — and every card
 round-trips to graph and suggestions._
 
-## Phase P — Projects directory _(shipped 2026-07-31)_
+## Phase P — Projects directory _(read-only shipped 2026-07-31; editing deferred)_
 
-Which folders have Neurobase enabled, and the edits that change that set.
-Contract in spec §14 ("Projects directory"); rationale in
+Which folders have Neurobase enabled, and what state each one is in. Contract in
+spec §14 ("Projects directory"); rationale in
 [ADR-0027](../adr/0027-registry-editing-from-the-web-ui.md).
 
-- `GET /projects` — one row per registered project: slug, every registered root,
-  whether that root still exists, denylist/auto-enable coverage badges, and
-  raw/curated/node counts (fail-soft per project). Plus a section for project
-  trees with **no** registry entry — unreachable memory that no other surface
-  reveals.
-- Five mutations, all CSRF-gated: `add` (the browser's `neurobase enable`),
-  `add-root`, `remove-root`, `deregister` (memory kept), and
-  `delete` (deregister + `rmtree`, behind a preview page and a typed
-  confirmation compared server-side).
-- New in `core`: `projects.remove_root` / `deregister_project` (strict-read, like
-  `register_project`), `denylist_hit` / `auto_enable_hit` (display-safe, no
-  `git rev-parse` per root), and `StoreHandle.node_count` /
-  `list_project_trees` / `delete_project_tree`.
-- CLI parity: `neurobase disable [--slug] [--repo-root] [--delete-memory]`.
-- Known-gaps opened by this work: **G8** (the delete's lock lives inside the tree
-  it removes) and **G9** (store-wide proposals are not cascaded).
+**Shipped:** `GET /projects` — one row per registered project with every root,
+whether that root still exists, denylist/auto-enable coverage, and
+raw/curated/node counts, all per-project fail-soft. Plus the project trees with
+**no** registry entry, which nothing surfaced before. New in `core`:
+`StoreHandle.node_count` / `list_project_trees`, and `projects.denylist_hit` /
+`auto_enable_hit` (display-safe, no `git rev-parse` per root).
+
+**Also shipped, and independent of the UI:** `register_project` refuses to
+register a root at or under the store — a hole `neurobase enable` and auto-enable
+had on their own, since the path *validated* and the path *registered* differ
+whenever a linked worktree is involved.
+
+**Phase P2 — registry editing (deferred, its own branch).** Built and reviewed
+here, then pulled: three rounds found seven blockers, and after the first every
+one was the same class — `load_registry` preserves arbitrary hand-edited content
+by contract, and the mutating routes trusted it. The branch inherits the five
+mutating routes, `projects.remove_root` / `deregister_project`,
+`StoreHandle.delete_project_tree`, `neurobase disable`, and the two known-gaps
+that only exist once a delete does. Its design premise, established the hard way:
+**treat every registry key and root as arbitrary bytes**, and give actions an
+identity that does not depend on the key's shape (a key may contain `/`).
 
 **This removes the registry list from Phase T's brief** — `/status` is now purely
 diagnostics (doctor checks, brain resolution, store schema, curator-log tails, run

@@ -2298,79 +2298,58 @@ review surface; later phases extend this section rather than bypassing it.
 
 ### Projects directory (Phase P)
 
-The registry surfaced as a screen, plus the edits that change it. This is the
-first web route that writes **`registry.toml`** and the first that can **delete
-captured memory**, so it carries rules the read surfaces do not.
+The registry surfaced as a screen. **Read-only** — registry *editing* from the
+browser was built and deferred to its own branch (ADR-0027) after three review
+rounds found one recurring defect class: `projects.load_registry` preserves
+arbitrary hand-edited content **by contract** (any TOML table key, any string in
+`roots`), and every mutating route trusted it.
 
 - `GET /projects` — every registered project: slug, each registered root,
   whether that root still exists on disk, whether it is covered by an `[enable]`
   `denylist` or `auto_enable_roots` entry, and its raw/curated/node counts.
-  **Every** store read per project **MUST fail soft** — a bad project degrades its
-  own row, never the page, which is the only place to go and unregister it.
-- That covers a registry entry whose *key* is not a valid slug.
-  `projects.load_registry` validates an entry's `roots` shape but deliberately
-  **not** its key, so a hand-edited `[projects."bad_slug"]` in otherwise valid
-  TOML is a reachable state, and every store accessor — `list_raw`,
-  `list_curated`, `node_count`, **and `memory_dir`** — raises `InvalidSlugError`
-  for it. Such an entry **MUST** render as a labelled row with `deregister` and
-  `remove-root` still working (both touch only `registry.toml`), and **MUST NOT**
-  be offered `add-root` or `delete`, which have no store path to build. It can
-  have no tree and no contents by construction.
+- **Every store read per project MUST fail soft** — a bad project degrades its
+  own row, never the page, which is the only place these states are visible.
+  This covers *all* accessors, not just the counting ones: `memory_dir` raising
+  outside the counting guard is what turned one hand-edited entry into a 500
+  that hid every healthy project.
+- **A registry key that is not a valid slug** (`[projects."bad_slug"]`, or one
+  containing `/`) **MUST** render as a labelled row. No store path can be built
+  for it, so it can have no tree and no contents; nothing on this surface may
+  interpolate such a key into a URL.
+- **A registered root that is not a usable path MUST render as its own state**
+  and skip the rule lookups. An embedded NUL is the sharp case: `Path.is_dir()`
+  swallows it but `Path.resolve()` raises `ValueError`, which is not an error the
+  filesystem-error handling anticipates.
 - The page **MUST also list project trees that have no registry entry.** Such a
   tree is unreachable — nothing resolves to it, so no hook can capture into it
   and no sweep walks it — and no other surface reveals it.
 - Registry paths are rendered **verbatim, not display-redacted** (the §12.8 rule
   is about draft bodies and third-party text). A root has to be readable to be
-  recognized, and removal echoes the stored string back; a masked path could be
-  neither identified nor acted on.
-- `POST /projects/add` and `POST /projects/{slug}/add-root` — register a folder,
-  or attach a second root to an existing project. Both go through
-  `projects.register_project`, in `core/enable.py`'s order: derive and validate
-  the slug, create the **tree**, then write the **registry** entry — so a
-  part-way failure can never leave a registered-but-treeless project. A
-  submitted path **MUST** be absolute (a relative one would resolve against the
-  *server's* cwd) and **MUST** already be a directory.
-- **The store-containment refusal binds the path that is actually registered,
-  not the path submitted.** `register_project` collapses its argument to the
-  git *common* root, so those are different paths whenever a linked worktree is
-  given: a worktree living outside the store whose common root **is** the store
-  passed a submitted-path check and registered the store root itself. The guard
-  therefore lives at the single registry write (`projects.register_project`
-  raising `ProjectInsideStoreError`), which binds the web UI, `neurobase
-  enable`, and auto-enable together; a caller creating the memory tree first
-  **MUST** additionally pre-check with `projects.is_inside_store` on the
-  *collapsed* root, or a refusal leaves a stray tree. Slug derivation and tree
-  creation **MUST** use that same collapsed root, or tree and registry entry
-  land under different names. `add-root` on an unregistered slug answers 404 — a stale
-  link must not become a create.
-- `POST /projects/{slug}/remove-root` — drop one root, matched as an **exact
-  string** against the registry (never a resolved path: a root whose directory
-  is gone is the case removal matters most for). Removing the last root
-  deregisters the project rather than leaving a zero-root entry.
-- `POST /projects/{slug}/deregister` — registry only. The memory tree **MUST**
-  be left intact; re-registering the same folder restores the project.
-- `GET|POST /projects/{slug}/delete` — the one irreversible action in the app,
-  and therefore two steps. The GET renders exactly what will be destroyed (tree
-  path, root paths, live counts) and offers deregister-without-delete as the
-  alternative. The POST **MUST** require the slug typed back and compare it
-  **server-side**; a mismatch answers 409 having touched nothing. Deletion
-  removes `<root>/projects/<slug>/` via `StoreHandle.delete_project_tree`, which
-  validates the slug (`^[a-z0-9-]+$`) *and* re-proves containment after
-  resolution, so neither a crafted slug nor a symlinked project directory can
-  direct the removal outside the store. That refusal raises `ValueError`, and the
-  route **MUST** attempt the tree removal *before* the registry write and answer
-  a typed 409 on refusal: deregistering first meant a **refused** delete still
-  performed an unrequested deregistration and returned a raw 500. Ordering the
-  writes this way makes "refused ⇒ nothing changed" structural rather than
-  dependent on a separate pre-check staying in sync. Store-wide proposals and the
-  ledger are **not** cascaded (see known-gaps G9), and the confirmation page says
-  so.
-- Every mutation here inherits the loopback + same-origin + CSRF gate above; no
-  route re-implements it.
+  recognized, and the CLI matches the stored string exactly.
+- **No mutating route exists on this surface.** Changing the list is
+  `neurobase enable` or a hand edit of `registry.toml`, and the page says so.
+
+### Registering a project (all front doors)
+
+The store-containment refusal **binds the path that is actually registered, not
+the path a caller submits.** `projects.register_project` collapses its argument
+to the git *common* root, so those differ whenever a linked worktree is given: a
+worktree outside the store whose common root **is** the store passed a
+submitted-path check and registered the store root itself, which would make the
+curator capture its own output. The guard therefore lives at the single registry
+write (`register_project` raising `ProjectInsideStoreError`), binding
+`neurobase enable`, auto-enable, and any future editing surface together.
+
+A caller that creates the memory tree *before* the registry write **MUST**
+additionally pre-check with `projects.is_inside_store` on the **collapsed** root,
+or a refusal leaves a stray tree behind. Slug derivation and tree creation
+**MUST** use that same collapsed root, or the tree and the registry entry land
+under different names.
 
 ### Parity
 
-Anything the web UI can do to the registry, the CLI can do too — `neurobase
-enable` and `neurobase disable` (`--slug`, `--repo-root`, `--delete-memory`)
-call the same `core.projects` / `StoreHandle` primitives. The two front doors
-share the primitives rather than each holding their own copy of the rules.
+The web UI writes nothing to the registry, so there is no parity gap to close
+here yet. When registry editing lands (ADR-0027), it and the CLI **MUST** share
+the `core.projects` / `StoreHandle` primitives rather than each holding its own
+copy of the rules — which is what put the store-containment guard at the registry
+write above, where every front door inherits it.

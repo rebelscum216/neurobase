@@ -13,32 +13,9 @@
   </div>
 </div>
 
-{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
-{% if error %}<div class="warning">{{ error }}</div>{% endif %}
-
-<section class="panel">
-  <h1>Enable a folder</h1>
-  <form method="post" action="/projects/add">
-    <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
-    <div class="form-row">
-      <div class="field grow">
-        <label for="add-path">Folder</label>
-        <input type="text" id="add-path" name="path" placeholder="/Users/you/Projects/my-repo" spellcheck="false" autocomplete="off" />
-        <span class="hint">An absolute path. Inside a git repo, the repo root is registered — worktrees collapse to one project.</span>
-      </div>
-      <div class="field">
-        <label for="add-slug">Slug (optional)</label>
-        <input type="text" id="add-slug" name="slug" placeholder="derived from the folder name" spellcheck="false" autocomplete="off" />
-        <span class="hint">Only needed on a name collision.</span>
-      </div>
-      <button class="btn primary" type="submit">Enable</button>
-    </div>
-  </form>
-</section>
-
 {% if not projects %}
 <section class="card">
-  <p>No projects are enabled yet. Add a folder above, or run <code class="mono">neurobase enable</code> inside a repo.</p>
+  <p>No projects are enabled yet. Run <code class="mono">neurobase enable</code> inside a repo.</p>
 </section>
 {% endif %}
 
@@ -59,24 +36,19 @@
 
   {% if not p.valid_slug %}
   <div class="warning">This entry's name is not a valid project slug (it must match
-    <code class="mono">^[a-z0-9-]+$</code>), so Neurobase can never store anything under it —
-    it was almost certainly hand-edited into <code class="mono">registry.toml</code>. Deregistering
-    removes it; there is no memory to lose.</div>
+    <code class="mono">^[a-z0-9-]+$</code>), so Neurobase can never store anything under it — it was
+    almost certainly hand-edited into <code class="mono">registry.toml</code>. Remove the entry from that
+    file to clear it.</div>
   {% endif %}
 
   <ul class="proj-roots">
     {% for r in p.roots %}
     <li class="proj-root">
-      <span class="path{% if not r.exists %} gone{% endif %}" title="{{ r.path }}">{{ r.path }}</span>
-      {% if not r.exists %}<span class="status-chip gone">missing</span>{% endif %}
+      <span class="path{% if not r.exists %} gone{% endif %}" title="{{ r.path }}">{{ r.path or "(empty)" }}</span>
+      {% if not r.usable %}<span class="status-chip gone" title="Not a usable filesystem path — hand-edited into registry.toml">unusable</span>
+      {% elif not r.exists %}<span class="status-chip gone">missing</span>{% endif %}
       {% if r.denylisted %}<span class="status-chip rejected" title="Covered by [enable] denylist entry {{ r.denylisted }}">denylisted</span>{% endif %}
       {% if r.auto_enabled %}<span class="status-chip muted" title="Covered by [enable] auto_enable_roots entry {{ r.auto_enabled }}">auto</span>{% endif %}
-      <form method="post" action="/projects/{{ p.slug }}/remove-root"
-            onsubmit="return confirm('Remove this root from {{ p.slug }}?\n\n{{ r.path }}\n\nThe memory tree is not touched.');">
-        <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
-        <input type="hidden" name="root" value="{{ r.path }}" />
-        <button class="btn" type="submit">Remove root</button>
-      </form>
     </li>
     {% endfor %}
   </ul>
@@ -92,31 +64,6 @@
     {% endif %}
   </div>
   {% endif %}
-
-  {# An invalid-slug row keeps only the registry-only actions. `add-root` would
-     re-derive the same unusable slug, and `delete` has no store path to build. #}
-  <div class="proj-actions">
-    {% if p.valid_slug %}
-    <form method="post" action="/projects/{{ p.slug }}/add-root">
-      <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
-      <div class="form-row">
-        <div class="field">
-          <label for="root-{{ p.slug }}">Add another root</label>
-          <input type="text" id="root-{{ p.slug }}" name="path" placeholder="/Users/you/other/checkout" spellcheck="false" autocomplete="off" />
-        </div>
-        <button class="btn" type="submit">Add root</button>
-      </div>
-    </form>
-    {% endif %}
-    <form method="post" action="/projects/{{ p.slug }}/deregister"
-          onsubmit="return confirm('Deregister {{ p.slug }}?\n\nIts memory tree stays on disk — nothing captured is deleted.');">
-      <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
-      <button class="btn" type="submit">Deregister</button>
-    </form>
-    {% if p.valid_slug %}
-    <a class="btn danger" href="/projects/{{ p.slug }}/delete">Delete memory…</a>
-    {% endif %}
-  </div>
 </section>
 {% endfor %}
 
@@ -125,7 +72,7 @@
   <h1>Unregistered memory</h1>
   <p>These projects have a memory tree in the store but no entry in <code class="mono">registry.toml</code>.
     Nothing resolves to them, so no session can be captured into them and no sweep walks them — their
-    contents are readable but frozen. Enable the matching folder above to reconnect one, or delete it.</p>
+    contents are readable but frozen. Enable the matching folder to reconnect one.</p>
 </section>
 {% for p in orphans %}
 <section class="card">
@@ -145,9 +92,6 @@
     <div class="metric"><span class="label">Counts</span><span class="value">unreadable</span></div>
     {% endif %}
   </div>
-  <div class="proj-actions">
-    <a class="btn danger" href="/projects/{{ p.slug }}/delete">Delete memory…</a>
-  </div>
 </section>
 {% endfor %}
 {% endif %}
@@ -163,4 +107,12 @@
   </dl>
 </section>
 {% endif %}
+
+<section class="panel">
+  <h1>Changing this list</h1>
+  <p>This page is read-only for now. Enable a folder with <code class="mono">neurobase enable</code> from
+    inside it; changing or removing an entry means editing <code class="mono">registry.toml</code> in the
+    store by hand. Editing from here is built but deliberately held back — see
+    <code class="mono">ADR-0027</code>.</p>
+</section>
 {% endblock %}

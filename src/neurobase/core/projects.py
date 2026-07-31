@@ -240,57 +240,6 @@ def register_project(root: Path, cwd: Path, slug: str | None = None) -> str:
     return final_slug
 
 
-def remove_root(root: Path, slug: str, project_root: str) -> bool:
-    """Drop one registered root from ``slug``. Returns ``False`` (writing nothing)
-    when the slug isn't registered or doesn't carry that root.
-
-    ``project_root`` is matched as an **exact string** against what the registry
-    stores, not as a resolved path: the registry holds whatever string was written
-    (``register_project`` writes ``str(git_common_root(...))``, a hand-edit may hold
-    ``~/x``), and a caller removing a root is always echoing back a value it just
-    read from :func:`load_registry`. Resolving here would make removal depend on
-    whether the directory still exists — exactly the case where removal matters most.
-
-    Removing a slug's **last** root deletes the entry outright rather than leaving
-    ``roots = []`` behind: a zero-root entry can never be matched by
-    :func:`resolve_project`, so it would be an invisible project that every sweep
-    still walks.
-
-    **Reads strictly**, like :func:`register_project` and for the same reason — this
-    read exists only to be written back, so an unparseable registry must raise here
-    rather than be treated as empty and rewritten from ``{}``, dropping every other
-    project's roots."""
-    registry = _read_registry(root)
-    roots = registry.get(slug)
-    if roots is None or project_root not in roots:
-        return False
-    remaining = [entry for entry in roots if entry != project_root]
-    if remaining:
-        registry[slug] = remaining
-    else:
-        del registry[slug]
-    _write_registry(root, registry)
-    return True
-
-
-def deregister_project(root: Path, slug: str) -> bool:
-    """Remove ``slug`` and all its roots from the registry. Returns ``False``
-    (writing nothing) when the slug isn't registered.
-
-    **Registry only** — the project's memory tree under ``<root>/projects/<slug>/``
-    is left untouched, so nothing captured is destroyed and re-registering the same
-    directory restores the project intact. Deleting the tree is a separate,
-    explicitly destructive operation (``StoreHandle.delete_project_tree``).
-
-    Reads strictly, for the reason given in :func:`remove_root`."""
-    registry = _read_registry(root)
-    if slug not in registry:
-        return False
-    del registry[slug]
-    _write_registry(root, registry)
-    return True
-
-
 def resolve_project(root: Path, cwd: Path) -> str | None:
     """Longest-prefix match of ``cwd``'s (git-collapsed) path against every
     registered root. ``None`` ⇒ untracked."""
@@ -359,14 +308,17 @@ def _config_hit(path: Path, paths: list[str]) -> str | None:
     subprocess per call, and these run once per registered root on every render of
     the Projects directory.
 
-    Fails closed and silent on a path that can't be resolved (a symlink loop, an
-    unreadable parent): "not covered" rather than an exception escaping into a
+    Fails closed and silent on a path that can't be resolved: a symlink loop
+    (``RuntimeError``), an unreadable parent (``OSError``), or a path that is not a
+    valid path at all — an embedded NUL raises ``ValueError`` from ``resolve()``,
+    and a registered root is an arbitrary hand-editable string, so that is
+    reachable (Codex F6). "Not covered" rather than an exception escaping into a
     hook or a page render."""
     if not paths:
         return None
     try:
         candidate = path.expanduser().resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return None
     for raw, configured in _resolved_config_entries(paths):
         if _is_within(candidate, configured):

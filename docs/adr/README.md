@@ -57,7 +57,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0024](0024-reopen-a-rejected-proposal.md) | `reopen` — the one sanctioned `rejected → proposed` transition (Reconsider/un-reject) | Accepted | Web UI reconsider action |
 | [0025](0025-brain-call-harness-isolation.md) | Brain-call harness isolation — the curator call must *be* a curator call | Accepted | G5 |
 | [0026](0026-denylist-is-repo-scoped.md) | `denylist` matching is repo-scoped — an entry inside a repo is not a carve-out (revises ADR-0019 denylist granularity) | Accepted | independent review I3/I5/I7 |
-| [0027](0027-registry-editing-from-the-web-ui.md) | The registry is editable from the web UI, including deleting a project's memory (spec §14 Phase P; extends ADR-0021) | Accepted | app-shell Phase P |
+| [0027](0027-registry-editing-from-the-web-ui.md) | The Projects directory ships read-only; registry editing deferred after three review rounds found one recurring hostile-registry defect class (spec §14 Phase P; extends ADR-0021) | Accepted | app-shell Phase P |
 
 ADRs 0016–0018 are the three **Phase-0** decisions promoted from the
 [hardening plan](../notes/2026-07-21-hardening-plan-draft.md) (per the

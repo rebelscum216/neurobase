@@ -86,7 +86,14 @@ function rmsRadius(nodes) {
   return Math.sqrt(sum / nodes.length);
 }
 
-/* Wall-clock perf, measured SCALE-FREE.
+/* Wall-clock perf, measured as a HOST-SPEED-NORMALIZED ratio.
+ *
+ * (Codex P3-MAINTAINABILITY-014: this header used to call the ratio "SCALE-FREE"
+ * and claim same-process timing makes contention "scale both ends". That
+ * overclaims — see the limits stated below. The thresholds are unchanged; only
+ * the description of what they prove is. This test was rewritten once already
+ * because its calibration comment promised portability it did not have, so the
+ * comment is held to the same standard as the assertion.)
  *
  * The previous version of this asserted absolute budgets — 350ms at 2,100 nodes
  * and 650ms at 4,000 — derived as "roughly 2x the time measured on this host".
@@ -102,10 +109,23 @@ function rmsRadius(nodes) {
  * 3,200ms, so a 650ms line says nothing about quadratic there; it only says the
  * machine was busy.
  *
- * What IS hardware-independent is the RATIO between two sizes timed in the same
- * process on the same machine: contention and CPU speed scale both ends. Each
+ * What normalizes for host SPEED is the RATIO between two sizes timed in the same
+ * process on the same machine: a uniformly faster or slower CPU divides out. Each
  * size is timed best-of-3, because timing noise only ever ADDS time, which makes
  * the minimum the robust estimator.
+ *
+ * Two limits, stated so nobody infers a stronger invariance than this has:
+ *   - The samples are SEQUENTIAL, not simultaneous. If the machine changes load
+ *     or frequency regime between the two groups, that shift does NOT cancel —
+ *     best-of-3 rejects additive spikes WITHIN a group, and cannot see a change
+ *     BETWEEN them. This is why the ceiling keeps real headroom rather than
+ *     hugging the healthy band.
+ *   - The healthy band below was sampled on ONE host. Codex measured 1.802-1.996
+ *     on its own, already outside it. That is expected — and is the reason the
+ *     ceiling is set from the REGRESSION side (13% below the uncapped 2.64x), not
+ *     from a tight multiple of the healthy side.
+ * If this flakes on CI, the fix is interleaved small/large pairs plus a median and
+ * logged CI ratios — evidence — not another single-host adjustment to the number.
  *
  * The threshold is derived from measurement, not from the 3.63x you would predict
  * for quadratic — because wall-clock is a DAMPED signal. Per-run fixed costs
@@ -159,15 +179,22 @@ test("layout TIME scales linearly with node count, not quadratically", () => {
 });
 
 test("layout is not catastrophically slow in absolute terms", () => {
-  // Deliberately NOT a perf budget — the ratio above is the perf guard. This
-  // catches only what a ratio structurally cannot see: a UNIFORM slowdown, where
-  // some expensive per-node work scales with everything else and leaves the ratio
-  // at ~1.9 while every size gets 10x slower.
+  // A fixed CATASTROPHIC backstop, deliberately not a perf budget — the ratio
+  // above is the perf guard. This is the one thing a ratio structurally cannot
+  // see: a UNIFORM slowdown, where expensive per-node work scales with everything
+  // else and leaves the ratio near healthy while every size gets slower together.
   //
-  // So it is set from the slowest healthy measurement ever OBSERVED (926ms on a
-  // contended macOS CI runner), not from a multiple of this laptop's number —
-  // ~5x that, which no amount of runner contention has approached. If this ever
-  // fires, the answer is to investigate, not to raise the number.
+  // It promises no particular relative slowdown, and the earlier comment here was
+  // wrong to imply one (Codex P3-MAINTAINABILITY-014): 10x this laptop's ~264ms is
+  // ~2.6s and would sail past this line. What it is set from is the slowest
+  // healthy measurement ever OBSERVED — 926ms, on a contended macOS CI runner —
+  // with ~5x headroom above it, a margin no runner contention has ever approached.
+  // It is therefore loose enough never to fire spuriously, and it is not vacuous:
+  // per-scan-cost mutation reached 23,771ms against this line while the ratio
+  // stayed at 1.99 and the scan counts did not move at all.
+  //
+  // Tightening it would recreate the cross-hardware bug this commit fixed. If it
+  // ever fires, investigate — do not raise the number.
   const ms = fastestMs(() => runGraph(makePayload(4000)));
   assert.ok(ms < 5000, `layout took ${ms.toFixed(0)}ms at 4,000 nodes — something is badly wrong`);
 });

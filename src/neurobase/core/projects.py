@@ -25,6 +25,17 @@ class ProjectSlugCollisionError(ValueError):
     """The slugified name already maps to a different root."""
 
 
+class RegistryNotContainedError(ValueError):
+    """``registry.toml`` resolves outside the store root, so it is not this
+    store's selector at all (Codex P2-SAFETY-SECURITY-010).
+
+    Raised only on the read-for-**rewrite** path, which must fail closed: reading
+    an external registry to write it back would both import its entries into this
+    store's mapping and follow the symlink to rewrite a file outside the store.
+    The read-only paths never raise this — they fail soft to empty, matching the
+    §10 posture for a missing or corrupt registry."""
+
+
 class RegistryShapeError(ValueError):
     """``registry.toml`` parsed as TOML but is not a registry: ``projects`` is not
     a table, an entry is not a table, or a ``roots`` list holds a non-string.
@@ -40,22 +51,54 @@ def slugify(name: str) -> str:
     return _SLUG_INVALID.sub("-", name.lower()).strip("-")
 
 
-def registry_path(root: Path) -> Path:
+def _registry_path(root: Path) -> Path:
     """``<root>/registry.toml``.
 
-    Public because containment is enforced on it at the ``StoreHandle`` accessor
-    (Codex P2-SAFETY-SECURITY-010): the registry decides which project namespaces
-    a sweep walks at all, so a symlinked one selects namespaces from outside the
-    store. The guard needs to name the path it is proving, and re-deriving
-    ``root / "registry.toml"`` at the call site would be a second, unvalidated way
-    to name a store path — exactly what ADR-0015's chokepoint exists to prevent.
-    """
+    **Private on purpose** (Codex P2-SAFETY-SECURITY-013). Round 4's fix made this
+    public so the guard at ``StoreHandle.load_registry`` could name the path it was
+    proving — but ``scripts/check_store_chokepoint.py`` matches accessors by *name*
+    and cannot see the ``"registry.toml"`` literal hidden inside a helper, so the
+    public spelling handed every production module a CI-approved way to reach the
+    registry from a raw root: the precise reintroduction ADR-0015 exists to make
+    mechanically hard. Containment now lives *below* this helper (see
+    :func:`registry_is_contained`), so no caller outside this module ever needs to
+    name the path — and the guard lists both spellings anyway, so re-publishing it
+    fails CI rather than silently reopening the hole."""
     return root / "registry.toml"
 
 
-# Kept as the module-internal spelling so the many existing call sites below read
-# unchanged; both names are the same function.
-_registry_path = registry_path
+def registry_is_contained(root: Path) -> bool:
+    """True when ``<root>/registry.toml`` resolves to somewhere at or beneath
+    ``root`` — i.e. the registry this store would read is really *this store's*.
+
+    The registry is the **selector**, not another document: it decides which
+    project namespaces a sweep walks at all, so containing the five document
+    enumerations (raw, curated, tombstone, journal, proposals) while accepting an
+    external selector leaves the identity boundary incomplete under the same
+    symlink threat model (Codex P2-SAFETY-SECURITY-010).
+
+    Both sides are resolved, so a symlinked ``registry.toml`` cannot smuggle in a
+    selector from outside the store, while a store whose own **root** is reached
+    through a symlink (macOS ``/var`` → ``/private/var``, a symlinked parent, a
+    relative path) still matches — the root is resolved too. A *missing* registry
+    resolves to its own would-be location and is therefore contained: absent is
+    not hostile, and it already reads as empty one layer down.
+
+    Fails **closed** on a ``resolve()`` that raises — a self-referential symlink
+    loop (``RuntimeError``) or an unreadable parent (``OSError``) — matching
+    :meth:`StoreHandle.contains`, whose definition this deliberately mirrors so
+    the two guards can never disagree about what "contained" means.
+
+    Public because the **doctor** must be able to tell an uncontained registry
+    from an absent one on its no-handle (corrupt ``store.toml``) path; it is in
+    the chokepoint's forbidden set and allow-listed there for exactly that one
+    call site."""
+    try:
+        resolved_root = root.resolve()
+        target = _registry_path(root).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return target == resolved_root or target.is_relative_to(resolved_root)
 
 
 def _load_toml(root: Path) -> dict[str, Any]:
@@ -99,8 +142,22 @@ def _shape(data: dict[str, Any], *, strict: bool) -> dict[str, list[str]]:
 
 def _read_registry(root: Path) -> dict[str, list[str]]:
     """Strict read, for the read-for-rewrite path only. Raises on a registry that
-    is unreadable (``OSError``), unparseable (``tomllib.TOMLDecodeError``), or not
-    shaped like a registry (:class:`RegistryShapeError`)."""
+    is unreadable (``OSError``), unparseable (``tomllib.TOMLDecodeError``), not
+    shaped like a registry (:class:`RegistryShapeError`), or **not contained**
+    (:class:`RegistryNotContainedError`).
+
+    Containment is checked *before* the read, not after: this path exists only to
+    write the result back, so merely reading an external registry would import its
+    entries into the mapping handed to the writer (Codex P2-SAFETY-SECURITY-010,
+    round 5 — the rewrite probe carried an external ``injected`` entry straight
+    through). Fail closed here rather than fail soft, because an empty mapping
+    would be *worse* than an exception: it would rewrite the file from ``{}`` and
+    drop every real project's roots."""
+    if not registry_is_contained(root):
+        raise RegistryNotContainedError(
+            f"{_registry_path(root)} resolves outside the store ({root}) — refusing "
+            "to read a registry this store does not own for a rewrite"
+        )
     return _shape(_load_toml(root), strict=True)
 
 
@@ -117,9 +174,28 @@ def load_registry(root: Path) -> dict[str, list[str]]:
     "Corrupt" covers valid TOML of the wrong shape too — see :func:`_shape`,
     which is where the file-level and shape-level halves of that guarantee meet.
 
+    An **uncontained** registry — one whose ``registry.toml`` resolves outside
+    ``root`` — reads as empty too (Codex P2-SAFETY-SECURITY-010). The guard sits
+    here, at the low-level accessor, rather than only on the handle: round 4 put it
+    on ``StoreHandle.load_registry`` alone, and round 5's probe walked straight past
+    it through ``resolve_project`` → this function, still resolving the
+    attacker-selected slug on the capture, recall, ``status``, ``curate``, doctor and
+    MCP paths. Every registry read in the process reaches one of these two
+    functions, so this is the boundary; a guard on one method above it is a guard
+    on one caller.
+
+    Empty rather than raising is deliberate and is the ruling Codex gave in round 5:
+    it preserves the §10/§13 fail-soft posture and stops a single hostile selector
+    recreating P2-REGRESSION-002's whole-surface failure. Empty must not be mistaken
+    for *healthy*, though — telling "uncontained" from "absent" is
+    :func:`registry_is_contained`'s job, and the doctor is where that distinction is
+    reported.
+
     Read-for-**rewrite** is the deliberate exception and does not come through
     here — see :func:`register_project`, which must not overwrite a registry it
-    could not fully parse."""
+    could not fully parse, nor one it does not own."""
+    if not registry_is_contained(root):
+        return {}
     try:
         data = _load_toml(root)
     except (OSError, tomllib.TOMLDecodeError):
@@ -128,6 +204,19 @@ def load_registry(root: Path) -> dict[str, list[str]]:
 
 
 def _write_registry(root: Path, registry: dict[str, list[str]]) -> None:
+    """The only registry writer. Refuses an uncontained target.
+
+    ``register_project`` already fails closed one step earlier in
+    :func:`_read_registry`, so in practice this never fires for it — it is here
+    because *writing* through a symlink is the more damaging half of the finding
+    (it mutates a file outside the store), and a future second writer must not have
+    to remember the rule. Guarding the read but not the write would be exactly the
+    "one caller remembered" mistake round 5 found."""
+    if not registry_is_contained(root):
+        raise RegistryNotContainedError(
+            f"{_registry_path(root)} resolves outside the store ({root}) — refusing "
+            "to write a registry this store does not own"
+        )
     path = _registry_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {"projects": {slug: {"roots": roots} for slug, roots in registry.items()}}
@@ -184,9 +273,12 @@ def register_project(root: Path, cwd: Path, slug: str | None = None) -> str:
     **Reads strictly**, unlike :func:`load_registry`: this read exists only to be
     written back, so treating an unparseable registry as empty would rewrite the
     file from ``{}`` and silently drop every other project's roots. A corrupt
-    registry raises here instead — ``core/enable.py`` already catches
-    ``TOMLDecodeError``/``OSError`` and fails closed, which is the documented
-    auto-enable posture."""
+    registry raises here instead — and so does an **out-of-store** one
+    (:class:`RegistryNotContainedError`), which this path must refuse before
+    reading rather than fail soft, since it would otherwise import the external
+    registry's entries and rewrite a file outside the store. ``core/enable.py``
+    catches all of these and fails closed, which is the documented auto-enable
+    posture."""
     project_root = git_common_root(cwd) or cwd.resolve()
     final_slug = derive_slug(project_root, slug)
     registry = _read_registry(root)

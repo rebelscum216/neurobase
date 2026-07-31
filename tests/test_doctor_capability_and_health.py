@@ -17,6 +17,7 @@ import pytest
 
 from neurobase.cli import diagnostics
 from neurobase.core import capabilities
+from neurobase.core.store_handle import StoreMode, open_store
 
 CURRENT = "/opt/current/bin/neurobase"
 STALE = "/opt/stale/bin/neurobase"
@@ -394,8 +395,10 @@ def test_unreadable_log_warns_rather_than_reporting_healthy(tmp_path: Path) -> N
     passes recorded" — restoring the all-green blindness this check prevents.
 
     A directory standing in for the log raises `OSError` on every platform
-    (`IsADirectoryError` on POSIX, `PermissionError` on Windows), so this needs
-    no monkeypatching and stays honest on the Windows leg of the matrix.
+    (`IsADirectoryError` on POSIX, `PermissionError` on Windows), so this needs no
+    monkeypatching and is cross-platform by construction — it would stay honest if
+    Windows were ever added back to the matrix (parked 2026-07-20; CI runs ubuntu
+    and macos).
     """
     root, repo = _store(tmp_path, [])
     log = root / "projects" / "p" / "memory" / ".curator-log.jsonl"
@@ -853,3 +856,76 @@ def test_free_threaded_and_debug_abi_installs_are_accepted(
     )
 
     assert capabilities.provided_by(executable) == capabilities.PROVIDES
+
+
+# --- an uncontained registry is UNHEALTHY, not "not enabled" -----------------
+#
+# Codex P2-SAFETY-SECURITY-010 (round 5). An out-of-store registry selects nothing,
+# so resolution returns None — indistinguishable here from an ordinary unregistered
+# repo. Reporting "not enabled" would send the operator to run `neurobase enable`,
+# which fails closed against the same registry, while the real problem went
+# unreported. Empty is the right operational posture; it must not read as healthy.
+
+
+def _store_with_external_registry(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root.mkdir(parents=True)
+    (root / "store.toml").write_text("schema = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "registry.toml").write_text(
+        f'[projects.externally-selected]\nroots = ["{repo}"]\n', encoding="utf-8"
+    )
+    (root / "registry.toml").symlink_to(outside / "registry.toml")
+    return root, repo
+
+
+def test_doctor_reports_an_uncontained_registry_as_an_error(tmp_path: Path) -> None:
+    root, repo = _store_with_external_registry(tmp_path)
+    handle = open_store(root, StoreMode.READ)
+
+    check = diagnostics._project_check(handle, root, repo)
+
+    assert check.status == "error"
+    assert "outside the store" in check.detail
+
+
+def test_doctor_reports_an_uncontained_registry_without_a_handle(tmp_path: Path) -> None:
+    """The no-handle branch is doctor's corrupt-``store.toml`` fallback. A broken
+    store must not *mask* a hostile registry — the two are independent concerns, and
+    this branch has no handle to ask, which is why it reads the predicate raw."""
+    root, repo = _store_with_external_registry(tmp_path)
+    (root / "store.toml").write_text("schema = not-a-number\n", encoding="utf-8")
+
+    check = diagnostics._project_check(None, root, repo)
+
+    assert check.status == "error"
+    assert "outside the store" in check.detail
+
+
+def test_doctor_still_says_not_enabled_for_an_ordinary_unregistered_repo(
+    tmp_path: Path,
+) -> None:
+    """The distinction this finding is about: absent registry ⇒ warn + the enable
+    remedy; hostile registry ⇒ error. If both reported the same thing, the guard
+    above would be indistinguishable from no guard at all."""
+    root = tmp_path / "store"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root.mkdir(parents=True)
+    (root / "store.toml").write_text("schema = 1\n", encoding="utf-8")
+
+    check = diagnostics._project_check(open_store(root, StoreMode.READ), root, repo)
+
+    assert check.status == "warn"
+    assert "not enabled" in check.detail
+
+
+def test_doctor_reports_a_healthy_registry_as_ok(tmp_path: Path) -> None:
+    root, repo = _store(tmp_path, [])
+
+    check = diagnostics._project_check(open_store(root, StoreMode.READ), root, repo)
+
+    assert check.status == "ok"

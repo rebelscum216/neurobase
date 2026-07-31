@@ -5,7 +5,9 @@
  * So these tests execute the real `templates/graph.html` script block, with the
  * payload the server would have embedded, and assert on behaviour.
  *
- * No npm, no package.json, no node_modules: `node --test` and this file. The
+ * No npm install, no dependencies, no node_modules: `node --test` and this file.
+ * (The repo does carry a `package.json` — an npm name reservation, not a manifest
+ * anything installs from.) The
  * stub implements only what the renderer actually touches; anything it reaches
  * for that is missing throws loudly rather than silently returning undefined,
  * so the harness cannot drift into pretending.

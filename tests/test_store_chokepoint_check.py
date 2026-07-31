@@ -177,6 +177,99 @@ def test_doctor_store_toml_path_is_allowlisted() -> None:
     assert _details("cli/diagnostics.py", src) == []
 
 
+# --- the registry PATH BUILDER, in every import shape (Codex P2-SAFETY-SECURITY-013) ---
+#
+# Round 4 promoted ``_registry_path`` to a public ``registry_path`` so a containment
+# guard could name the file it was proving. That handed every production module a
+# CI-approved way to reach the registry from a raw root: this guard matches accessors
+# by NAME, and the ``"registry.toml"`` literal is hidden *inside* the helper, so
+# SENSITIVE_LITERALS could not see it either — Codex's probes returned zero violations
+# while the repo check still printed OK. The helper is private again AND both spellings
+# are forbidden, so re-publishing it fails the gate. Each import shape gets its own test
+# because a name-matching guard is exactly the kind that passes for the spelling you
+# thought of and misses the one you didn't (round-1 F1 cost two of these).
+
+
+def test_flags_registry_path_module_attribute() -> None:
+    src = (
+        "from neurobase.core import projects\n\n"
+        "def f(root):\n    return projects.registry_path(root).read_text()\n"
+    )
+    details = _details("webui/other.py", src)
+    assert len(details) == 1 and "projects.registry_path" in details[0]
+
+
+def test_flags_private_registry_path_module_attribute() -> None:
+    """The underscore spelling is what exists today, so reaching for it across
+    modules must fail too — privacy is a convention, this guard is mechanical."""
+    src = (
+        "from neurobase.core import projects\n\n"
+        "def f(root):\n    return projects._registry_path(root).read_text()\n"
+    )
+    details = _details("webui/other.py", src)
+    assert len(details) == 1 and "projects._registry_path" in details[0]
+
+
+def test_flags_directly_imported_registry_path() -> None:
+    src = (
+        "from neurobase.core.projects import registry_path\n\n"
+        "def f(root):\n    return registry_path(root)\n"
+    )
+    details = _details("adapters/x.py", src)
+    assert len(details) == 1 and "registry_path" in details[0]
+
+
+def test_flags_aliased_registry_path_import() -> None:
+    """``as`` is the cheapest way around a name-matching guard; the visitor binds the
+    local alias to the original accessor, so the alias is flagged under its real name."""
+    src = (
+        "from neurobase.core.projects import registry_path as rp\n\n"
+        "def f(root):\n    return rp(root)\n"
+    )
+    details = _details("adapters/x.py", src)
+    assert len(details) == 1 and "registry_path" in details[0]
+
+
+def test_flags_relative_import_of_registry_path() -> None:
+    src = (
+        "from ..core.projects import registry_path\n\n"
+        "def f(root):\n    return registry_path(root)\n"
+    )
+    details = _details("recommender/x.py", src)
+    assert len(details) == 1 and "registry_path" in details[0]
+
+
+def test_flags_fully_dotted_registry_path() -> None:
+    src = (
+        "import neurobase.core.projects\n\n"
+        "def f(root):\n    return neurobase.core.projects.registry_path(root)\n"
+    )
+    details = _details("curator/x.py", src)
+    assert len(details) == 1 and "registry_path" in details[0]
+
+
+def test_flags_registry_is_contained_outside_diagnostics() -> None:
+    """The containment predicate names the same path. Read-side callers never need
+    it — an uncontained registry already reads as empty — so only doctor's health
+    check may ask, and only doctor."""
+    src = (
+        "from neurobase.core import projects\n\n"
+        "def f(root):\n    return projects.registry_is_contained(root)\n"
+    )
+    details = _details("webui/graph_view.py", src)
+    assert len(details) == 1 and "registry_is_contained" in details[0]
+
+
+def test_doctor_registry_is_contained_is_allowlisted() -> None:
+    """Doctor's no-handle branch must be able to tell an uncontained registry from an
+    absent one even when ``store.toml`` is corrupt, so it has no handle to ask."""
+    src = (
+        "from neurobase.core import projects\n\n"
+        "def f(root):\n    return projects.registry_is_contained(root)\n"
+    )
+    assert _details("cli/diagnostics.py", src) == []
+
+
 def test_allowlist_is_scoped_to_diagnostics() -> None:
     """The allow-list is (file, name) — the same call from any other module is
     still a violation, so the exception can't leak."""

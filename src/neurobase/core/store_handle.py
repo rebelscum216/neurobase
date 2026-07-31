@@ -241,39 +241,53 @@ class StoreHandle:
 
     # --- registry accessors (core.projects) ----------------------------------
 
+    # The registry is the *selector*, not another document: it decides which
+    # project namespaces a sweep walks at all, so containing the five document
+    # enumerations (raw, curated, tombstone, journal, proposals) while accepting an
+    # external selector left the identity boundary incomplete (Codex
+    # P2-SAFETY-SECURITY-010).
+    #
+    # Round 4 put that guard on ``load_registry`` HERE, and round 5 showed why that
+    # was the wrong altitude: ``resolve_project`` and ``register_project`` delegate
+    # to the raw-root functions, which call the *low-level* ``projects.load_registry``
+    # — so an external registry read as ``{}`` through this method while still
+    # resolving the attacker-selected slug through the next one, on the capture,
+    # recall, ``status``, ``curate``, doctor and MCP paths. A guard on one method of
+    # three is a guard on one caller.
+    #
+    # So containment now lives at the ``core.projects`` accessor boundary itself
+    # (``registry_is_contained`` + the three enforcement points there), which every
+    # registry read in the process reaches — including the doctor's sanctioned
+    # no-handle fallback, which has no handle to guard. These three methods are
+    # therefore plain delegates again, and deliberately so: a second guard here
+    # could disagree with the one below it, which is exactly the failure mode
+    # round 5 warned about for 008 vs 010.
+
     def load_registry(self) -> dict[str, list[str]]:
-        """``{slug: [roots...]}`` for this store — **contained**, then fail-soft.
-
-        The registry is the *selector*, not another document: it decides which
-        project namespaces a sweep walks at all. Containing the five document
-        enumerations (raw, curated, tombstone, journal, proposals) while accepting
-        an external selector leaves the identity boundary incomplete under the
-        same symlink threat model — a symlinked ``registry.toml`` made
-        ``graph_payload`` emit an unregistered project's sessions, facts and edges
-        (Codex P2-SAFETY-SECURITY-010).
-
-        The check belongs **here**, at the shared accessor, rather than in the
-        graph: twelve call sites reach this method — search, enable, MCP, CLI,
-        corpus, the emitters, the app shell and four routes — and
-        ``_artifact_state`` reopens the store to re-derive artifact targets, so a
-        graph-only guard would be bypassed by the liveness path alone.
-
-        An out-of-store registry reads as **empty**, matching what
-        :func:`projects.load_registry` already does for a missing or corrupt one
-        (spec §10): a store with no usable registry has no projects to sweep,
-        which is the truthful answer and one every caller already handles. A store
-        whose own root is reached through a symlink still works, because
-        :meth:`contains` resolves both sides.
-        """
-        if not self.contains(projects.registry_path(self.root)):
-            return {}
+        """``{slug: [roots...]}`` for this store. An out-of-store, missing or
+        corrupt registry all read as empty (spec §10)."""
         return projects.load_registry(self.root)
 
     def register_project(self, cwd: Path, slug: str | None = None) -> str:
+        """Register ``cwd`` under a derived or explicit slug.
+
+        Read-for-rewrite, so it fails **closed** on an out-of-store registry
+        (``projects.RegistryNotContainedError``) rather than importing its entries
+        or rewriting a file outside the store."""
         return projects.register_project(self.root, cwd, slug)
 
     def resolve_project(self, cwd: Path) -> str | None:
+        """The project slug for ``cwd``, or ``None`` when untracked — which is also
+        the answer for an out-of-store registry, since it selects nothing here."""
         return projects.resolve_project(self.root, cwd)
+
+    def registry_is_contained(self) -> bool:
+        """Whether this store's ``registry.toml`` really belongs to this store.
+
+        Read-side callers do not need this — they get empty either way. It exists
+        so the **doctor** can tell "no registry" from "a registry pointing out of
+        the store", which are the same empty result but very different health."""
+        return projects.registry_is_contained(self.root)
 
 
 def _make(root: Path, mode: StoreMode, schema: int | None, profile: str | None) -> StoreHandle:

@@ -131,6 +131,52 @@ surface**, exactly as today. After a handle opens:
   corrupt registry as it does today — a write path is allowed to refuse a store it
   cannot safely rewrite.
 
+**Registry CONTAINMENT is part of this chokepoint** _(added 2026-07-31 — Codex
+`P2-SAFETY-SECURITY-010`, PR #11 rounds 4–5)._ Parseability is fail-soft, but
+*ownership* is not a parse concern at all. `<root>/registry.toml` is the store's
+**selector** — it decides which project namespaces any sweep walks — so a symlinked
+registry selects namespaces from **outside** the store while every document
+enumeration remains correctly contained. That is the same raw-root class this ADR
+exists to close, one level up: not "which file did we read" but "which store did we
+read *for*".
+
+Two things this ADR got wrong in the first attempt, both worth recording because the
+shape recurs:
+
+1. **Altitude.** The guard was first placed on `StoreHandle.load_registry()` alone.
+   `resolve_project` and `register_project` delegate to the raw-root functions, which
+   reach the low-level reader directly — so an external registry read as `{}` through
+   the guarded method while still resolving the attacker-selected slug on the capture,
+   recall, `status`, `curate`, `doctor` and MCP paths. **A guard on one method of an
+   accessor trio is a guard on one caller.** Containment therefore lives at the
+   `core/projects.py` accessor boundary itself, which every registry read in the
+   process reaches — including doctor's sanctioned no-handle fallback, which by
+   definition has no handle to guard. The handle's three methods are plain delegates,
+   deliberately: a second guard above could disagree with the one below, and two
+   containment definitions that can drift is the failure this ADR's whole design
+   avoids.
+2. **The enforcement model must be able to SEE the exemption.** The first fix promoted
+   `_registry_path` to a public `registry_path` so the guard could name the file it was
+   proving. But `scripts/check_store_chokepoint.py` matches accessors **by name**, and
+   the `"registry.toml"` literal is hidden inside that helper — so the public spelling
+   handed every production module a CI-approved way to reach the registry from a raw
+   root, exactly the reintroduction step 5 exists to make mechanically hard (Codex
+   `P2-SAFETY-SECURITY-013`). The helper is private again, and `registry_path`,
+   `_registry_path` and `registry_is_contained` are all in the forbidden set, so
+   re-publishing it fails the gate rather than silently reopening the hole. **Making a
+   name public inside `core` is not the problem; making it public while the guard
+   cannot see it is.**
+
+Posture, mirroring the read/write split above: read paths fail **soft** to empty (one
+hostile selector must not blank a surface — §13, and the regression this project
+already paid for once); the read-for-rewrite path fails **closed**, before the read,
+since reading an external registry would import its entries into the mapping handed to
+the writer and then follow the symlink to rewrite a file outside the store. Because
+"uncontained" and "absent" both read as empty, `doctor` gets
+`projects.registry_is_contained(root)` — allow-listed by (file, name) as its third
+sanctioned raw-root read — and reports the uncontained case as an **error**. Empty is
+the right operational answer; it must not read as *healthy*.
+
 The handle carries only the `store.toml` schema verdict; registry validation lives on
 the registry accessors, not the whole-store gate. Concretely, the per-surface
 fail-soft wrappers that exist today (`_safe_registry`, `build_server()`'s

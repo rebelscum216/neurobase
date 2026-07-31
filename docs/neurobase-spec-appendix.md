@@ -983,6 +983,30 @@ schema-independent by design — see the maintenance exception below.
   roots. A corrupt registry therefore raises there — `TOMLDecodeError`, `OSError`,
   or `projects.RegistryShapeError`; `core/enable.py` catches all three and fails
   closed, per the auto-enable posture above.
+- **The registry MUST be contained by its own store.** `<root>/registry.toml` is
+  the store's **selector**, not another document: it decides which project
+  namespaces any sweep walks at all. A `registry.toml` that resolves outside
+  `<root>` — a symlink — therefore selects namespaces from outside the store, and
+  containing the five *document* enumerations (raw, curated, tombstone, journal,
+  proposals) while accepting an external selector leaves the identity boundary
+  incomplete. Containment is decided by resolving **both** sides, so a store whose
+  own root is reached through a symlink (macOS `/var` → `/private/var`, a symlinked
+  parent, a relative path) is unaffected; an absent registry is contained, since it
+  resolves to its own would-be location.
+  The rule binds the **whole accessor boundary in `core/projects.py`**, not one
+  method above it: read paths (`load_registry`, and therefore `resolve_project`)
+  **fail soft to empty / `None`**, preserving the §13 posture — one hostile selector
+  must not blank a whole surface; the read-for-**rewrite** path (`register_project`,
+  and the writer itself) **fails closed** with `projects.RegistryNotContainedError`,
+  *before* the read, because merely reading an external registry would import its
+  entries into the mapping handed to the writer and then follow the symlink to
+  rewrite a file outside the store. `core/enable.py` catches it and fails closed,
+  so a hook never raises.
+  **Empty is not healthy.** An uncontained registry and an absent one both read as
+  empty, so `doctor` distinguishes them via `projects.registry_is_contained(root)`
+  and reports the uncontained case as an **error**, not as "not enabled" — which
+  would send the operator to run `neurobase enable`, which fails closed against the
+  same registry, while the real problem went unreported.
 
 **Enforcement.** Production store-tree and registry access (`src/neurobase/`) goes
 through `open_store(...)` + a `StoreHandle`. The CI guard
@@ -991,7 +1015,8 @@ implementation modules (`core/store.py`, `core/store_handle.py`, `core/projects.
 calls a raw-`root` store/registry **accessor** — `memory_dir`, `ensure_tree`,
 `list_raw` / `list_curated` / `list_tombstoned`, `write_raw`, `upsert_curated`,
 `write_node`, `rebuild_index`, `load_registry`, `register_project`,
-`resolve_project`, … (whether
+`resolve_project`, `registry_path` / `_registry_path`, `registry_is_contained`, …
+(whether
 reached as `store.x` / `projects.x`, via a dotted module, or by a direct/relative
 import) — or references the `store.toml` / `registry.toml` metadata filenames. The
 guard keys on those accessors and literals, **not** on path shape: a handle-derived
@@ -1004,11 +1029,14 @@ Some raw-`root` constructions **remain** outside the accessor guard's coverage, 
 kinds — none is an unguarded write to **schema-versioned store content** (`memory/`,
 `registry.toml`):
 
-- **`doctor`'s two corrupt-`store.toml` reads** (allow-listed) —
+- **`doctor`'s three corrupt-`store.toml` reads** (allow-listed) —
   `projects.resolve_project(root, cwd)` (project resolution is a `registry.toml`
   concern, independent of the store-schema guard, and must survive when no handle can
-  open) and `store.store_toml_path(root)` (the report label, built before `open_store`).
-  Both live only in `cli/diagnostics.py` and are allow-listed in the guard by (file, name).
+  open), `projects.registry_is_contained(root)` (the health question above: a corrupt
+  `store.toml` must not *mask* a hostile registry, and this branch has no handle to
+  ask), and `store.store_toml_path(root)` (the report label, built before `open_store`).
+  All three live only in `cli/diagnostics.py` and are allow-listed in the guard by
+  (file, name).
 - **the recommender's proposal/ledger path-builders** (command-guarded) —
   `corpus.proposals_dir` / `proposal_path` / `ledger_path` build `<root>/proposals/…`
   and `<root>/recommender/ledger.jsonl` from a bare root, but every caller is guarded by

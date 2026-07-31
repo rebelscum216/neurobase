@@ -90,8 +90,32 @@ STORE_FORBIDDEN = frozenset(
     }
 )
 
-# Raw-``root`` accessors on ``core.projects`` — every one reads/writes registry.toml.
-PROJECTS_FORBIDDEN = frozenset({"load_registry", "register_project", "resolve_project"})
+# Raw-``root`` accessors on ``core.projects`` — every one reads, writes, or *names*
+# registry.toml.
+#
+# ``registry_path`` / ``_registry_path`` are here because of Codex
+# P2-SAFETY-SECURITY-013: round 4 promoted the path helper to public so a guard
+# could name the file it was proving, which handed every production module a
+# CI-approved way to reach the registry from a raw root — this checker matches
+# accessors by NAME, so the ``"registry.toml"`` literal hidden inside the helper is
+# invisible to SENSITIVE_LITERALS below. The helper is private again, and both
+# spellings are listed so re-publishing it (or reaching for the underscore form
+# across modules) fails the gate instead of silently reopening the hole.
+#
+# ``registry_is_contained`` is the containment predicate itself: it names the same
+# path, and doctor's no-handle branch is the one place that may ask it without a
+# validated handle — allow-listed by (file, name) below, like doctor's other two
+# sanctioned raw-root reads.
+PROJECTS_FORBIDDEN = frozenset(
+    {
+        "load_registry",
+        "register_project",
+        "resolve_project",
+        "registry_path",
+        "_registry_path",
+        "registry_is_contained",
+    }
+)
 
 # Store-metadata filenames — a bare literal is a hand-rolled store path.
 SENSITIVE_LITERALS = frozenset({"store.toml", "registry.toml"})
@@ -102,6 +126,10 @@ ALLOW: frozenset[tuple[str, str]] = frozenset(
     {
         ("cli/diagnostics.py", "resolve_project"),
         ("cli/diagnostics.py", "store_toml_path"),
+        # The health question doctor must be able to ask without a handle: is this
+        # store's registry really this store's? Read-side callers never need it —
+        # they get empty either way — so this stays a one-file exemption.
+        ("cli/diagnostics.py", "registry_is_contained"),
     }
 )
 

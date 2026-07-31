@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """The one CI gate for Neurobase — the single source of truth for "green".
 
-Runs the exact checks CI enforces, in order, each via ``uv run`` so the command
-is identical whether you invoke it locally or on a GitHub Actions runner:
+Runs the exact checks CI enforces, in order, so the command is identical whether you
+invoke it locally or on a GitHub Actions runner. All **Python** checks run via
+``uv run``; the **Node** check runs the runtime directly, since it is not a Python
+tool and uv has nothing to resolve for it:
 
     ruff check .                    # lint
     ruff format --check .           # formatting

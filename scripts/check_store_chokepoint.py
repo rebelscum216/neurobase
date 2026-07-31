@@ -24,8 +24,9 @@ and the test suite's store-setup helpers). This guard runs where it matters —
 production modules under ``src/neurobase/`` — and exempts the three core modules that
 ARE the store/registry implementation.
 
-**What is forbidden** outside the exempt modules — the *accessor* contract, stated to
-exactly match what is mechanically enforceable:
+**What this check MATCHES** outside the exempt modules — the *accessor* contract. This
+is what the guard looks for, not a statement of everything that would be a violation;
+the misses and false positives below are the difference between the two:
 - calling a raw-``root`` store tree/metadata accessor (``memory_dir``, ``ensure_tree``,
   ``list_raw``, ``list_curated``, ``write_raw``, ``upsert_curated``, ``write_node``,
   ``rebuild_index``, …) or a registry accessor (``load_registry`` /
@@ -34,7 +35,7 @@ exactly match what is mechanically enforceable:
   direct/relative import (``from ..core.store import memory_dir``);
 - the store-metadata filename literals ``"store.toml"`` / ``"registry.toml"``.
 
-**What this check IS — and what it is not** _(Codex P2-SAFETY-SECURITY-013, rounds 7–8)._
+**What this check IS — and what it is not** _(Codex P2-SAFETY-SECURITY-013, rounds 7–10)._
 This is a **conservative, enumerated syntactic regression guard**. It recognizes the
 listed accessor names reached through the *enumerated* receiver spellings below. It is
 **not** a proof that raw-``root`` access is impossible, and it is **not** free of false

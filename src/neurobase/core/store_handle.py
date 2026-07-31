@@ -11,17 +11,27 @@ ADR-0015's deferred signature-removal step, so until it lands the raw-``root``
 functions still exist beneath these methods and a CI regression check (step 5,
 ``scripts/check_store_chokepoint.py``) is what catches the ordinary relapse.
 
-**Migration steps 1–2 (ADR-0015).** Step 1 introduced ``open_store()`` and the
+**Migration history (ADR-0015).** *Written at step 2 and kept as history — see the
+paragraph above for the current state.* Step 1 introduced ``open_store()`` and the
 handle alongside the existing ``root: Path`` store API in
-:mod:`neurobase.core.store`, with no callers. Step 2 (this) adds the store and
-registry API onto the handle as **methods** — ``handle.memory_dir(project)``,
-``handle.write_raw(...)``, ``handle.load_registry()`` — each delegating to today's
+:mod:`neurobase.core.store`, with no callers. Step 2 added the store and registry
+API onto the handle as **methods** — ``handle.memory_dir(project)``,
+``handle.write_raw(...)``, ``handle.load_registry()`` — each delegating to the
 ``root: Path`` function with the root dropped, since holding the handle already
-proves the schema guard ran. These are still **additive and callerless**: the
-root-taking functions are untouched. Later steps migrate the callers (curator,
-adapters, MCP, recommender, CLI) onto these methods (step 3), remove the
-root-taking store functions so their logic lives here (step 4), and add a CI AST
-check forbidding store-path construction outside the store module (step 5).
+proves the schema guard ran. At that point they were **additive and callerless**.
+
+Since then: step 3 migrated the callers (curator, adapters, MCP, recommender, CLI)
+onto these methods, and step 4 moved the lifecycle commands onto command-side
+handles. Step 4's *other* half — removing the root-taking signatures so their logic
+lives here — is **deferred**, which is why the raw-``root`` functions still exist as
+the delegates beneath these methods. Step 5 added
+``scripts/check_store_chokepoint.py``: a conservative regression check over the
+**enumerated** accessor receiver spellings plus the ``store.toml`` /
+``registry.toml`` metadata literals, outside the three implementation modules. It
+does **not** forbid store-path construction from a bare root — that shape is not
+distinguishable from the Claude app's own ``~/.claude/projects/<x>/memory`` without
+data-flow analysis — and it has documented static misses and false positives. See
+its module docstring, spec §10, and G1.
 
 **The ``profile`` qualifier (ADR-0016 D28).** Profiles are logical partitions
 under one visible store root. A handle is profile-qualified from this first

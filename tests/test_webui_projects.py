@@ -392,3 +392,79 @@ def test_delete_is_rejected_cross_origin(
 
 def test_projects_is_a_live_rail_entry(client: TestClient) -> None:
     assert 'href="/projects"' in client.get("/skills").text
+
+
+# --- Codex F1: a registry entry whose key is not a valid slug ----------------
+#
+# `load_registry` validates an entry's `roots` shape but deliberately never its
+# key, so a hand-edited `[projects."bad_slug"]` in otherwise valid TOML reaches
+# the page. Every store accessor then raises `InvalidSlugError` for it — and
+# because that is a ValueError, it looked handled while `memory_dir` sat outside
+# the guard and 500'd the whole directory. The page that hid was the only place
+# to go and delete the offending entry.
+
+
+def _add_bad_slug_entry(store_root: Path, tmp_path: Path, key: str = "bad_slug") -> None:
+    """Valid TOML, invalid slug as the table key — exactly what a hand-edit makes."""
+    registry = store_root / "registry.toml"
+    registry.write_text(
+        registry.read_text(encoding="utf-8")
+        + f'\n[projects."{key}"]\nroots = ["{tmp_path / "somewhere"}"]\n',
+        encoding="utf-8",
+    )
+
+
+def test_an_invalid_slug_entry_does_not_500_the_directory(
+    client: TestClient, store_root: Path, tmp_path: Path
+) -> None:
+    _add_bad_slug_entry(store_root, tmp_path)
+    response = client.get("/projects")
+    assert response.status_code == 200
+
+
+def test_an_invalid_slug_entry_does_not_hide_the_healthy_projects(
+    client: TestClient, store_root: Path, tmp_path: Path
+) -> None:
+    """The regression that matters: one bad row must degrade itself, not the page."""
+    _add_bad_slug_entry(store_root, tmp_path)
+    body = client.get("/projects").text
+    assert "proj" in body
+    assert '<span class="label">Facts</span><span class="value">1<' in body
+
+
+def test_an_invalid_slug_row_is_rendered_and_labelled(
+    client: TestClient, store_root: Path, tmp_path: Path
+) -> None:
+    _add_bad_slug_entry(store_root, tmp_path)
+    body = client.get("/projects").text
+    assert "bad_slug" in body
+    assert "invalid slug" in body
+
+
+def test_an_invalid_slug_row_is_still_removable(
+    client: TestClient, app: Starlette, store_root: Path, tmp_path: Path
+) -> None:
+    """Visible is not enough — `deregister` touches only registry.toml, so it must
+    work on exactly the entry the user came to this page to get rid of."""
+    _add_bad_slug_entry(store_root, tmp_path)
+    response = _post(client, app, "/projects/bad_slug/deregister")
+    assert response.status_code == 303
+    assert "bad_slug" not in projects.load_registry(store_root)
+    assert "proj" in projects.load_registry(store_root)
+
+
+def test_an_invalid_slug_offers_no_delete_or_add_root(
+    client: TestClient, store_root: Path, tmp_path: Path
+) -> None:
+    """Neither has a store path to build, so neither is offered."""
+    _add_bad_slug_entry(store_root, tmp_path)
+    body = client.get("/projects").text
+    assert 'href="/projects/bad_slug/delete"' not in body
+    assert 'action="/projects/bad_slug/add-root"' not in body
+
+
+def test_the_delete_route_still_refuses_an_invalid_slug(
+    client: TestClient, store_root: Path, tmp_path: Path
+) -> None:
+    _add_bad_slug_entry(store_root, tmp_path)
+    assert client.get("/projects/bad_slug/delete").status_code == 404

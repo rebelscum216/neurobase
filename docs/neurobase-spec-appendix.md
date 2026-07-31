@@ -2305,9 +2305,17 @@ captured memory**, so it carries rules the read surfaces do not.
 - `GET /projects` — every registered project: slug, each registered root,
   whether that root still exists on disk, whether it is covered by an `[enable]`
   `denylist` or `auto_enable_roots` entry, and its raw/curated/node counts.
-  Counts are read per project and **MUST fail soft** — an unreadable project
-  degrades its own row, never the page, which is the only place to go and
-  unregister it.
+  **Every** store read per project **MUST fail soft** — a bad project degrades its
+  own row, never the page, which is the only place to go and unregister it.
+- That covers a registry entry whose *key* is not a valid slug.
+  `projects.load_registry` validates an entry's `roots` shape but deliberately
+  **not** its key, so a hand-edited `[projects."bad_slug"]` in otherwise valid
+  TOML is a reachable state, and every store accessor — `list_raw`,
+  `list_curated`, `node_count`, **and `memory_dir`** — raises `InvalidSlugError`
+  for it. Such an entry **MUST** render as a labelled row with `deregister` and
+  `remove-root` still working (both touch only `registry.toml`), and **MUST NOT**
+  be offered `add-root` or `delete`, which have no store path to build. It can
+  have no tree and no contents by construction.
 - The page **MUST also list project trees that have no registry entry.** Such a
   tree is unreachable — nothing resolves to it, so no hook can capture into it
   and no sweep walks it — and no other surface reveals it.

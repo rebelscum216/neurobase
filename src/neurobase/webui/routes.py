@@ -1001,27 +1001,48 @@ def _project_root_row(path_str: str, denylist: list[str], auto_roots: list[str])
 def _project_row(
     handle: StoreHandle, slug: str, roots: list[str], denylist: list[str], auto_roots: list[str]
 ) -> dict[str, Any]:
-    """One directory row. Counts are read per project and **fail soft** — a single
-    unreadable project degrades its own numbers to ``None`` rather than 500-ing the
-    page that is the only place to go and unregister it."""
-    counts: dict[str, int] | None
-    try:
-        raws = handle.list_raw(slug, unconsumed_only=False)
-        counts = {
-            "raw": len(raws),
-            "unconsumed": sum(1 for doc in raws if not doc.get("consumed")),
-            "curated": len(handle.list_curated(slug, active_only=True)),
-            "nodes": handle.node_count(slug),
-        }
-    except (OSError, ValueError):
-        counts = None
+    """One directory row. **Every** store read here is per-project fail-soft (§14):
+    a single bad project degrades its own row, never the page — which is the only
+    place to go and unregister it.
+
+    The state that forces this is a registry entry whose *key* is not a valid slug.
+    ``load_registry`` validates an entry's ``roots`` shape but deliberately never
+    its key (it preserves hand-edited entries), so ``[projects."bad_slug"]`` in an
+    otherwise valid ``registry.toml`` reaches here and every store accessor —
+    ``list_raw``, ``list_curated``, ``node_count``, **and ``memory_dir``** — raises
+    ``InvalidSlugError``. That last one is the trap: it is not a "count", so it does
+    not look like it belongs inside the counting guard, and leaving it outside turned
+    the whole directory into a 500 that hid every healthy project behind the one
+    entry the user came to delete (Codex F1).
+
+    So an invalid slug is a rendered **state**, not an exception. Such a project can
+    have no tree and no contents by construction — no store path can be built for it
+    — but `deregister` and `remove-root` touch only ``registry.toml`` and stay fully
+    functional on it, which is what makes the row actionable rather than merely
+    visible."""
+    valid_slug = bool(store.SLUG_RE.match(slug))
+    counts: dict[str, int] | None = None
+    has_tree = False
+    if valid_slug:
+        try:
+            raws = handle.list_raw(slug, unconsumed_only=False)
+            counts = {
+                "raw": len(raws),
+                "unconsumed": sum(1 for doc in raws if not doc.get("consumed")),
+                "curated": len(handle.list_curated(slug, active_only=True)),
+                "nodes": handle.node_count(slug),
+            }
+            has_tree = handle.memory_dir(slug).exists()
+        except (OSError, ValueError):
+            counts = None
     root_rows = [_project_root_row(root, denylist, auto_roots) for root in roots]
     return {
         "slug": slug,
         "roots": root_rows,
         "registered": bool(roots),
         "counts": counts,
-        "has_tree": handle.memory_dir(slug).exists(),
+        "has_tree": has_tree,
+        "valid_slug": valid_slug,
         # A project is suppressed only when *every* root it has is denylisted —
         # one live root is enough for capture to keep working.
         "suppressed": bool(root_rows) and all(r["denylisted"] for r in root_rows),

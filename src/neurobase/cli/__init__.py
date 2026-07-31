@@ -183,6 +183,19 @@ def disable(
     else:
         typer.echo(f"Project '{project_slug}' was not registered.")
 
+    # A registry entry whose *key* is not a valid slug is reachable here: the
+    # registry preserves hand-edited entries and never validates the key, so
+    # `--slug bad_slug` (or resolving to one) gets this far. It has been removed
+    # above — that is the whole job — but no store path can be built for it, so
+    # every `memory_dir` call below would raise. Stop cleanly instead of exiting 1
+    # with a traceback on a command that in fact succeeded (Codex F1, CLI half).
+    if not store.SLUG_RE.match(project_slug):
+        typer.echo(
+            f"'{project_slug}' is not a valid project slug, so it never had a memory "
+            "tree — the registry entry is gone and there is nothing else to remove."
+        )
+        return
+
     if not delete_memory:
         mem = handle.memory_dir(project_slug)
         if mem.exists():

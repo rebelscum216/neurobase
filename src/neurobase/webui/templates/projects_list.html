@@ -50,11 +50,19 @@
       <p>{{ p.roots | length }} registered root{{ "" if p.roots | length == 1 else "s" }}</p>
     </div>
     <div class="right">
-      {% if p.suppressed %}<span class="status-chip rejected">suppressed</span>
+      {% if not p.valid_slug %}<span class="status-chip rejected">invalid slug</span>
+      {% elif p.suppressed %}<span class="status-chip rejected">suppressed</span>
       {% elif not p.has_tree %}<span class="status-chip muted">no tree</span>
       {% else %}<span class="status-chip accepted">enabled</span>{% endif %}
     </div>
   </div>
+
+  {% if not p.valid_slug %}
+  <div class="warning">This entry's name is not a valid project slug (it must match
+    <code class="mono">^[a-z0-9-]+$</code>), so Neurobase can never store anything under it —
+    it was almost certainly hand-edited into <code class="mono">registry.toml</code>. Deregistering
+    removes it; there is no memory to lose.</div>
+  {% endif %}
 
   <ul class="proj-roots">
     {% for r in p.roots %}
@@ -73,6 +81,7 @@
     {% endfor %}
   </ul>
 
+  {% if p.valid_slug %}
   <div class="proj-counts">
     {% if p.counts %}
     <div class="metric"><span class="label">Captures</span><span class="value">{{ p.counts.raw }}{% if p.counts.unconsumed %} · {{ p.counts.unconsumed }} unconsumed{% endif %}</span></div>
@@ -82,8 +91,12 @@
     <div class="metric"><span class="label">Counts</span><span class="value">unreadable</span></div>
     {% endif %}
   </div>
+  {% endif %}
 
+  {# An invalid-slug row keeps only the registry-only actions. `add-root` would
+     re-derive the same unusable slug, and `delete` has no store path to build. #}
   <div class="proj-actions">
+    {% if p.valid_slug %}
     <form method="post" action="/projects/{{ p.slug }}/add-root">
       <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
       <div class="form-row">
@@ -94,12 +107,15 @@
         <button class="btn" type="submit">Add root</button>
       </div>
     </form>
+    {% endif %}
     <form method="post" action="/projects/{{ p.slug }}/deregister"
           onsubmit="return confirm('Deregister {{ p.slug }}?\n\nIts memory tree stays on disk — nothing captured is deleted.');">
       <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
       <button class="btn" type="submit">Deregister</button>
     </form>
+    {% if p.valid_slug %}
     <a class="btn danger" href="/projects/{{ p.slug }}/delete">Delete memory…</a>
+    {% endif %}
   </div>
 </section>
 {% endfor %}

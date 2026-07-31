@@ -186,3 +186,22 @@ def test_disable_delete_memory_with_yes_removes_the_tree(tmp_path: Path) -> None
     assert result.exit_code == 0
     assert not (root / "projects" / "myrepo").exists()
     assert projects.load_registry(root) == {}
+
+
+def test_disable_handles_an_invalid_slug_registry_entry(tmp_path: Path) -> None:
+    """Codex F1, CLI half: a hand-edited `[projects."bad_slug"]` entry deregisters
+    fine, but no store path can be built for it — the command must not exit 1 with
+    a traceback on work it actually completed."""
+    root, repo = _enabled_repo(tmp_path)
+    registry = root / "registry.toml"
+    registry.write_text(
+        registry.read_text(encoding="utf-8")
+        + f'\n[projects."bad_slug"]\nroots = ["{tmp_path / "somewhere"}"]\n',
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["disable", "--root", str(root), "--slug", "bad_slug"])
+    assert result.exit_code == 0
+    assert result.exception is None
+    assert "not a valid project slug" in result.output
+    assert "bad_slug" not in projects.load_registry(root)
+    assert "myrepo" in projects.load_registry(root)

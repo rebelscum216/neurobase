@@ -200,6 +200,27 @@ def _read_fold_records(handle: StoreHandle, project: str) -> list[dict[str, Any]
     return folds
 
 
+def _contained(handle: StoreHandle, docs: list[store.Document]) -> list[store.Document]:
+    """Drop documents that resolve outside the handle's store.
+
+    Containment is enforced at the **enumeration boundary**, before any field of a
+    document is read, because this module's output *is* identity: a document that
+    slipped through would not merely leak its body — its frontmatter would become
+    a ``SessionNode``/``FactNode`` and its provenance would mint edges. Filtering
+    only where bodies are read (the presentation layer) leaves the whole identity
+    graph forged (Codex P2-SAFETY-SECURITY-001).
+
+    ``list_raw``/``list_curated``/``list_tombstoned`` glob a directory *inside* the
+    store, so an ordinary store never loses an entry here. What this refuses is the
+    store's own ``raw/`` or ``curated/`` being a **symlink** to somewhere else — the
+    glob then walks the external tree happily, and every peer reader
+    (``routes._memory_facts``, ``routes._session_rows``) already filters exactly
+    this way (Codex P2-SAFETY-SECURITY-003). ``contains`` fails closed on a
+    ``resolve()`` that raises, so a symlink loop drops one entry rather than
+    escaping."""
+    return [doc for doc in docs if handle.contains(doc.file_path)]
+
+
 def _collect_raws(
     handle: StoreHandle, project: str, folds: list[dict[str, Any]]
 ) -> dict[str, _Raw]:
@@ -209,9 +230,13 @@ def _collect_raws(
     in captures whose raw file is gone. The journal only *fills gaps* — it never
     overwrites identity read from a live file, which is the fresher of the two if
     they ever disagree. (Journal precedence applies to edge *attribution*, below,
-    where the journal is the validated record and frontmatter is the backstop.)"""
+    where the journal is the validated record and frontmatter is the backstop.)
+
+    The journal is *inside* the store by construction, so its ``consumed`` entries
+    need no containment check — but the on-disk sweep does, which is why it is
+    filtered through :func:`_contained` first."""
     raws: dict[str, _Raw] = {}
-    for doc in handle.list_raw(project, unconsumed_only=False):
+    for doc in _contained(handle, handle.list_raw(project, unconsumed_only=False)):
         raws[doc.file_path.name] = _Raw(
             file=doc.file_path.name,
             session_id=_str_or_none(doc.get("session_id")),
@@ -273,8 +298,11 @@ def _project_graph(
     folds = _read_fold_records(handle, project)
     raws.update(_collect_raws(handle, project, folds))
 
-    active_docs = handle.list_curated(project)
-    tombstoned_docs = handle.list_tombstoned(project)
+    # Contained *before* any field is read: a fact's ``name``/``updated_at`` and
+    # its ``provenance``/``supersedes`` lists all become graph identity below, so
+    # an external document must not reach this point at all.
+    active_docs = _contained(handle, handle.list_curated(project))
+    tombstoned_docs = _contained(handle, handle.list_tombstoned(project))
     # Every slug the store knows about, whether or not the caller asked to see
     # tombstones. A reference to a slug that is *known but excluded* yields no
     # node and no edge (the caller excluded it); only a slug that exists nowhere

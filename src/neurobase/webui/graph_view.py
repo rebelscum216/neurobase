@@ -124,11 +124,19 @@ def _raw_body(handle: StoreHandle, project: str, name: str) -> str | None:
     must still be inside the store, which is what refuses a symlinked ``raw/``.
     ``handle.contains`` alone only enforces the second: ``raw/../curated/x.md``
     stays inside the store and would otherwise be read out as a transcript.
+
+    Fails **closed and locally**. ``Path.resolve()`` raises ``RuntimeError`` — not
+    ``OSError`` — on a self-referential symlink, and letting that escape hands the
+    route's whole-composition guard a reason to blank the entire home page over one
+    corrupt filesystem entry (Codex P2-REGRESSION-002). One unreadable capture must
+    cost its own title and nothing else, so this matches the contract
+    ``StoreHandle.contains`` already documents: catch both, treat the entry as
+    unreadable, keep going.
     """
     try:
         raw_dir = (handle.memory_dir(project) / "raw").resolve()
         path = (raw_dir / name).resolve()
-    except (store.InvalidSlugError, OSError, ValueError):
+    except (store.InvalidSlugError, OSError, RuntimeError, ValueError):
         return None
     if path.parent != raw_dir or not handle.contains(path) or not path.is_file():
         return None
@@ -162,6 +170,22 @@ def _fact_snippets(handle: StoreHandle, project: str, patterns: tuple[str, ...])
     except (OSError, ValueError):
         return {}
     return snippets
+
+
+def _artifact_state(root: Path, doc: store.Document, slug: str) -> str | None:
+    """``proposals.artifact_state`` made fail-soft for the home page.
+
+    The Skills gallery may let a liveness probe raise; this surface may not — it is
+    what ``/`` redirects to, and an accepted proposal whose ``installed_path`` is a
+    directory, an unreadable mount, or a re-derivation that trips an unexpected
+    error must cost that one node its badge, not the whole graph. ``None`` reads
+    downstream as "state unknown", which is the truthful answer and the one the UI
+    already has to handle for a proposal that was never accepted.
+    """
+    try:
+        return proposals.artifact_state(root, doc, slug)
+    except Exception:  # noqa: BLE001 - one node's badge is never worth the home page
+        return None
 
 
 def _session_node_id(project: str, session: str) -> str:
@@ -262,10 +286,22 @@ def _fact_nodes(
                 "tombstoned": fact.tombstoned,
                 "updated_at": fact.updated_at,
                 "snippet": snippets[fact.project].get(fact.slug, ""),
-                # A ghost is referenced by an edge but present in neither
-                # `curated/` nor `.tombstones/` — `/memory/...` reads `curated/`
-                # only, so linking one guarantees a 404.
-                "href": (None if fact.status == "ghost" else f"/memory/{fact.project}/{fact.slug}"),
+                # `/memory/<project>/<slug>` reads `curated/` and nothing else, so
+                # it is offered only for a fact that is actually *there*. Two kinds
+                # are not: a **ghost** (referenced by an edge but present in neither
+                # `curated/` nor `.tombstones/` — pruned), and a **tombstone**.
+                # Tombstones are the reason this surface passes
+                # `include_tombstoned=True` at all, so the supersedes edge exists —
+                # which made "open in Memory" a guaranteed 404 on exactly the
+                # freshly-superseded nodes the graph exists to show (Codex
+                # P2-UX-API-CONTRACT-003). No CTA is rendered when `href` is None;
+                # `kindLabel` still says "tombstoned fact", so the node stays honest
+                # about what it is rather than being relabelled to keep a link.
+                "href": (
+                    None
+                    if fact.status in ("ghost", "tombstoned") or fact.tombstoned
+                    else f"/memory/{fact.project}/{fact.slug}"
+                ),
             }
         )
     return nodes
@@ -328,6 +364,20 @@ def _proposal_nodes_and_edges(
                 "sub": f"{doc.get('candidate_type') or 'proposal'} · {status}",
                 "project": doc.get("project"),
                 "status": status,
+                # §12.1's `type` — `skill` or `rule`. A rule targets AGENTS.md /
+                # CLAUDE.md and is not a skill; the canvas called every proposal a
+                # skill (Codex P2-CORRECTNESS-004). `None` when a proposal somehow
+                # carries neither, so the UI can fall back to the honest generic
+                # word rather than picking one.
+                "type": (str(doc.get("type")) if doc.get("type") in ("skill", "rule") else None),
+                # Only meaningful for an accepted proposal, and only ever the
+                # answer `revert` already uses (ADR-0020 D43): `live` / `missing` /
+                # `orphaned` / `unresolvable`. `status: accepted` alone says the
+                # decision was made, NOT that the artifact is on this machine —
+                # which is precisely why the Skills gallery computes this instead
+                # of trusting the status. Reused rather than reinvented so the two
+                # surfaces can never disagree about the same artifact.
+                "artifact": _artifact_state(root, doc, slug) if status == "accepted" else None,
                 "snippet": _truncate(
                     _redact_display(str(doc.get("rationale") or doc.body), patterns),
                     _SNIPPET_MAX,

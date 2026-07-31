@@ -312,11 +312,26 @@
         a.x += ux; a.y += uy; b.x -= ux; b.y -= uy;
       });
       /* Repulsion between near neighbours, bucketed into a uniform grid whose
-         cell is the interaction radius. Only the 9 cells around a node can hold
-         anything close enough to push it, so this is O(n) per iteration instead
-         of O(n²) — with every capture shown that is the difference between a
-         responsive page and a multi-second freeze. */
-      var R = 0.075, cells = Object.create(null);
+         cell is the interaction radius, so only the 9 cells around a node can
+         hold anything close enough to push it.
+
+         The grid bounds how many cells are *searched*; it does not bound how many
+         nodes land in one. A store is not uniformly distributed — the layout
+         deliberately packs each project into its own cluster — so a single dense
+         cluster degenerates back toward O(n²): measured at 16.2M pair comparisons
+         (346ms) for 2,100 nodes and 60.8M (1.13s) for 4,000, which is a visible
+         main-thread stall on `?orphans=1` and gets worse every week the store
+         grows (Codex P2-UX-API-CONTRACT-005).
+
+         So occupancy is bounded too: within a cell, a node repels at most
+         `MAX_NEIGHBOURS` others. That caps the work at O(n · 9 · MAX_NEIGHBOURS)
+         — genuinely linear, whatever the density. The cap is legitimate physics,
+         not a shortcut: repulsion falls off inside a radius this small, and past
+         a couple of dozen crowded neighbours the sum is already dominated by the
+         cluster-centre pull below. It stays deterministic because bucket order is
+         node order (`nodes` is iterated in index order when filling `cells`), so
+         the same store always caps the same pairs. */
+      var R = 0.075, MAX_NEIGHBOURS = 24, cells = Object.create(null);
       for (var i = 0; i < nodes.length; i++) {
         var n0 = nodes[i];
         var key = ((n0.x / R) | 0) + "," + ((n0.y / R) | 0);
@@ -324,17 +339,18 @@
       }
       for (var i2 = 0; i2 < nodes.length; i2++) {
         var p = nodes[i2];
-        var cx = (p.x / R) | 0, cy = (p.y / R) | 0;
-        for (var gx = cx - 1; gx <= cx + 1; gx++) {
-          for (var gy = cy - 1; gy <= cy + 1; gy++) {
+        var cx = (p.x / R) | 0, cy = (p.y / R) | 0, seen = 0;
+        for (var gx = cx - 1; gx <= cx + 1 && seen < MAX_NEIGHBOURS; gx++) {
+          for (var gy = cy - 1; gy <= cy + 1 && seen < MAX_NEIGHBOURS; gy++) {
             var bucket = cells[gx + "," + gy];
             if (!bucket) continue;
-            for (var b = 0; b < bucket.length; b++) {
+            for (var b = 0; b < bucket.length && seen < MAX_NEIGHBOURS; b++) {
               var q = bucket[b];
               if (q.i <= p.i) continue;  // each pair once, and never self
               var dx2 = q.x - p.x, dy2 = q.y - p.y;
               var d2 = Math.hypot(dx2, dy2);
               if (d2 > R || d2 === 0) continue;
+              seen++;
               var push = (R - d2) * 0.5 * k;
               var vx = (dx2 / d2) * push, vy = (dy2 / d2) * push;
               p.x -= vx; p.y -= vy; q.x += vx; q.y += vy;
@@ -376,7 +392,7 @@
     W = box.width; H = box.height;
     canvas.width = W * DPR; canvas.height = H * DPR;
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    if (reduced) wake();
+    wake();
   }
   new ResizeObserver(sizeCanvas).observe(canvas.parentElement);
 
@@ -555,10 +571,25 @@
   }
 
   /* The ambient drift is decoration, and a home tab is left open for hours. So
-     the loop is cancellable, pauses when the document is hidden, and parks
-     itself once the camera has settled and nothing is focused — a still graph
-     costs nothing to keep still. Any interaction wakes it. */
-  var rafId = null, lastT = 0, idleFrames = 0;
+     the loop is cancellable, pauses when the document is hidden, and parks itself
+     once the camera has settled — a still graph costs nothing to keep still.
+
+     The drift is also *time-limited*. It used to reschedule unconditionally for
+     anyone without `prefers-reduced-motion`, so an untouched visible graph
+     repainted O(nodes + edges) at display refresh rate forever — on a laptop, for
+     as long as the tab stayed open (Codex P2-UX-API-CONTRACT-005). Now the motion
+     gets a budget from the last interaction: it drifts for DRIFT_MS, then parks
+     like the reduced-motion path already did. Any interaction — hover, click,
+     keyboard, selection, resize — spends a fresh budget and wakes it.
+
+     This changes nothing about the layout: relaxation runs once before the first
+     paint and `px()` is a pure function of (node, t), so parking freezes the
+     picture without moving a node. */
+  var DRIFT_MS = 12000;
+  var rafId = null, lastT = 0, idleFrames = 0, driftUntil = 0;
+  function now() {
+    return (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+  }
   function settled() {
     return Math.abs(camTarget.x - cam.x) < 0.0005 &&
            Math.abs(camTarget.y - cam.y) < 0.0005 &&
@@ -568,11 +599,14 @@
     lastT = t || 0;
     draw(lastT);
     idleFrames = settled() ? idleFrames + 1 : 0;
-    // Drift never settles, so only park when motion is off entirely.
-    if (reduced && idleFrames > 2) { rafId = null; return; }
+    // Park only once the camera has stopped moving, so an in-flight zoom is never
+    // cut off mid-transit; `reduced` parks as soon as it settles, everyone else
+    // when the ambient-motion budget runs out.
+    if (idleFrames > 2 && (reduced || lastT >= driftUntil)) { rafId = null; return; }
     rafId = requestAnimationFrame(frame);
   }
   function wake() {
+    driftUntil = now() + DRIFT_MS;
     if (rafId === null && !document.hidden) rafId = requestAnimationFrame(frame);
   }
   function sleep() {
@@ -617,10 +651,10 @@
     } else {
       tip.style.display = "none";
     }
-    if (reduced) wake();
+    wake();
   });
   canvas.addEventListener("mouseleave", function () {
-    hoverId = null; tip.style.display = "none"; if (reduced) wake();
+    hoverId = null; tip.style.display = "none"; wake();
   });
   canvas.addEventListener("click", function (e) {
     var r = canvas.getBoundingClientRect();
@@ -692,7 +726,21 @@
       return n.status === "ghost" ? "fact (pruned)"
            : n.tombstoned ? "tombstoned fact" : "curated fact";
     }
-    if (n.kind === "proposal") return (n.status === "accepted" ? "installed skill" : "proposed skill");
+    /* A proposal's `type` is `skill` or `rule` (a rule targets AGENTS.md /
+       CLAUDE.md — calling it a skill is simply false), and `status: accepted`
+       records a *decision*, not that the artifact is on this machine. So the
+       liveness word comes from `artifact` — the same probe `revert` and the
+       Skills gallery use — and never from the status alone. Both fall back to
+       the honest generic word rather than guessing. (Codex P2-CORRECTNESS-004) */
+    if (n.kind === "proposal") {
+      var what = n.type === "rule" ? "rule" : n.type === "skill" ? "skill" : "proposal";
+      if (n.status !== "accepted") return "proposed " + what;
+      var state = n.artifact === "live" ? "installed"
+                : n.artifact === "missing" ? "accepted, artifact missing"
+                : n.artifact === "orphaned" ? "accepted, artifact edited away"
+                : "accepted";  // `unresolvable` or unknown — claim nothing
+      return state + " " + what;
+    }
     return n.agent === "codex" ? "Codex session"
          : n.agent === "claude" ? "Claude session" : "session · agent unknown";
   }
@@ -723,7 +771,7 @@
     } else {
       var what = edge.kind === "raw" ? "a raw capture"
                : edge.kind === "curated" ? "a curated fact" : "another proposal";
-      text = forward ? "cited as evidence by this skill" : "cites this as evidence (" + what + ")";
+      text = forward ? "cited as evidence by this proposal" : "cites this as evidence (" + what + ")";
     }
     var chip = "";
     if (src === "journal") {
@@ -774,7 +822,8 @@
   var GROUPS = [
     { kind: "fact", one: "connected fact", many: "connected facts" },
     { kind: "session", one: "connected session", many: "connected sessions" },
-    { kind: "proposal", one: "connected skill", many: "connected skills" }
+    // "proposal", not "skill": the group holds rules too (P2-CORRECTNESS-004).
+    { kind: "proposal", one: "connected proposal", many: "connected proposals" }
   ];
 
   var trail = [];
@@ -817,7 +866,7 @@
     insp.classList.add("open");
     requestAnimationFrame(sizeCanvas);
     if (opts.history !== false) pushUrl(id);
-    if (reduced) wake();
+    wake();
   }
 
   function closeInspector(opts) {
@@ -835,7 +884,7 @@
     if (canvas.contains(document.activeElement) === false) canvas.focus({ preventScroll: true });
     requestAnimationFrame(sizeCanvas);
     if (opts.history !== false) pushUrl(null);
-    if (reduced) wake();
+    wake();
   }
 
   el("insp-in").addEventListener("click", function (e) {

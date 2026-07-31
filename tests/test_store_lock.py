@@ -104,13 +104,22 @@ def test_lock_serializes_concurrent_writers(mem: Path) -> None:
 
 
 def test_probe_has_teeth_without_lock(tmp_path: Path) -> None:
-    """Control: the SAME workload without the lock loses updates. If this ever
-    passes at the exact total, the probe above proves nothing."""
+    """Control: the SAME workload without the lock corrupts the count. If this
+    ever lands on the exact total, the probe above proves nothing.
+
+    The assertion is ``!=``, not ``<``. Unlocked corruption is **bidirectional**:
+    ``write_text`` truncates on *open*, but two workers that opened
+    independently each write at their own offset 0, so a shorter write over a
+    longer file leaves the previous writer's trailing digits in place and the
+    value *inflates* (writing ``"7"`` over ``"50"`` yields ``"70"``). CI saw 352
+    and 536 against a 320 ceiling on 2026-07-31 — real corruption that a ``<``
+    bound scored as a failure. Any deviation from the total is the tooth this
+    control exists to show (G7)."""
     counter = tmp_path / "counter"
     counter.write_text("0")
     procs, iters = 8, 40
     _run(_unlocked_worker, (str(counter), iters), procs)
-    assert int(counter.read_text()) < procs * iters
+    assert int(counter.read_text()) != procs * iters
 
 
 # --- non-blocking skip vs blocking wait ------------------------------------

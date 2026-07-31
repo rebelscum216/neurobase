@@ -366,14 +366,15 @@ should be closed in the same change, since it needs the same ownership.
 
 ### G5 — the curator's brain call is indistinguishable from a replayed curator prompt, so the model refuses it
 
-- **status:** open — fix in flight on `fix/plan-system-untrusted-fence` (both
-  halves below implemented, local gate green; **not** merged, and the live
-  evidence is thin — see *Verification status*).
-- **severity:** major — **`curate` cannot complete a pass.** Planning fails on
-  every attempt, so no raw is consumed and no curated fact is written. The memory
-  pipeline is stalled end to end and `doctor`'s `curate health` stays red.
-  Self-reinforcing: the failure is *caused by* curated content, and cannot be
-  fixed by curating.
+- **status:** **fixed** — both halves landed on `main` in `6402ced` ("the curator
+  stops refusing itself (G5) — fence + harness isolation", implementation
+  `978df6c`). The untrusted-data fence is present in `curator/engine.py`
+  (`PLAN_SYSTEM`) and `curator/distill.py`. See *Residual* below: the fix is
+  scoped to `claude-cli`, and one unexplained behaviour was never chased.
+- **severity (historical):** was major — `curate` could not complete a pass.
+  **No longer true.** Corrected 2026-07-31 (see *Post-merge verification*); this
+  entry described the pipeline as stalled end to end long after it had been
+  unstalled, which cost at least one later session real diagnostic time.
 - **found:** 2026-07-29 by Claude, via the bounded `curate --if-stale` diagnostic
   pass that resequencing item 3 had been waiting on since 2026-07-27. It had been
   masked for weeks: ~2,057 prior failures were the quota exhaustion from the
@@ -576,6 +577,29 @@ as the store does — at 52 facts it was already a quarter of the default cap, a
 the fence itself pushed the one-raw floor from 1,327 to 2,673 bytes (which is why
 `ONE_RAW_PER_BATCH` in `test_curate_budget.py` needed recalibrating to 2724).
 
+**Post-merge verification — 2026-07-31.** Four `curate` passes across four
+projects (`messageman`, `urbyn`, `ccgolf`, `neurobase`), the first three on the
+`claude-cli` brain and a later pair on `codex-cli`, all returned `status: ok`
+with real folds; the store went from 52 unconsumed raws to zero and gained 18
+facts. `doctor`'s `curate health` is green. Planning refusals were not observed
+on either backend. Whatever the residual below, the headline defect this entry
+describes — *the curator refuses its own plan call* — does not reproduce.
+
+**Residual (why this is `fixed` and not closed-and-forgotten).** Two things this
+entry's fix does **not** cover, neither of which is the refusal:
+
+1. **Scope is `claude-cli` only.** ADR-0025's harness isolation has no Codex
+   equivalent, and the adversarial-payload regression has never been run against
+   it — that is **G6**, still open, and it must not be read as covered by G5's
+   `fixed`.
+2. **The empty-result nondeterminism was never explained.** Unstripped `claude -p`
+   calls occasionally returned an empty result string that every guard in
+   `ClaudeCLIBrain._once` accepted. The fence made the refusals stop, but nothing
+   established that the empty-result path was the *same* phenomenon. It has not
+   recurred and is not worth chasing speculatively — but if a future pass dies
+   again at `plan JSON did not parse … char 0`, start here rather than assuming
+   a fresh bug.
+
 ---
 
 ### G6 — the Codex brain backend has no equivalent of ADR-0025's harness isolation
@@ -626,3 +650,75 @@ whatever `codex exec` offers for a real system-instruction slot, MCP suppression
 and tool suppression, plus the adversarial-payload regression. Until then, treat
 "G5 is fixed" as **claude-cli only** — that scope is stated in ADR-0025 and must
 not be widened by implication.
+
+---
+
+### G7 — the write-lock negative control fails intermittently in CI, and not in the direction its own model predicts
+
+- **status:** **fixed** — the control now asserts `!=` rather than `<`. The
+  mechanism was identified the same day and is recorded below; the entry is kept
+  because the *reasoning* is the durable part, not the one-line change.
+- **severity:** minor — no product code was implicated. The cost was trust: it
+  reddened CI on changes that could not possibly have caused it (it first bit on
+  a **docs-only** commit, then on `main` itself within the hour), which trains
+  readers to wave failures through on the branch they are least able to check.
+- **found:** 2026-07-31 by Claude, on `feat/webui-phase-g-graph` commit
+  `7298b8d` (a single added markdown file). `py3.13 · ubuntu-latest` failed; the
+  other three matrix jobs passed, and the identical code had gone green ×4 on
+  the parent commit twenty minutes earlier. Re-running that one job cleared it.
+
+**Symptom.** `tests/test_store_lock.py::test_probe_has_teeth_without_lock`:
+
+```
+AssertionError: assert 352 < (8 * 40)
+```
+
+**Why this is not simply "a flaky timing test".** The test is the negative
+control for the ADR-0023 project write lock: it runs the same workload *without*
+the lock and asserts the counter ends **below** the total, so that the locked
+test above it proves something. Its docstring is explicit — "if this ever passes
+at the exact total, the probe above proves nothing".
+
+The failure value is **352 against a ceiling of 320**. The mechanism the test
+models — lost updates from a widened read-modify-write window — can only drive
+the counter *down*. `_rmw` reads, sleeps 0.6 ms, then `write_text`s `value + 1`,
+and `write_text` truncates, so a torn read yields an empty or short prefix and
+therefore a *smaller* value; the helper's own comment says it is written to
+"undercount rather than crash". Nothing in that model produces 352.
+
+**Mechanism — confirmed 2026-07-31, not inferred.** Unlocked corruption is
+**bidirectional**, and the test only modelled one direction. `Path.write_text`
+truncates the file when it *opens* it, but two workers that opened independently
+each write at **their own offset 0**. A shorter write landing over a longer file
+therefore leaves the earlier writer's trailing digits in place, and the value
+*inflates* rather than shrinking. Reduced to three lines:
+
+```python
+fa = open(p, "w"); fb = open(p, "w")   # both truncate
+fa.write("50"); fa.flush()             # A writes 2 bytes
+fb.write("7");  fb.flush()             # B writes 1 byte at ITS offset 0
+# -> the file now reads "70"
+```
+
+One digit of overlap turns 7 into 70. That is how a run of 320 increments
+finishes at 352 or 536: not a miscount, and not a lost update — a *concatenation*
+of two writers' digits. The counter is genuinely corrupt, which is exactly what
+the control set out to prove. Its `<` bound simply scored the loudest possible
+evidence of corruption as a failure.
+
+An earlier draft of this entry floated the pytest `tmp_path` being reused across
+a rerun. That was never confirmed and is **wrong**; the mechanism above is
+reproducible in three lines on any POSIX filesystem.
+
+**Fix (landed).** The assertion is now `!= procs * iters`. That is what the
+docstring always claimed the invariant was — *"if this ever passes at the exact
+total, the probe above proves nothing"* — and it is strictly better than a
+threshold: any deviation, in either direction, is the tooth the control exists to
+demonstrate, so the test no longer depends on which *kind* of corruption a given
+runner happens to produce. It still fails on an exact-total run, which is correct
+and is the one case that means the probe is worthless.
+
+**Lesson worth keeping.** A negative control that fails *outside the direction
+its own model predicts* is reporting something real. Raising or relaxing the
+bound would have buried a correct observation about POSIX write semantics; the
+over-count was the finding, not the noise.

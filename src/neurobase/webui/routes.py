@@ -26,9 +26,9 @@ from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
-from neurobase.core import redact, search, store
+from neurobase.core import projects, redact, search, store
 from neurobase.core.config import load_config
-from neurobase.core.store_handle import StoreMode, open_store
+from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 from neurobase.recommender import corpus as recommend_corpus
 from neurobase.recommender import install, proposals
 from neurobase.recommender import metrics as recommend_metrics
@@ -82,9 +82,33 @@ def skills_routes() -> list[Route]:
     ]
 
 
+def projects_routes() -> list[Route]:
+    """The Projects directory (app-shell plan, Phase P): which folders have
+    Neurobase enabled, and what state each one is actually in.
+
+    **Read-only, deliberately** (ADR-0027). Registry *editing* from the browser was
+    built and then deferred to its own branch: three review rounds found the same
+    class of defect repeatedly — ``load_registry`` preserves arbitrary hand-edited
+    content by contract, and every mutating route trusted it. Editing hostile
+    registry state safely is its own problem and gets its own review, rather than
+    riding along with the surface that merely displays it.
+
+    Everything here goes through ``core`` (``projects.*`` / ``StoreHandle``) —
+    nothing builds a store path or parses the registry itself (ADR-0015)."""
+    return [
+        Route("/projects", _list_projects, methods=["GET"]),
+    ]
+
+
 def all_routes() -> list[Route]:
     """Every surface's routes, in one table for the Starlette app (``app.py``)."""
-    return [*suggestions_routes(), *sessions_routes(), *memory_routes(), *skills_routes()]
+    return [
+        *suggestions_routes(),
+        *sessions_routes(),
+        *memory_routes(),
+        *skills_routes(),
+        *projects_routes(),
+    ]
 
 
 # --- small shared helpers ---------------------------------------------------
@@ -148,14 +172,21 @@ def _clean_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _redirect_to(path: str, message: str) -> RedirectResponse:
+    """303 (See Other) to ``path`` after a POST — the correct status for a
+    post/redirect/get so a page reload never re-submits the form — with a short
+    human-readable flash message carried as a query param (this app has no
+    session/cookie state to stash it in, and doesn't need one for a single-user
+    local tool).
+
+    ``path`` is always a literal built by a handler in this module, never anything
+    derived from a request: this must not become an open-redirect helper."""
+    return RedirectResponse(f"{path}?{urlencode({'flash': message})}", status_code=303)
+
+
 def _redirect_with_flash(slug: str, message: str) -> RedirectResponse:
-    """303 (See Other) back to the detail page after a POST — the correct
-    status for a post/redirect/get so a page reload never re-submits the
-    form — with a short human-readable flash message carried as a query
-    param (this app has no session/cookie state to stash it in, and doesn't
-    need one for a single-user local tool)."""
-    query = urlencode({"flash": message})
-    return RedirectResponse(f"/suggestions/{slug}?{query}", status_code=303)
+    """:func:`_redirect_to` aimed at a proposal's detail page."""
+    return _redirect_to(f"/suggestions/{slug}", message)
 
 
 def _error_response(request: Request, status_code: int, message: str) -> Response:
@@ -940,9 +971,153 @@ async def _revert_view(request: Request) -> Response:
     return _redirect_with_flash(slug, "Reverted to proposed — drift repaired.")
 
 
+# --- Projects directory (app-shell plan, Phase P) ----------------------------
+#
+# Registry paths are rendered **verbatim**, without the display-redaction pass the
+# draft/skill surfaces use. They are not third-party text: every one is a directory
+# on this machine that the user typed into this page's own form (or into
+# `neurobase enable`). Redacting them would defeat the surface — a root has to be
+# read to be recognized to be acted on at all, and the CLI takes the stored string
+# verbatim, so a masked path could not be matched against the registry.
+#
+# The governing fact for everything below: `load_registry` preserves **arbitrary**
+# hand-edited content by contract — any TOML table key, any string in `roots`. So
+# nothing here may assume a slug is a slug or a root is a usable path.
+
+
+def _project_root_row(path_str: str, denylist: list[str], auto_roots: list[str]) -> dict[str, Any]:
+    """One registered root, with the three facts that decide whether it is actually
+    doing anything: does the directory still exist, is it denylist-suppressed, and
+    is it covered by folder-scoped auto-enable.
+
+    A registered root is an arbitrary string from ``registry.toml``, so it may not
+    be a usable path at all — an embedded NUL is the sharp case: ``Path.is_dir()``
+    swallows it, but ``Path.resolve()`` inside the rule lookups raises ``ValueError``,
+    which took down the whole page for one hand-edited entry (Codex F6). A root that
+    cannot be turned into a path is therefore its own rendered state, and the two
+    rule lookups are skipped for it rather than attempted and caught downstream."""
+    try:
+        path: Path | None = Path(path_str)
+        usable = bool(path_str) and "\x00" not in path_str
+    except (ValueError, TypeError):
+        path, usable = None, False
+    if path is None or not usable:
+        return {
+            "path": path_str,
+            "usable": False,
+            "exists": False,
+            "denylisted": None,
+            "auto_enabled": None,
+        }
+    return {
+        "path": path_str,
+        "usable": True,
+        # `is_dir()` answers False (never raises) for an unreadable or malformed
+        # path, which is the right reading here — "not a usable directory".
+        "exists": path.is_dir(),
+        "denylisted": projects.denylist_hit(path, denylist),
+        "auto_enabled": projects.auto_enable_hit(path, auto_roots),
+    }
+
+
+def _project_row(
+    handle: StoreHandle, slug: str, roots: list[str], denylist: list[str], auto_roots: list[str]
+) -> dict[str, Any]:
+    """One directory row. **Every** store read here is per-project fail-soft (§14):
+    a single bad project degrades its own row, never the page — which is the only
+    place to go and unregister it.
+
+    The state that forces this is a registry entry whose *key* is not a valid slug.
+    ``load_registry`` validates an entry's ``roots`` shape but deliberately never
+    its key (it preserves hand-edited entries), so ``[projects."bad_slug"]`` in an
+    otherwise valid ``registry.toml`` reaches here and every store accessor —
+    ``list_raw``, ``list_curated``, ``node_count``, **and ``memory_dir``** — raises
+    ``InvalidSlugError``. That last one is the trap: it is not a "count", so it does
+    not look like it belongs inside the counting guard, and leaving it outside turned
+    the whole directory into a 500 that hid every healthy project behind the one
+    entry the user came to delete (Codex F1).
+
+    So an invalid slug is a rendered **state**, not an exception. Such a project can
+    have no tree and no contents by construction — no store path can be built for it
+    — but `deregister` and `remove-root` touch only ``registry.toml`` and stay fully
+    functional on it, which is what makes the row actionable rather than merely
+    visible."""
+    valid_slug = bool(store.SLUG_RE.match(slug))
+    counts: dict[str, int] | None = None
+    has_tree = False
+    if valid_slug:
+        try:
+            raws = handle.list_raw(slug, unconsumed_only=False)
+            counts = {
+                "raw": len(raws),
+                "unconsumed": sum(1 for doc in raws if not doc.get("consumed")),
+                "curated": len(handle.list_curated(slug, active_only=True)),
+                "nodes": handle.node_count(slug),
+            }
+            has_tree = handle.memory_dir(slug).exists()
+        except (OSError, ValueError):
+            counts = None
+    root_rows = [_project_root_row(root, denylist, auto_roots) for root in roots]
+    return {
+        "slug": slug,
+        "roots": root_rows,
+        "registered": bool(roots),
+        "counts": counts,
+        "has_tree": has_tree,
+        "valid_slug": valid_slug,
+        # A project is suppressed only when *every* root it has is denylisted —
+        # one live root is enough for capture to keep working.
+        "suppressed": bool(root_rows) and all(r["denylisted"] for r in root_rows),
+    }
+
+
+def _projects_context(request: Request) -> dict[str, Any]:
+    """The directory's full context: every registered project, plus every project
+    that has a tree on disk with **no** registry entry.
+
+    That second group is the point of comparing the two views. An unregistered tree
+    is a dead end — nothing resolves to it, so no hook can capture into it and no
+    sweep walks it — and until now nothing surfaced it at all.
+
+    No CSRF token and no flash: this surface renders no form (ADR-0027)."""
+    handle = open_store(_root(request), StoreMode.READ)
+    config = load_config()
+    denylist = config.enable.denylist
+    auto_roots = config.enable.auto_enable_roots
+    try:
+        registry = handle.load_registry()
+    except (OSError, ValueError):
+        registry = {}
+    rows = [
+        _project_row(handle, slug, registry[slug], denylist, auto_roots)
+        for slug in sorted(registry)
+    ]
+    orphans = [
+        _project_row(handle, slug, [], denylist, auto_roots)
+        for slug in handle.list_project_trees()
+        if slug not in registry
+    ]
+    return {
+        "projects": rows,
+        "orphans": orphans,
+        "store_root": str(handle.root),
+        "denylist": denylist,
+        "auto_enable_roots": auto_roots,
+    }
+
+
+async def _list_projects(request: Request) -> Response:
+    """``GET /projects`` — the whole surface. Side-effect-free, like every other
+    read route here."""
+    return _templates(request).TemplateResponse(
+        request, "projects_list.html", _projects_context(request)
+    )
+
+
 __all__ = [
     "all_routes",
     "memory_routes",
+    "projects_routes",
     "sessions_routes",
     "skills_routes",
     "suggestions_routes",

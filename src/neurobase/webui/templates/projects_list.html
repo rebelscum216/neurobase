@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Projects{% endblock %}
+{% block crumb %}Projects{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1>Projects</h1>
+    <p class="hero-sub">Every folder Neurobase is enabled for, and where its memory lives.</p>
+  </div>
+  <div class="hero-pills">
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ projects | length }} enabled</span>
+    {% if orphans %}<span class="hero-pill">{{ orphans | length }} unregistered</span>{% endif %}
+  </div>
+</div>
+
+{% if not projects %}
+<section class="card">
+  <p>No projects are enabled yet. Run <code class="mono">neurobase enable</code> inside a repo.</p>
+</section>
+{% endif %}
+
+{% for p in projects %}
+<section class="card">
+  <div class="card-head">
+    <div>
+      <h2><span class="mono">{{ p.slug }}</span></h2>
+      <p>{{ p.roots | length }} registered root{{ "" if p.roots | length == 1 else "s" }}</p>
+    </div>
+    <div class="right">
+      {% if not p.valid_slug %}<span class="status-chip rejected">invalid slug</span>
+      {% elif p.suppressed %}<span class="status-chip rejected">suppressed</span>
+      {% elif not p.has_tree %}<span class="status-chip muted">no tree</span>
+      {% else %}<span class="status-chip accepted">enabled</span>{% endif %}
+    </div>
+  </div>
+
+  {% if not p.valid_slug %}
+  <div class="warning">This entry's name is not a valid project slug (it must match
+    <code class="mono">^[a-z0-9-]+$</code>), so Neurobase can never store anything under it — it was
+    almost certainly hand-edited into <code class="mono">registry.toml</code>. Remove the entry from that
+    file to clear it.</div>
+  {% endif %}
+
+  <ul class="proj-roots">
+    {% for r in p.roots %}
+    <li class="proj-root">
+      <span class="path{% if not r.exists %} gone{% endif %}" title="{{ r.path }}">{{ r.path or "(empty)" }}</span>
+      {% if not r.usable %}<span class="status-chip gone" title="Not a usable filesystem path — hand-edited into registry.toml">unusable</span>
+      {% elif not r.exists %}<span class="status-chip gone">missing</span>{% endif %}
+      {% if r.denylisted %}<span class="status-chip rejected" title="Covered by [enable] denylist entry {{ r.denylisted }}">denylisted</span>{% endif %}
+      {% if r.auto_enabled %}<span class="status-chip muted" title="Covered by [enable] auto_enable_roots entry {{ r.auto_enabled }}">auto</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+
+  {% if p.valid_slug %}
+  <div class="proj-counts">
+    {% if p.counts %}
+    <div class="metric"><span class="label">Captures</span><span class="value">{{ p.counts.raw }}{% if p.counts.unconsumed %} · {{ p.counts.unconsumed }} unconsumed{% endif %}</span></div>
+    <div class="metric"><span class="label">Facts</span><span class="value">{{ p.counts.curated }}</span></div>
+    <div class="metric"><span class="label">Nodes</span><span class="value">{{ p.counts.nodes }}</span></div>
+    {% else %}
+    <div class="metric"><span class="label">Counts</span><span class="value">unreadable</span></div>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endfor %}
+
+{% if orphans %}
+<section class="panel">
+  <h1>Unregistered memory</h1>
+  <p>These projects have a memory tree in the store but no entry in <code class="mono">registry.toml</code>.
+    Nothing resolves to them, so no session can be captured into them and no sweep walks them — their
+    contents are readable but frozen. Enable the matching folder to reconnect one.</p>
+</section>
+{% for p in orphans %}
+<section class="card">
+  <div class="card-head">
+    <div>
+      <h2><span class="mono">{{ p.slug }}</span></h2>
+      <p>Tree on disk, no registry entry</p>
+    </div>
+    <div class="right"><span class="status-chip proposed">unregistered</span></div>
+  </div>
+  <div class="proj-counts">
+    {% if p.counts %}
+    <div class="metric"><span class="label">Captures</span><span class="value">{{ p.counts.raw }}</span></div>
+    <div class="metric"><span class="label">Facts</span><span class="value">{{ p.counts.curated }}</span></div>
+    <div class="metric"><span class="label">Nodes</span><span class="value">{{ p.counts.nodes }}</span></div>
+    {% else %}
+    <div class="metric"><span class="label">Counts</span><span class="value">unreadable</span></div>
+    {% endif %}
+  </div>
+</section>
+{% endfor %}
+{% endif %}
+
+{% if denylist or auto_enable_roots %}
+<section class="panel">
+  <h1>Folder rules</h1>
+  <p>From <code class="mono">config.toml</code>. These apply to Neurobase's <em>automatic</em> actions — new capture
+    and automatic injection — and the denylist wins over both auto-enable and an explicit enable.</p>
+  <dl class="meta">
+    {% if auto_enable_roots %}<dt>auto_enable_roots</dt><dd>{{ auto_enable_roots | join(", ") }}</dd>{% endif %}
+    {% if denylist %}<dt>denylist</dt><dd>{{ denylist | join(", ") }}</dd>{% endif %}
+  </dl>
+</section>
+{% endif %}
+
+<section class="panel">
+  <h1>Changing this list</h1>
+  <p>This page is read-only for now. Enable a folder with <code class="mono">neurobase enable</code> from
+    inside it; changing or removing an entry means editing <code class="mono">registry.toml</code> in the
+    store by hand. Editing from here is built but deliberately held back — see
+    <code class="mono">ADR-0027</code>.</p>
+</section>
+{% endblock %}

@@ -606,3 +606,21 @@ def test_scribe_without_config_stays_opt_in(
 
     assert scribe.scribe(root, transcript_path=transcript, cwd=str(repo), reason="x") is None
     assert not (root / "store.toml").exists()
+
+
+def test_auto_enable_refuses_a_store_that_is_itself_a_qualifying_repo(
+    tmp_path: Path,
+) -> None:
+    """Codex F2, round 2: a store that is a git repo under an `auto_enable_roots`
+    folder would otherwise auto-register itself and have the curator capture its
+    own output. It must skip cleanly — a hook fails closed, never raises — and
+    leave no stray tree behind."""
+    workspace = tmp_path / "workspace"
+    root = workspace / "store"
+    root.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "."], cwd=root, check=True, capture_output=True)
+
+    slug = resolve_or_auto_enable(root, root, auto_enable_roots=[str(workspace)], denylist=[])
+    assert slug is None
+    assert projects.load_registry(root) == {}
+    assert not (root / "projects").exists()

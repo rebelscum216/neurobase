@@ -25,6 +25,17 @@ class ProjectSlugCollisionError(ValueError):
     """The slugified name already maps to a different root."""
 
 
+class ProjectInsideStoreError(ValueError):
+    """The repo root that would be registered lies at or under the store root.
+
+    Registering the store as a project makes the curator capture its own output
+    into itself. The check lives at the registry write (:func:`register_project`)
+    rather than at any one front door because the path that gets *registered* is
+    not the path a caller submits — it is that path collapsed to its git common
+    root — so a check performed before the collapse validates a different path
+    than the one written (Codex F2, round 2)."""
+
+
 class RegistryShapeError(ValueError):
     """``registry.toml`` parsed as TOML but is not a registry: ``projects`` is not
     a table, an entry is not a table, or a ``roots`` list holds a non-string.
@@ -143,6 +154,30 @@ def git_common_root(cwd: Path) -> Path | None:
     return common_dir.resolve().parent
 
 
+def project_root_for(cwd: Path) -> Path:
+    """The path :func:`register_project` will actually register for ``cwd`` — its
+    git common root, or its resolved self when it isn't in a repo.
+
+    Public because a caller that wants to derive the slug or create the tree
+    *before* committing the registry entry must do so from the **same** path the
+    registry will hold. Deriving from the submitted path instead lets the two
+    disagree: submitting a linked worktree produced a tree under the worktree's
+    name and a registry entry under the repo's (Codex F2, round 2)."""
+    return git_common_root(cwd) or cwd.resolve()
+
+
+def is_inside_store(project_root: Path, root: Path) -> bool:
+    """Whether an **already-collapsed** ``project_root`` (from
+    :func:`project_root_for`) sits at or under the store root.
+
+    The predicate form of the refusal :func:`register_project` raises. A caller
+    that creates the memory tree *before* writing the registry needs it: the
+    authoritative raise happens at the registry write, by which point a tree would
+    already exist for a project that is about to be refused. Pass the collapsed
+    root — checking a pre-collapse path is the F2 defect itself."""
+    return _is_within(project_root, root.expanduser().resolve())
+
+
 def derive_slug(project_root: Path, slug: str | None = None) -> str:
     """The slug :func:`register_project` would assign for ``project_root``,
     validated but **without** writing the registry.
@@ -172,8 +207,23 @@ def register_project(root: Path, cwd: Path, slug: str | None = None) -> str:
     file from ``{}`` and silently drop every other project's roots. A corrupt
     registry raises here instead — ``core/enable.py`` already catches
     ``TOMLDecodeError``/``OSError`` and fails closed, which is the documented
-    auto-enable posture."""
-    project_root = git_common_root(cwd) or cwd.resolve()
+    auto-enable posture.
+
+    Raises :class:`ProjectInsideStoreError` when the collapsed root is at or under
+    ``root``. That guard is **here**, at the single registry write, not in any
+    caller: the registered path is ``cwd`` collapsed to its git common root, so a
+    caller checking ``cwd`` is checking a different path. A linked worktree living
+    outside the store whose common root *is* the store passed a caller-side check
+    and then registered the store root itself; the web UI, ``neurobase enable``,
+    and auto-enable all shared that hole (Codex F2, round 2)."""
+    project_root = project_root_for(cwd)
+    if is_inside_store(project_root, root):
+        raise ProjectInsideStoreError(
+            f"{project_root} is at or under the Neurobase store ({root}) — registering "
+            "it would make the curator capture its own output. This is the path that "
+            "would actually be registered; for a git worktree it is the repo's common "
+            "root, not the directory given."
+        )
     final_slug = derive_slug(project_root, slug)
     registry = _read_registry(root)
     existing_roots = registry.get(final_slug, [])
@@ -220,24 +270,73 @@ def _is_within(path: Path, ancestor: Path) -> bool:
     return path.is_relative_to(ancestor)
 
 
-def _resolved_config_dirs(paths: list[str]) -> list[Path]:
-    """Expand ``~`` and resolve each configured path, **dropping** any entry that
-    isn't absolute after expansion (a relative entry would resolve against the
+def _resolved_config_entries(paths: list[str]) -> list[tuple[str, Path]]:
+    """Each usable configured path as ``(verbatim, resolved)``. **Drops** any entry
+    that isn't absolute after expansion (a relative entry would resolve against the
     hook's launch cwd — non-deterministic scope, review F5) and any entry that
     can't be turned into a path at all. Never raises on a bad entry — a malformed
-    ``config.toml`` value must not crash a hook."""
+    ``config.toml`` value must not crash a hook.
+
+    The verbatim half exists so a display surface can name *which* configured entry
+    matched, in the form the user actually wrote it (``~/Projects``), rather than
+    the expanded path they'd have to recognize."""
     if isinstance(paths, str):
         paths = [paths]  # defensive: never iterate a bare string per character (R2-1)
-    out: list[Path] = []
+    out: list[tuple[str, Path]] = []
     for raw in paths:
         try:
             expanded = Path(raw).expanduser()
             if not expanded.is_absolute():
                 continue  # skip relative entries rather than resolve them vs cwd
-            out.append(expanded.resolve())
+            out.append((raw, expanded.resolve()))
         except (RuntimeError, TypeError, OSError):
             continue  # ~ with no home, non-string element, or a pathological path
     return out
+
+
+def _resolved_config_dirs(paths: list[str]) -> list[Path]:
+    """Just the resolved paths from :func:`_resolved_config_entries`."""
+    return [resolved for _, resolved in _resolved_config_entries(paths)]
+
+
+def _config_hit(path: Path, paths: list[str]) -> str | None:
+    """The configured entry — verbatim, as written — covering ``path``, or ``None``.
+
+    ``path`` is used **as given** (expanded and resolved, but never git-collapsed):
+    the callers below hand it a registered root, which ``register_project`` already
+    stored as a git common root. Re-deriving it would mean a ``git rev-parse``
+    subprocess per call, and these run once per registered root on every render of
+    the Projects directory.
+
+    Fails closed and silent on a path that can't be resolved: a symlink loop
+    (``RuntimeError``), an unreadable parent (``OSError``), or a path that is not a
+    valid path at all — an embedded NUL raises ``ValueError`` from ``resolve()``,
+    and a registered root is an arbitrary hand-editable string, so that is
+    reachable (Codex F6). "Not covered" rather than an exception escaping into a
+    hook or a page render."""
+    if not paths:
+        return None
+    try:
+        candidate = path.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    for raw, configured in _resolved_config_entries(paths):
+        if _is_within(candidate, configured):
+            return raw
+    return None
+
+
+def denylist_hit(path: Path, denylist: list[str]) -> str | None:
+    """The ``[enable] denylist`` entry covering ``path``, verbatim as configured, or
+    ``None``. See :func:`is_denylisted` for what the denylist actually gates."""
+    return _config_hit(path, denylist)
+
+
+def auto_enable_hit(path: Path, auto_enable_roots: list[str]) -> str | None:
+    """The ``[enable] auto_enable_roots`` entry covering ``path``, verbatim as
+    configured, or ``None``. Coverage alone does not mean a repo *is* registered —
+    see :func:`auto_enable_root_for` for the full qualification."""
+    return _config_hit(path, auto_enable_roots)
 
 
 def is_denylisted(cwd: Path, denylist: list[str]) -> bool:
@@ -255,7 +354,7 @@ def is_denylisted(cwd: Path, denylist: list[str]) -> bool:
     if not denylist:
         return False
     candidate = (git_common_root(cwd) or cwd.resolve()).resolve()
-    return any(_is_within(candidate, deny) for deny in _resolved_config_dirs(denylist))
+    return denylist_hit(candidate, denylist) is not None
 
 
 def auto_enable_root_for(
@@ -278,10 +377,6 @@ def auto_enable_root_for(
     if repo_root is None:
         return None  # not a git repo — auto-enable only registers real repos
     repo_root = repo_root.resolve()
-    for deny in _resolved_config_dirs(denylist):
-        if _is_within(repo_root, deny):
-            return None
-    for allowed in _resolved_config_dirs(auto_enable_roots):
-        if _is_within(repo_root, allowed):
-            return repo_root
-    return None
+    if denylist_hit(repo_root, denylist) is not None:
+        return None  # the denylist wins over auto_enable_roots
+    return repo_root if auto_enable_hit(repo_root, auto_enable_roots) is not None else None

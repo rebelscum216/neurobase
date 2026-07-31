@@ -169,6 +169,38 @@ _Done when: the gallery reflects on-disk truth — against today's dev store
 that means both accepted skills render `missing on disk` — and every card
 round-trips to graph and suggestions._
 
+## Phase P — Projects directory _(read-only shipped 2026-07-31; editing deferred)_
+
+Which folders have Neurobase enabled, and what state each one is in. Contract in
+spec §14 ("Projects directory"); rationale in
+[ADR-0027](../adr/0027-registry-editing-from-the-web-ui.md).
+
+**Shipped:** `GET /projects` — one row per registered project with every root,
+whether that root still exists, denylist/auto-enable coverage, and
+raw/curated/node counts, all per-project fail-soft. Plus the project trees with
+**no** registry entry, which nothing surfaced before. New in `core`:
+`StoreHandle.node_count` / `list_project_trees`, and `projects.denylist_hit` /
+`auto_enable_hit` (display-safe, no `git rev-parse` per root).
+
+**Also shipped, and independent of the UI:** `register_project` refuses to
+register a root at or under the store — a hole `neurobase enable` and auto-enable
+had on their own, since the path *validated* and the path *registered* differ
+whenever a linked worktree is involved.
+
+**Phase P2 — registry editing (deferred, its own branch).** Built and reviewed
+here, then pulled: three rounds found seven blockers, and after the first every
+one was the same class — `load_registry` preserves arbitrary hand-edited content
+by contract, and the mutating routes trusted it. The branch inherits the five
+mutating routes, `projects.remove_root` / `deregister_project`,
+`StoreHandle.delete_project_tree`, `neurobase disable`, and the two known-gaps
+that only exist once a delete does. Its design premise, established the hard way:
+**treat every registry key and root as arbitrary bytes**, and give actions an
+identity that does not depend on the key's shape (a key may contain `/`).
+
+**This removes the registry list from Phase T's brief** — `/status` is now purely
+diagnostics (doctor checks, brain resolution, store schema, curator-log tails, run
+buttons), and it no longer needs to carry per-project counts.
+
 ## Phase T — Status & control
 
 **Prerequisite refactor (the D-1 pattern):** `doctor`'s checks live in
@@ -184,7 +216,8 @@ CLI import path updates; `doctor`'s printed output and exit codes preserved
 byte-for-byte, `tests/test_cli_doctor.py` (exists by that name) as the
 unmodified oracle.
 
-- `GET /status` — registry projects with counts, per-agent hook health from
+- `GET /status` — ~~registry projects with counts~~ (now Phase P's
+  `/projects`), per-agent hook health from
   `collect_checks` (✓/!/✗ + remedy), brain backend resolution, store
   schema/root, last curator pass per project from `.curator-log.jsonl`
   (fail-soft tail read; fold summary once Slice B lands).

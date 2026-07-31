@@ -30,19 +30,22 @@ _NAV: list[tuple[str, str, str, str, bool]] = [
     ("memory", "Memory", "◈", "/memory", True),
     ("suggestions", "Suggestions", "△", "/suggestions", True),
     ("skills", "Skills", "✦", "/skills", True),
+    ("projects", "Projects", "▤", "/projects", True),
     ("status", "Status", "◷", "/status", False),
 ]
 
 
 def _counts(root: Path) -> dict[str, int]:
     """Live rail badges: raw captures (Sessions), active curated facts (Memory),
-    pending proposals (Suggestions), and accepted proposals (Skills). Fail-soft
-    per project — one unreadable project must not blank the whole rail."""
+    pending proposals (Suggestions), accepted proposals (Skills), and registered
+    projects (Projects). Fail-soft per project — one unreadable project must not
+    blank the whole rail."""
     # Reach the store through a validated READ handle (ADR-0015 chokepoint) — the
     # registry + list accessors live on the handle, never called raw-root here.
     handle = open_store(root, StoreMode.READ)
     sessions = memory = 0
-    for slug in handle.load_registry():
+    registry = handle.load_registry()
+    for slug in registry:
         try:
             sessions += len(handle.list_raw(slug, unconsumed_only=False))
             memory += len(handle.list_curated(slug, active_only=True))
@@ -58,7 +61,14 @@ def _counts(root: Path) -> dict[str, int]:
                 skills += 1
     except (OSError, ValueError):
         pass
-    return {"sessions": sessions, "memory": memory, "suggestions": pending, "skills": skills}
+    return {
+        "sessions": sessions,
+        "memory": memory,
+        "suggestions": pending,
+        "skills": skills,
+        # Registered projects — already loaded above, so this badge costs no extra read.
+        "projects": len(registry),
+    }
 
 
 def _is_active(path: str, href: str) -> bool:

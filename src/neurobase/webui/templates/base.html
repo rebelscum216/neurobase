@@ -374,6 +374,50 @@
       }
       .status-code { font-family: var(--mono); color: var(--red-2); font-weight: 700; }
 
+      /* ============ PROJECTS DIRECTORY (Phase P) ============ */
+      input[type="text"] {
+        font-family: var(--mono); font-size: 0.84rem;
+        background: var(--canvas); color: var(--ink); border: 1px solid var(--line);
+        border-radius: var(--r-sm); padding: 0.5rem 0.6rem;
+      }
+      /* `width: 100%` on the input and `min-width: 0` on the flex item together stop
+         the browser's default ~20-character input size from setting the column width
+         and clipping the placeholder. */
+      .field { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; flex: 1 1 15rem; }
+      .field input[type="text"] { width: 100%; }
+      .field label {
+        font-family: var(--mono); font-size: 0.63rem; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.04em;
+      }
+      .field .hint { font-size: 0.74rem; color: var(--muted); }
+      /* A label that quotes a value the user must type back verbatim must not be
+         case-transformed — the uppercase style would instruct the wrong string. */
+      .field label.verbatim { text-transform: none; font-size: 0.8rem; letter-spacing: 0; color: var(--mid); }
+      .form-row { display: flex; gap: 0.7rem; align-items: flex-end; flex-wrap: wrap; }
+      .form-row .field.grow { flex: 3 1 22rem; }
+      .form-row .btn { flex: none; }
+
+      .proj-roots { list-style: none; margin: 0 0 0.9rem; padding: 0; display: flex; flex-direction: column; gap: 0.45rem; }
+      .proj-root {
+        display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+        padding: 0.5rem 0.7rem; background: var(--canvas);
+        border: 1px solid var(--line); border-radius: var(--r-sm);
+      }
+      .proj-root .path { font-family: var(--mono); font-size: 0.8rem; word-break: break-all; flex: 1 1 16rem; }
+      .proj-root .path.gone { color: var(--red-2); text-decoration: line-through; }
+      .proj-root form { margin: 0; }
+      .proj-root .btn { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
+      .status-chip.gone { background: var(--red-soft); color: var(--red-2); }
+      .status-chip.muted { background: var(--panel-2); color: var(--mid); }
+      .proj-counts { display: flex; gap: 1.3rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+      .proj-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: flex-end; padding-top: 0.9rem; border-top: 1px solid var(--line); }
+      .proj-actions form { margin: 0; }
+      /* The inline add-root field sits alongside the row's other buttons, so it
+         must not grow the way the standalone "Enable a folder" field does. */
+      .proj-actions .field { flex: 0 1 19rem; }
+      .danger-zone { border-color: var(--red-soft); }
+      .danger-zone h1 { color: var(--red-2); }
+
       dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 1rem; margin: 0; }
       dl.meta dt { color: var(--muted); font-size: 0.78rem; }
       dl.meta dd { margin: 0; font-family: var(--mono); font-size: 0.84rem; }

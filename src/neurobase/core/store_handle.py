@@ -233,6 +233,38 @@ class StoreHandle:
     def prune_tombstones(self, project: str, older_than_days: int = 14) -> list[str]:
         return store.prune_tombstones(self.root, project, older_than_days)
 
+    def list_project_trees(self) -> list[str]:
+        """Every project slug that has a memory tree on disk, sorted.
+
+        This is the *disk* view, deliberately independent of the registry: the two
+        can disagree, and only comparing them reveals a project whose tree holds
+        real captures while nothing in ``registry.toml`` points at it — so no sweep
+        walks it and no capture can ever add to it. Entries that aren't valid slugs
+        are skipped rather than raising: this reads a directory a user can put
+        anything into.
+
+        Fail-soft on an unreadable or absent ``projects/`` — an empty store is
+        legitimately empty, not an error."""
+        base = self.root / "projects"
+        try:
+            entries = list(base.iterdir())
+        except OSError:
+            return []
+        return sorted(
+            entry.name for entry in entries if entry.is_dir() and store.SLUG_RE.match(entry.name)
+        )
+
+    def node_count(self, project: str) -> int:
+        """How many synthesized nodes the project has. A missing ``nodes/`` counts
+        as zero rather than raising — a project can be registered before its tree
+        exists. Lives here so a presentation layer never has to glob the store root
+        itself (ADR-0015); ``cli/status`` still globs inline and can move onto this."""
+        nodes = self.memory_dir(project) / "nodes"
+        try:
+            return sum(1 for _ in nodes.glob("*.md"))
+        except OSError:
+            return 0
+
     def write_node(self, project: str, name: str, body: str) -> Path:
         return store.write_node(self.root, project, name, body)
 

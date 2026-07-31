@@ -349,3 +349,39 @@ def test_method_registry_register_and_resolve(
     assert handle.load_registry() == projects.load_registry(root)
     assert "myrepo" in handle.load_registry()
     assert handle.resolve_project(repo) == "myrepo"
+
+
+# --- Phase P: the disk view, and the one destructive operation ---------------
+
+
+def test_node_count_counts_nodes_and_tolerates_a_missing_tree(handle: StoreHandle) -> None:
+    assert handle.node_count("proj") == 0  # no tree at all is zero, not an error
+    handle.ensure_tree("proj")
+    assert handle.node_count("proj") == 0
+    handle.write_node("proj", "a-node", "body")
+    handle.write_node("proj", "b-node", "body")
+    assert handle.node_count("proj") == 2
+
+
+def test_list_project_trees_is_the_disk_view_independent_of_the_registry(
+    handle: StoreHandle, root: Path, tmp_path: Path
+) -> None:
+    """The registry and the disk can disagree, and only comparing them reveals a
+    tree nothing points at — unreachable by any capture, walked by no sweep."""
+    handle.ensure_tree("registered")
+    handle.ensure_tree("orphan")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    projects.register_project(root, repo, slug="registered")
+    assert handle.list_project_trees() == ["orphan", "registered"]
+    assert list(handle.load_registry()) == ["registered"]
+
+
+def test_list_project_trees_skips_non_slug_entries_and_empty_stores(
+    handle: StoreHandle, root: Path
+) -> None:
+    assert handle.list_project_trees() == []  # no projects/ dir yet
+    handle.ensure_tree("good")
+    (root / "projects" / "Not A Slug").mkdir()
+    (root / "projects" / "loose-file.md").write_text("x", encoding="utf-8")
+    assert handle.list_project_trees() == ["good"]

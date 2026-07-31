@@ -2295,3 +2295,61 @@ review surface; later phases extend this section rather than bypassing it.
   unredacted draft, even hand-edited/legacy.
 - Metrics rendering follows §12.9: `None` renders as *insufficient data*, never
   a fake measured zero.
+
+### Projects directory (Phase P)
+
+The registry surfaced as a screen. **Read-only** — registry *editing* from the
+browser was built and deferred to its own branch (ADR-0027) after three review
+rounds found one recurring defect class: `projects.load_registry` preserves
+arbitrary hand-edited content **by contract** (any TOML table key, any string in
+`roots`), and every mutating route trusted it.
+
+- `GET /projects` — every registered project: slug, each registered root,
+  whether that root still exists on disk, whether it is covered by an `[enable]`
+  `denylist` or `auto_enable_roots` entry, and its raw/curated/node counts.
+- **Every store read per project MUST fail soft** — a bad project degrades its
+  own row, never the page, which is the only place these states are visible.
+  This covers *all* accessors, not just the counting ones: `memory_dir` raising
+  outside the counting guard is what turned one hand-edited entry into a 500
+  that hid every healthy project.
+- **A registry key that is not a valid slug** (`[projects."bad_slug"]`, or one
+  containing `/`) **MUST** render as a labelled row. No store path can be built
+  for it, so it can have no tree and no contents; nothing on this surface may
+  interpolate such a key into a URL.
+- **A registered root that is not a usable path MUST render as its own state**
+  and skip the rule lookups. An embedded NUL is the sharp case: `Path.is_dir()`
+  swallows it but `Path.resolve()` raises `ValueError`, which is not an error the
+  filesystem-error handling anticipates.
+- The page **MUST also list project trees that have no registry entry.** Such a
+  tree is unreachable — nothing resolves to it, so no hook can capture into it
+  and no sweep walks it — and no other surface reveals it.
+- Registry paths are rendered **verbatim, not display-redacted** (the §12.8 rule
+  is about draft bodies and third-party text). A root has to be readable to be
+  recognized, and the CLI matches the stored string exactly.
+- **No mutating route exists on this surface.** Changing the list is
+  `neurobase enable` or a hand edit of `registry.toml`, and the page says so.
+
+### Registering a project (all front doors)
+
+The store-containment refusal **binds the path that is actually registered, not
+the path a caller submits.** `projects.register_project` collapses its argument
+to the git *common* root, so those differ whenever a linked worktree is given: a
+worktree outside the store whose common root **is** the store passed a
+submitted-path check and registered the store root itself, which would make the
+curator capture its own output. The guard therefore lives at the single registry
+write (`register_project` raising `ProjectInsideStoreError`), binding
+`neurobase enable`, auto-enable, and any future editing surface together.
+
+A caller that creates the memory tree *before* the registry write **MUST**
+additionally pre-check with `projects.is_inside_store` on the **collapsed** root,
+or a refusal leaves a stray tree behind. Slug derivation and tree creation
+**MUST** use that same collapsed root, or the tree and the registry entry land
+under different names.
+
+### Parity
+
+The web UI writes nothing to the registry, so there is no parity gap to close
+here yet. When registry editing lands (ADR-0027), it and the CLI **MUST** share
+the `core.projects` / `StoreHandle` primitives rather than each holding its own
+copy of the rules — which is what put the store-containment guard at the registry
+write above, where every front door inherits it.

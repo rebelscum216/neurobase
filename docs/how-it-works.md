@@ -389,8 +389,9 @@ Single job `test`, named `py${{ matrix.python }} · ${{ matrix.os }}`, with `str
 Steps, per matrix cell:
 1. `actions/checkout@v7` — checks out the repo.
 2. "Install uv" — `astral-sh/setup-uv@v7` with `python-version: ${{ matrix.python }}` and `enable-cache: true` — installs `uv` and the matrix's Python version, with uv's dependency cache enabled for faster repeat runs.
-3. "Sync dependencies" — `uv sync` — installs project + dev dependencies from `pyproject.toml`/the lockfile.
-4. "CI gate (ruff + format + mypy + pytest w/ coverage floor)" — `uv run python scripts/ci.py` — the CI gate step itself, with an inline comment reiterating that the four checks live in `scripts/ci.py` "so local dev (`make ci`) and CI share one source of truth and can't drift." The pytest step runs under `--cov=src/neurobase --cov-branch`, so the coverage floor in `pyproject.toml` (`[tool.coverage.report] fail_under`) is enforced on every matrix cell — a PR that drops coverage below the floor turns the gate red exactly like a failing test.
+3. "Install Node" — `actions/setup-node@v6` with `node-version: "22"` — installs the runtime the renderer behaviour suite (`tests/js/`) needs. Required, not best-effort: `scripts/ci.py` exits 127 when Node is missing or older than 22, because a suite that skips itself is indistinguishable from one that passed. No npm install accompanies it — the suite is `node --test` and two files.
+4. "Sync dependencies" — `uv sync` — installs project + dev dependencies from `pyproject.toml`/the lockfile.
+5. "CI gate (ruff + format + mypy + pytest w/ coverage floor + renderer)" — `uv run python scripts/ci.py` — the CI gate step itself, with an inline comment reiterating that the six checks live in `scripts/ci.py` "so local dev (`make ci`) and CI share one source of truth and can't drift." The pytest step runs under `--cov=src/neurobase --cov-branch`, so the coverage floor in `pyproject.toml` (`[tool.coverage.report] fail_under`) is enforced on every matrix cell — a PR that drops coverage below the floor turns the gate red exactly like a failing test.
 
 This workflow is intentionally thin: it contains no lint/format/type/test logic of its own — all of that is delegated to `scripts/ci.py`, so a change to the gate's checks never requires touching this YAML file.
 
@@ -410,7 +411,7 @@ if ! uv run python scripts/ci.py; then
 fi
 echo "pre-push: gate is green — pushing."
 ```
-`set -eu` makes the script exit on the first unset-variable reference or unhandled command failure. It runs `uv run python scripts/ci.py` — the identical gate CI runs — and if it fails, prints an error (including the escape hatch `git push --no-verify`) and exits `1`, which Git interprets as "abort the push." Because it invokes the exact same `scripts/ci.py`, the hook's guarantee is precise: "if this passes, CI's ruff/format/mypy/pytest steps will too" (per the header comment) — there is no separate, potentially-drifted definition of "green" at the pre-push layer.
+`set -eu` makes the script exit on the first unset-variable reference or unhandled command failure. It runs `uv run python scripts/ci.py` — the identical gate CI runs — and if it fails, prints an error (including the escape hatch `git push --no-verify`) and exits `1`, which Git interprets as "abort the push." Because it invokes the exact same `scripts/ci.py`, the hook's guarantee is precise: "if this passes, CI's ruff/format/mypy/store-chokepoint/pytest/renderer steps will too" (per the header comment) — there is no separate, potentially-drifted definition of "green" at the pre-push layer.
 
 ### How the pieces connect
 

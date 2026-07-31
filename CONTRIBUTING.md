@@ -17,11 +17,17 @@ config changes, zero telemetry), and the repo layout.
    needs an [ADR](docs/adr/README.md), not just a code change.
 2. **Run the full local gate before pushing** — not just the tests:
    ```bash
-   make ci                       # ruff check + ruff format --check + mypy + pytest (w/ coverage floor)
+   make ci                       # ruff + format + mypy + store-chokepoint + pytest (w/ coverage floor) + renderer
    # or, without make (e.g. on Windows):
    uv run python scripts/ci.py
    ```
-   `scripts/ci.py` is the single source of truth for those four checks; CI
+   The gate needs **`uv` and Node 22+** on `PATH`. Node runs `tests/js/`, the
+   behaviour suite for the graph renderer's ~700 lines of client-side
+   JavaScript — no npm, no `package.json`, no `node_modules`, just
+   `node --test` and two files. A missing or too-old runtime **fails** the
+   gate (exit 127); it is never skipped, because a suite that skips itself
+   reads exactly like a suite that passed.
+   `scripts/ci.py` is the single source of truth for those six checks; CI
    runs the identical script across the OS/Python matrix, so local and CI
    can't drift. Opt into the committed pre-push hook once per clone so a red
    gate can't reach `git push` by accident:

@@ -98,15 +98,25 @@ export function runGraph(payload, opts = {}) {
   const queue = [];
   let nextRaf = 1;
 
+  // Document listeners were discarded here, and the ResizeObserver callback
+  // below — so `visibilitychange` and resize could not be driven at all, and the
+  // suite's claim to cover "interaction" rested on one `mousemove` (Codex
+  // P2-TEST-GAP-006, round 3). A harness that swallows the events it is meant to
+  // deliver is the same false confidence the source assertions gave.
+  const documentListeners = Object.create(null);
   const document_ = {
     hidden: false,
     documentElement: el("html"),
     getElementById: (id) => byId[id] || null,
     createElement: (tag) => el(tag),
-    addEventListener: () => {},
+    addEventListener(type, fn) {
+      (documentListeners[type] || (documentListeners[type] = [])).push(fn);
+    },
+    removeEventListener() {},
     activeElement: null,
     body: el("body"),
   };
+  let resizeCallback = null;
 
   const sandbox = {
     console,
@@ -134,7 +144,11 @@ export function runGraph(payload, opts = {}) {
     },
     getComputedStyle: () => ({ getPropertyValue: () => "#000" }),
     matchMedia: () => ({ matches: reduced, addEventListener: () => {} }),
-    ResizeObserver: class { observe() {} disconnect() {} },
+    ResizeObserver: class {
+      constructor(fn) { resizeCallback = fn; }
+      observe() {}
+      disconnect() {}
+    },
     history: { pushState() {}, replaceState() {} },
     location: { href: opts.href || "http://127.0.0.1:8765/graph" },
     setTimeout: (fn) => { fn(); return 0; },
@@ -166,6 +180,15 @@ export function runGraph(payload, opts = {}) {
     return ran;
   }
 
+  /* Every driver below throws when the renderer never registered the thing it is
+   * meant to drive, rather than no-oping: a test that silently drives nothing is
+   * the exact vacuity this suite exists to close. */
+  function dispatchDocument(type, ev) {
+    const fns = documentListeners[type] || [];
+    if (!fns.length) throw new Error(`renderer registered no document "${type}" listener`);
+    for (const fn of fns) fn(ev || {});
+  }
+
   return {
     probe: sandbox.window.__nbGraphProbe,
     window: sandbox.window,
@@ -173,11 +196,37 @@ export function runGraph(payload, opts = {}) {
     tick,
     pending: () => queue.length,
     advanceClock: (ms) => { now += ms; },
+    dispatchDocument,
+    /** Flip `document.hidden` and fire the visibilitychange the browser would. */
+    setHidden(hidden) {
+      document_.hidden = hidden;
+      dispatchDocument("visibilitychange", {});
+    },
+    /** Fire the ResizeObserver callback the renderer registered on the wrapper. */
+    resize() {
+      if (!resizeCallback) throw new Error("renderer never constructed a ResizeObserver");
+      resizeCallback([{ target: wrap }]);
+    },
+    /** A keyboard event shaped like the real one — `preventDefault` included. */
+    key(name) {
+      canvas.dispatch("keydown", { key: name, preventDefault() {} });
+    },
   };
 }
 
 /** A synthetic payload of `n` nodes. `spread` controls how clustered they are. */
 export function makePayload(n, { projects = 1, edges = 0, spread = "normal" } = {}) {
+  // The renderer collapses `rad` to 0 for a single project, so the DEFAULT
+  // payload is already one centre — asking for `single-cell` at `projects: 1`
+  // produces a byte-identical fixture, which is how the "pathological cluster"
+  // test came to be a duplicate of the plain bounded-work one (Codex
+  // P2-TEST-GAP-006, round 3). Refuse it rather than let it look like coverage.
+  if (spread === "single-cell" && projects === 1) {
+    throw new Error(
+      "single-cell with projects: 1 is identical to the default payload — " +
+        "pass projects > 1 so the collapse is a real one",
+    );
+  }
   const nodes = [];
   const names = [];
   for (let p = 0; p < projects; p++) names.push("proj" + p);

@@ -37,6 +37,7 @@ def _proposal(
     status: str = "proposed",
     evidence: list[EvidenceRef] | None = None,
     installed_path: str | None = None,
+    body: str | None = None,
 ) -> Path:
     """One §12.1-valid proposal on disk.
 
@@ -62,7 +63,9 @@ def _proposal(
         "updated_at": "2026-07-01T00:00:00Z",
         "installed_path": installed_path,
     }
-    return store.write_doc(proposal_path(root, slug), frontmatter, f"Draft body for {slug}.")
+    return store.write_doc(
+        proposal_path(root, slug), frontmatter, body or f"Draft body for {slug}."
+    )
 
 
 def _node(payload: dict, node_id: str) -> dict:
@@ -448,6 +451,93 @@ def test_an_ordinary_journal_still_supplies_its_edges(tmp_path: Path) -> None:
     payload = graph_view.graph_payload(open_store(root, StoreMode.READ), root)
     edge = next(e for e in payload["edges"] if e["kind"] == "session")
     assert edge["source"] == "journal"
+
+
+def _contained_store_with_one_real_edge(tmp_path: Path) -> Path:
+    """A store whose graph is non-empty *and* has a real edge.
+
+    Every containment test needs this: with no in-store nodes the connectivity
+    filter renders the empty state, and an assertion that a secret is absent
+    passes against a page that drew nothing at all — the vacuity mode that let
+    the first symlink test through with no containment in the code.
+    """
+    root = tmp_path / "store"
+    store.ensure_tree(PROJECT, root)
+    projects.register_project(root, tmp_path / PROJECT, slug=PROJECT)
+    raw = _capture(root, "sess-real", _BODY)
+    store.upsert_curated(root, PROJECT, "prefer-uv", "a real fact", provenance=[f"raw/{raw.name}"])
+    return root
+
+
+def test_a_symlinked_proposals_dir_mints_no_proposal_identity(tmp_path: Path) -> None:
+    """Proposals are the **fifth** document-identity channel, and the one round 2
+    missed: `load_all_proposals` globs `<root>/proposals/*.md` and proves nothing
+    about containment, so a symlinked `proposals/` renders an external document's
+    slug, body, project, and a curated-evidence edge on the 200 page (Codex
+    P2-SAFETY-SECURITY-008)."""
+    root = _contained_store_with_one_real_edge(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    # Written through the same §12.1 writer the real proposals use, so this
+    # fixture cannot pass by being silently rejected as malformed — it is a valid
+    # proposal in every respect except where it lives.
+    _proposal(
+        outside,
+        "external-proposal",
+        evidence=[EvidenceRef.curated(PROJECT, "prefer-uv")],
+        body="TOP SECRET PROPOSAL BODY",
+    )
+    (root / "proposals").symlink_to(outside / "proposals", target_is_directory=True)
+
+    html = (
+        TestClient(build_app(root), base_url="http://127.0.0.1:8765").get("/graph?orphans=1").text
+    )
+    assert "TOP SECRET PROPOSAL BODY" not in html  # the snippet
+    assert "external-proposal" not in html  # ...the identity it forged
+    payload = _payload(html)
+    assert _kinds(payload, "proposal") == []
+    assert not [e for e in payload["edges"] if e["kind"] == "curated"], (
+        "an out-of-store proposal must mint no evidence edge"
+    )
+    # The real graph still renders — this cannot pass on the empty state.
+    assert len(_kinds(payload, "fact")) == 1
+    assert len(_kinds(payload, "session")) == 1
+
+
+def test_an_individually_symlinked_proposal_is_contained_but_a_real_one_is_not(
+    tmp_path: Path,
+) -> None:
+    """The directory is not the only lever: one symlinked `*.md` inside a genuine
+    `proposals/` reaches the same glob. The in-store proposal beside it is the
+    positive control — containment must cost the external file everything and the
+    ordinary one nothing."""
+    root = _contained_store_with_one_real_edge(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = _proposal(
+        outside,
+        "external-proposal",
+        evidence=[EvidenceRef.curated(PROJECT, "prefer-uv")],
+        body="TOP SECRET PROPOSAL BODY",
+    )
+    _proposal(root, "in-store-proposal", evidence=[EvidenceRef.curated(PROJECT, "prefer-uv")])
+    # The link MUST be named for the proposal's own `name`: §12.1 validation
+    # rejects any document whose `name` differs from its file stem, so a
+    # `smuggled.md` pointing at `external-proposal` is dropped as *malformed*
+    # before containment is ever consulted — a fixture that passes this test with
+    # the guard deleted. Mutation caught exactly that.
+    (root / "proposals" / "external-proposal.md").symlink_to(external)
+
+    html = (
+        TestClient(build_app(root), base_url="http://127.0.0.1:8765").get("/graph?orphans=1").text
+    )
+    assert "TOP SECRET PROPOSAL BODY" not in html
+    assert "external-proposal" not in html
+    payload = _payload(html)
+    assert [n["label"] for n in _kinds(payload, "proposal")] == ["in-store-proposal"]
+    assert ("curated", f"f:{PROJECT}:prefer-uv", "p:in-store-proposal") in {
+        (e["kind"], e["a"], e["b"]) for e in payload["edges"]
+    }, "the ordinary proposal keeps its evidence edge"
 
 
 def test_containment_holds_at_the_core_graph_boundary(tmp_path: Path) -> None:

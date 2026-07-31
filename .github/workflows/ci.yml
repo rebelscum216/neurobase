@@ -47,7 +47,7 @@ jobs:
       - name: Sync dependencies
         run: uv sync
 
-      # The five checks (ruff · format · mypy · store-chokepoint ·
+      # The six checks (ruff · format · mypy · store-chokepoint ·
       # pytest-with-coverage · node --test) live in scripts/ci.py so local dev
       # (`make ci`) and CI share one source of truth and can't drift. The coverage
       # floor is enforced on every matrix cell.

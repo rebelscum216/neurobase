@@ -5,7 +5,10 @@
  * false at 66.7M scans / 4,000 nodes (Codex P2-TEST-GAP-006, P2-UX-API-CONTRACT-005).
  * Every test here executes the real script.
  *
- * Run: node --test tests/js/   (wired into scripts/ci.py, so it cannot skip)
+ * Run: node --test 'tests/js/*.test.mjs'   (wired into scripts/ci.py, so it
+ * cannot skip). The glob is not decoration: a bare `node --test tests/js/`
+ * resolves the directory as a module and dies, and expanding the pattern needs
+ * Node 21+ — the gate enforces 22, matching CI's pin.
  */
 
 import { test } from "node:test";
@@ -43,13 +46,45 @@ test("scans grow linearly with node count (2100 -> 4000), not superlinearly", ()
 
 test("a pathological single-cell cluster stays bounded", () => {
   // Every node in one project => one centre => the worst case for a uniform grid.
-  const { probe } = runGraph(makePayload(2100, { spread: "single-cell" }));
-  const ceiling = probe.nodeCount * ITER * probe.maxScan;
+  // This must be measured against a payload that would OTHERWISE be spread: the
+  // renderer sets each project's orbit radius to 0 when there is only one, so the
+  // default `makePayload` is already single-centre and the old fixture — which
+  // passed `projects: 1` — was byte-identical to the plain bounded-work test
+  // above (Codex P2-TEST-GAP-006, round 3).
+  const spreadOut = runGraph(makePayload(2100, { projects: 8 })).probe;
+  const oneCell = runGraph(makePayload(2100, { projects: 8, spread: "single-cell" })).probe;
+
+  assert.equal(new Set(spreadOut.nodes.map((n) => n.project)).size, 8);
+  assert.equal(
+    new Set(oneCell.nodes.map((n) => n.project)).size,
+    1,
+    "the collapse must be real, or this is just the spread-out case again",
+  );
+
+  const ceiling = oneCell.nodeCount * ITER * oneCell.maxScan;
   assert.ok(
-    probe.relaxScans <= ceiling,
-    `single-cell input scanned ${probe.relaxScans}, ceiling ${ceiling}`,
+    oneCell.relaxScans <= ceiling,
+    `single-cell input scanned ${oneCell.relaxScans}, ceiling ${ceiling}`,
+  );
+
+  // Scan COUNT is not the discriminator — measured, the collapsed payload scans
+  // slightly *fewer* entries (3.90M vs 3.95M), because a node in a saturated cell
+  // exhausts MAX_SCAN sooner than one walking a sparse neighbourhood. What makes
+  // it the worst case is density, so that is what is asserted: the layout is
+  // deterministic (no clock, no RNG), so this comparison is stable everywhere.
+  assert.ok(
+    rmsRadius(oneCell.nodes) < rmsRadius(spreadOut.nodes),
+    "the single-centre payload must lay out more concentrated than the 8-centre one",
   );
 });
+
+/** RMS distance from the centroid — how tightly a layout is packed. */
+function rmsRadius(nodes) {
+  const cx = nodes.reduce((a, n) => a + n.x, 0) / nodes.length;
+  const cy = nodes.reduce((a, n) => a + n.y, 0) / nodes.length;
+  const sum = nodes.reduce((a, n) => a + (n.x - cx) ** 2 + (n.y - cy) ** 2, 0);
+  return Math.sqrt(sum / nodes.length);
+}
 
 /* Stated startup budgets. These are wall-clock, so they are the softest guard
  * here — the scan-count and linearity assertions above are the real ones. They
@@ -133,6 +168,68 @@ test("interaction wakes a parked graph and re-arms the full drift budget", () =>
     g.pending() > 0,
     "parked again immediately after waking — interaction did not re-arm the drift budget",
   );
+});
+
+/* Round 3 found the suite's one interaction test was the whole of its coverage:
+ * a faithful mutation — deleting `wake()` from the keyboard handler — left all 15
+ * tests green, and resize/visibility could not be driven at all because the
+ * harness discarded document listeners and the ResizeObserver callback (Codex
+ * P2-TEST-GAP-006). Each wake path now gets its own driven test. */
+
+test("arrow-key navigation wakes a parked graph and re-arms the budget", () => {
+  const g = runGraph(makePayload(60, { edges: 20 }));
+  g.tick(2000);
+  assert.equal(g.probe.isParked(), true);
+
+  g.key("ArrowRight");
+  assert.equal(g.probe.isParked(), false, "keyboard navigation must wake the renderer");
+
+  g.tick(120);
+  assert.ok(
+    g.pending() > 0,
+    "parked again immediately — the keyboard path did not re-arm the drift budget",
+  );
+});
+
+test("Enter on the keyboard selection wakes the graph too", () => {
+  const g = runGraph(makePayload(60, { edges: 20 }));
+  g.key("ArrowRight"); // establish a keyboard index; Enter is a no-op without one
+  g.tick(2000);
+  assert.equal(g.probe.isParked(), true);
+
+  g.key("Enter");
+  assert.equal(g.probe.isParked(), false, "selecting via Enter must wake the renderer");
+});
+
+test("a resize wakes a parked graph", () => {
+  const g = runGraph(makePayload(60, { edges: 20 }));
+  g.tick(2000);
+  assert.equal(g.probe.isParked(), true);
+
+  g.resize();
+  assert.equal(g.probe.isParked(), false, "resizing the canvas must wake the renderer");
+});
+
+test("hiding the document sleeps the loop and revealing it wakes it", () => {
+  const g = runGraph(makePayload(60, { edges: 20 }));
+  assert.ok(g.pending() > 0, "a fresh graph should be animating");
+
+  g.setHidden(true);
+  assert.equal(g.probe.isParked(), true, "a hidden tab must not keep painting");
+  assert.equal(g.pending(), 0, "and must cancel the frame it had queued");
+
+  g.setHidden(false);
+  assert.equal(g.probe.isParked(), false, "returning to the tab must resume");
+});
+
+test("a wake while the document is hidden schedules nothing", () => {
+  // `wake()` re-arms the drift budget unconditionally but must not schedule a
+  // frame behind a hidden tab — otherwise a background tab paints forever.
+  const g = runGraph(makePayload(60, { edges: 20 }));
+  g.setHidden(true);
+  g.probe.wake();
+  assert.equal(g.probe.isParked(), true);
+  assert.equal(g.pending(), 0);
 });
 
 // --- XSS / prototype safety, executed rather than regexed --------------------

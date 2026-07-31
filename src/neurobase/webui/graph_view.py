@@ -319,6 +319,7 @@ def _fact_nodes(
 
 
 def _proposal_nodes_and_edges(
+    handle: StoreHandle,
     root: Path,
     known: set[str],
     raw_index: dict[tuple[str, str], str],
@@ -359,6 +360,22 @@ def _proposal_nodes_and_edges(
 
     live = []
     for doc in docs:
+        # Proposals are the **fifth** document-identity channel on this surface,
+        # and `load_all_proposals` globs `<root>/proposals/*.md` without proving
+        # containment — so it follows both a symlinked `proposals/` directory and
+        # an individually symlinked `*.md`. An external file that satisfies §12.1
+        # otherwise contributes its slug, body snippet, project, and a curated
+        # evidence edge to the 200 page (Codex P2-SAFETY-SECURITY-008). Same
+        # threat model, same predicate, same `continue`-not-raise shape as raw,
+        # active-curated, tombstone, and journal data above.
+        #
+        # This contains the *proposal document*, never `_artifact_state`'s target
+        # read below: an accepted rule or skill is installed to `~/.claude/` or a
+        # project root **by design**, so containing that would report every real
+        # installation as missing. Only the four-state liveness answer crosses the
+        # render boundary from there — no path, no body, no frontmatter.
+        if not handle.contains(doc.file_path):
+            continue
         status = str(doc.get("status") or "proposed")
         if status in _DEAD_PROPOSAL_STATUSES:
             continue
@@ -487,7 +504,9 @@ def graph_payload(
         if a in known and b in known:
             edges.append({"a": a, "b": b, "kind": "supersedes", "source": fact_edge.source})
 
-    proposal_nodes, proposal_edges = _proposal_nodes_and_edges(root, known, raw_index, patterns)
+    proposal_nodes, proposal_edges = _proposal_nodes_and_edges(
+        handle, root, known, raw_index, patterns
+    )
     edges.extend(proposal_edges)
 
     # Decided *after* every edge exists: a session can be connected solely by a

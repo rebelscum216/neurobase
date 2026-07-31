@@ -354,12 +354,21 @@
             EVERY entry examined, before any skip can `continue` past it.
 
          2. DROP PAIR-UNIQUENESS, WHICH IS WHAT FORCED THE PREFIX WALK. Each node
-            now pushes only *itself* away from what it sees. Every pair is still
-            visited from both ends across the sweep, so the relative separation
-            change per pair is unchanged — this is the same physics, not a weaker
-            force, and it removes the `q.i <= p.i` test that made the scan
-            unbounded. (Positions update as the sweep proceeds rather than all at
-            once; deterministic either way, and it settles slightly faster.)
+            now pushes only *itself* away from what it sees, which removes the
+            `q.i <= p.i` test that made the scan unbounded. (Positions update as
+            the sweep proceeds rather than all at once; deterministic either way,
+            and it settles slightly faster.)
+
+            This is an approximation, not an identity. In an UNCAPPED sweep every
+            pair would be visited from both ends and the per-pair separation
+            change would be unchanged; under `MAX_SCAN` that is not true — a node
+            in a saturated cell exhausts its budget and never reaches some
+            neighbours, so a pair can be seen from one end only. What justifies it
+            is therefore not "the same physics" but the two things actually
+            measured: the work is hard-bounded (`nodes × iterations × MAX_SCAN`),
+            and the resulting layout is at least as well separated as the uncapped
+            loop it replaced — ≤572 overlapping-radius pairs at 2,100 nodes, the
+            original's own number. Both are asserted in `tests/js/`.
 
          Own cell FIRST, then the eight neighbours: under a cap, what a node can
          afford to look at should be the nodes most likely to be touching it.

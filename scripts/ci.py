@@ -4,11 +4,18 @@
 Runs the exact checks CI enforces, in order, each via ``uv run`` so the command
 is identical whether you invoke it locally or on a GitHub Actions runner:
 
-    ruff check .            # lint
-    ruff format --check .   # formatting
-    mypy src tests          # types
-    pytest --cov …          # tests + coverage (fails under the pyproject floor)
-    node --test tests/js/   # the shipped renderer's behaviour (see below)
+    ruff check .                    # lint
+    ruff format --check .           # formatting
+    mypy src tests                  # types
+    check_store_chokepoint.py       # every store write goes through the chokepoint
+    pytest --cov …                  # tests + coverage (fails under the pyproject floor)
+    node --test tests/js/*.test.mjs # the shipped renderer's behaviour (see below)
+
+The renderer suite is selected by a **glob**, and node's test runner only expands
+one from v21 — ``node --test tests/js/`` (a bare directory) does not work on any
+current version, it resolves the path as a module and dies. Node 22 is the floor
+this gate enforces because it is what ``.github/workflows/ci.yml`` pins, and so
+the oldest runtime the suite is actually exercised on.
 
 Both local dev (``make ci`` / this script) and every matrix job in
 ``.github/workflows/ci.yml`` call this file, so the two can never drift: add or
@@ -81,8 +88,38 @@ CHECKS: list[tuple[str, list[str]]] = [
 # when the renderer got a behaviour suite (above).
 REQUIRED_TOOLS = {
     "uv": "https://docs.astral.sh/uv/",
-    "node": "https://nodejs.org/ (v18+, for `node --test` — no npm install needed)",
+    "node": "https://nodejs.org/ (v22+, for `node --test` — no npm install needed)",
 }
+
+# Matches the `actions/setup-node` pin in `.github/workflows/ci.yml`. Checked
+# explicitly because the failure it prevents is otherwise unreadable: on node 20
+# the runner cannot expand the `tests/js/*.test.mjs` glob and reports
+# `Could not find '<pattern>'`, which exits 1 (so the gate is never falsely
+# green) but reads like a deleted test file rather than an old runtime.
+MIN_NODE_MAJOR = 22
+
+
+def _node_version_error() -> str | None:
+    """The error to print when node is present but too old, else ``None``.
+
+    An unreadable ``node --version`` returns ``None`` rather than failing the
+    gate: the check itself still runs and still fails loudly if the runtime is
+    genuinely incompatible, and guessing wrong here would block a working setup.
+    """
+    try:
+        raw = subprocess.run(
+            ["node", "--version"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        major = int(raw.lstrip("v").split(".")[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+    if major >= MIN_NODE_MAJOR:
+        return None
+    return (
+        f"error: node {raw} is too old — v{MIN_NODE_MAJOR}+ is required, because the "
+        "renderer suite is selected by a glob its test runner cannot expand. "
+        "Install a newer node — https://nodejs.org/ — then re-run."
+    )
 
 
 def main() -> int:
@@ -93,6 +130,11 @@ def main() -> int:
                 f"error: `{tool}` is not on PATH. Install it — {url} — then re-run.",
                 file=sys.stderr,
             )
+        return 127
+
+    version_error = _node_version_error()
+    if version_error:
+        print(version_error, file=sys.stderr)
         return 127
 
     results: list[tuple[str, bool, float]] = []

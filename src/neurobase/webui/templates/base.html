@@ -275,6 +275,10 @@
       .page { max-width: 1120px; margin: 0 auto; padding: 1.6rem 1.75rem 4rem; width: 100%; }
       .page.narrow { max-width: 760px; }
       .page.wide { max-width: 1440px; }
+      /* Full-bleed surface: fills the stage and never scrolls the document, so a
+         canvas can own the whole area (the Graph home surface, Phase G). */
+      .page.full { max-width: none; padding: 0; height: 100%; display: flex; flex-direction: column; }
+      .scroll:has(> .page.full) { overflow: hidden; }
       .page > * { animation: rise 0.6s cubic-bezier(0.22, 0.9, 0.27, 1) backwards; }
       .page > *:nth-child(2) { animation-delay: 0.06s; }
       .page > *:nth-child(3) { animation-delay: 0.12s; }
@@ -432,6 +436,7 @@
         .hero-pills { margin-left: 0; }
       }
     </style>
+    {% block head_extra %}{% endblock %}
   </head>
   <body>
     <div class="window">

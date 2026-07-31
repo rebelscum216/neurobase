@@ -1,0 +1,889 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Graph{% endblock %}
+{% block crumb %}Graph{% endblock %}
+{% block page_class %}full{% endblock %}
+
+{% block head_extra %}
+<style>
+  .graph-body { flex: 1; min-height: 0; display: flex; }
+  .graph-wrap { flex: 1; position: relative; min-width: 0; padding: 14px 18px 18px; }
+  .map-shell {
+    height: 100%; border: 1px solid var(--line); border-radius: var(--r);
+    background: radial-gradient(circle at 50% 40%, var(--paper), var(--canvas) 88%);
+    position: relative; overflow: hidden; box-shadow: var(--shadow);
+  }
+  .gridlines {
+    position: absolute; inset: 0; pointer-events: none;
+    background-image: linear-gradient(to right, rgba(41,41,41,.032) 1px, transparent 1px),
+                      linear-gradient(to bottom, rgba(41,41,41,.032) 1px, transparent 1px);
+    background-size: 36px 36px;
+    mask-image: radial-gradient(circle at center, #000 32%, transparent 78%);
+    -webkit-mask-image: radial-gradient(circle at center, #000 32%, transparent 78%);
+  }
+  #graph { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: default; }
+  /* Overlays sit on top of the canvas; without this they eat clicks aimed at
+     nodes beneath them. `.graph-scope` deliberately stays interactive. */
+  .graph-hint, .legend { pointer-events: none; }
+  .graph-hint {
+    position: absolute; top: 14px; left: 16px; z-index: 4;
+    font-family: var(--mono); font-size: 10px; color: var(--muted);
+    background: var(--paper); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+  }
+  .legend {
+    position: absolute; left: 16px; bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 10px; color: var(--mid); z-index: 4;
+  }
+  .legend span {
+    display: inline-flex; align-items: center; gap: 6px; background: var(--paper);
+    border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+  }
+  .legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .legend i.claude { background: var(--blue); }
+  .legend i.codex { background: var(--violet); }
+  .legend i.fact { background: transparent; box-shadow: inset 0 0 0 2px var(--green); }
+  .legend i.skill { background: var(--amber); border-radius: 2px; transform: rotate(45deg); width: 7px; height: 7px; }
+  /* Honest disclosure of the default scope — a cap nobody can see reads as
+     "this is everything". */
+  .graph-scope {
+    position: absolute; right: 16px; bottom: 16px; z-index: 4;
+    font-family: var(--mono); font-size: 10px; color: var(--muted);
+    background: var(--paper); border: 1px solid var(--line);
+    border-radius: 999px; padding: 3px 10px;
+  }
+  .graph-scope a { color: var(--blue-2); }
+  #tip {
+    position: absolute; pointer-events: none; display: none; z-index: 6;
+    background: var(--paper); border: 1px solid var(--line-2); border-radius: var(--r-sm);
+    box-shadow: var(--shadow); padding: 7px 10px; max-width: 240px;
+  }
+  #tip .tt { font-size: 12.5px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+  #tip .ts { font-family: var(--mono); font-size: 9.5px; color: var(--muted); margin-top: 2px; }
+
+  /* Closed: the graph owns the stage. Open: an even split — the inspector is a
+     peer surface, not a sidebar, because a neighbour card carries as much to
+     read as the graph carries to look at. */
+  .inspector {
+    flex: 0 0 0; min-width: 0; overflow: hidden; background: var(--paper);
+    border-left: 1px solid transparent; transition: flex-basis .24s ease;
+    display: flex; flex-direction: column;
+  }
+  .inspector.open { flex: 0 0 50%; border-left-color: var(--line); }
+  .insp-in { width: 100%; padding: 18px 20px 26px; overflow-y: auto; min-height: 0; }
+  .insp-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 4px; }
+  .insp-head h3 { font-size: 14.5px; font-weight: 650; margin: 0; line-height: 1.3; overflow-wrap: anywhere; }
+  .insp-close {
+    margin-left: auto; color: var(--muted); font-size: 15px; line-height: 1;
+    padding: 2px 6px; border-radius: 4px; border: none; background: none; cursor: pointer;
+  }
+  .insp-close:hover { color: var(--ink); background: var(--panel-2); }
+  .insp-kind {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--blue-2); margin-bottom: 10px;
+  }
+  .insp-body { font-size: 12.8px; color: var(--mid); line-height: 1.55; overflow-wrap: anywhere; }
+  .insp-sec {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); margin: 16px 0 7px;
+  }
+  .insp-cta {
+    margin-top: 14px; display: inline-block; background: var(--ink); color: #fff;
+    font-weight: 600; font-size: 12px; border-radius: var(--r-sm); padding: 8px 12px;
+    text-align: center; text-decoration: none;
+  }
+  .insp-back {
+    font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+    background: none; border: none; padding: 2px 6px 2px 0; cursor: pointer;
+  }
+  .insp-back:hover { color: var(--blue-2); }
+
+  /* ---- neighbour cards ---- */
+  .nb-group {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--muted); margin: 18px 0 8px;
+  }
+  .nb-card {
+    width: 100%; text-align: left; display: block; background: var(--paper);
+    border: 1px solid var(--line); border-radius: var(--r-sm);
+    padding: 11px 13px; margin-bottom: 7px; cursor: pointer;
+    transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+  }
+  .nb-card:hover { border-color: var(--blue); transform: translateX(2px); box-shadow: var(--shadow); }
+  .nb-card .nb-top { display: flex; align-items: center; gap: 8px; }
+  .nb-card .nb-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .nb-card .nb-dot.skill { border-radius: 2px; transform: rotate(45deg); }
+  .nb-card .nb-name {
+    font-family: var(--mono); font-size: 11.8px; font-weight: 650; color: var(--ink);
+    overflow-wrap: anywhere; line-height: 1.35;
+  }
+  .nb-card .nb-meta {
+    font-family: var(--mono); font-size: 9.5px; color: var(--muted); margin-top: 4px;
+  }
+  .nb-card .nb-body { font-size: 12.2px; color: var(--mid); line-height: 1.5; margin-top: 6px; }
+  /* The relationship line — why this card is here at all. */
+  .nb-rel {
+    margin-top: 8px; padding-top: 7px; border-top: 1px dashed var(--line-2);
+    font-size: 11.5px; color: var(--mid); display: flex; gap: 6px; align-items: baseline;
+  }
+  .nb-rel .nb-arrow { color: var(--muted); font-family: var(--mono); flex: none; }
+  .nb-rel b { color: var(--ink); font-weight: 600; }
+  .nb-src {
+    font-family: var(--mono); font-size: 9px; letter-spacing: .04em; text-transform: uppercase;
+    padding: 1px 6px; border-radius: 999px; margin-left: 4px; white-space: nowrap;
+  }
+  .nb-src.journal { background: var(--green-soft); color: var(--green-2); }
+  .nb-src.frontmatter { background: var(--panel-2); color: var(--mid); }
+  .nb-open {
+    font-family: var(--mono); font-size: 10.5px; color: var(--blue-2);
+    text-decoration: none; margin-top: 7px; display: inline-block;
+  }
+  .nb-open:hover { text-decoration: underline; }
+  /* Announced by screen readers, invisible on screen — the graph's keyboard
+     walk has nowhere else to report where it is. */
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
+  #graph:focus-visible { outline: 2px solid var(--blue); outline-offset: -3px; }
+  .graph-empty { margin: auto; text-align: center; max-width: 380px; padding: 40px 20px; }
+  .graph-empty h2 { font-size: 16px; font-weight: 650; margin: 0 0 6px; }
+  .graph-empty p { color: var(--mid); font-size: 12.8px; margin: 0; line-height: 1.6; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .inspector { transition: none; }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="graph-body">
+  <div class="graph-wrap" id="graphWrap">
+    <div class="map-shell" id="mapShell">
+      <div class="gridlines" aria-hidden="true"></div>
+      {% if payload.nodes %}
+      <canvas id="graph" tabindex="0" role="application"
+              aria-label="Memory graph: sessions, curated facts, and skills. Use arrow keys to move between nodes and Enter to inspect one.">
+        <p>This graph is drawn on a canvas. Every node and its connections are
+           also reachable as pages: <a href="/sessions">Sessions</a>,
+           <a href="/memory">Memory</a>, <a href="/skills">Skills</a>.</p>
+      </canvas>
+      <div class="graph-hint">hover or arrow-key to trace · click or Enter to inspect</div>
+      <div class="legend">
+        <span><i class="claude"></i> Claude session</span>
+        <span><i class="codex"></i> Codex session</span>
+        <span><i class="fact"></i> memory fact</span>
+        <span><i class="skill"></i> skill</span>
+      </div>
+      <div id="tip"><div class="tt"></div><div class="ts"></div></div>
+      {% else %}
+      <div class="graph-empty">
+        {% if degraded %}
+        <h2>The store could not be read</h2>
+        <p>Something in the store is unreadable or malformed, so the graph could
+           not be composed. This is not the same as an empty store — check
+           <code>neurobase doctor</code>.</p>
+        {% elif counts.hidden_captures %}
+        <h2>Nothing attributed yet</h2>
+        <p>There {{ 'is' if counts.hidden_captures == 1 else 'are' }}
+           {{ counts.hidden_captures }} capture{{ 's' if counts.hidden_captures != 1 }} in the
+           store, but none has been folded into a fact yet, so there is no lineage
+           to draw. Run the curator, or look at the captures as they are.</p>
+        {% else %}
+        <h2>Nothing captured yet</h2>
+        <p>Sessions appear here as agents run with Neurobase hooks installed, and
+           facts join them once the curator has folded a capture into memory.</p>
+        {% endif %}
+      </div>
+      {% endif %}
+      {#- The scope disclosure lives OUTSIDE the `payload.nodes` guard: a store
+          whose captures are all unattributed renders no nodes at all, and that is
+          exactly when the reader most needs both the count and the way to see
+          them. Burying the escape hatch inside the populated branch told a
+          first-run user their store was empty when it was not. -#}
+      {% if not degraded and (counts.hidden_captures or orphans or payload.nodes) %}
+      <div class="graph-scope">
+        {%- if orphans %}
+        showing all {{ counts.shown_captures }} capture{{ 's' if counts.shown_captures != 1 }} ·
+        <a href="/graph">hide unattributed</a>
+        {%- elif counts.hidden_captures %}
+        {{ counts.hidden_captures }} unattributed capture{{ 's' if counts.hidden_captures != 1 }} hidden ·
+        <a href="/graph?orphans=1">show all</a>
+        {%- else %}
+        every capture is attributed
+        {%- endif %}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% if payload.nodes %}
+  <aside class="inspector" id="inspector" aria-label="Inspector">
+    <div class="insp-in" id="insp-in"></div>
+  </aside>
+  {% endif %}
+</div>
+
+{% if payload.nodes %}
+{#- Jinja's `tojson` escapes <, > and & as \uXXXX, which is precisely what makes
+    JSON safe to sit inside a <script> element: autoescape would corrupt the JSON
+    with HTML entities, and `|safe` would let a `</script` inside captured prompt
+    text terminate the block early. -#}
+<script type="application/json" id="graph-data">{{ payload | tojson }}</script>
+<script>
+(function () {
+  "use strict";
+  var DATA = JSON.parse(document.getElementById("graph-data").textContent);
+  var reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function el(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;");
+  }
+
+  /* ---- deterministic hash → the only source of "randomness" here.
+     The mockup hand-placed every node; real data cannot, and a random layout
+     would reshuffle the whole graph on each reload. FNV-1a over the node id
+     gives stable jitter: same store, same picture, every time. ---- */
+  function hash(str) {
+    var h = 2166136261;
+    for (var i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
+    }
+    return h >>> 0;
+  }
+  function unit(str, salt) { return (hash(str + "|" + salt) % 100000) / 100000; }
+
+  var nodes = DATA.nodes.slice();
+  var edges = DATA.edges.slice();
+  /* Null-prototype maps. Node ids come from the URL (`?node=`), and a plain
+     object would answer `byId["constructor"]` with an inherited function — the
+     existence guard passes, the node is `undefined`, the camera goes NaN and the
+     canvas stays blank for the life of the page. */
+  var byId = Object.create(null), adj = Object.create(null);
+  nodes.forEach(function (n, i) {
+    byId[n.id] = n;
+    adj[n.id] = adj[n.id] || Object.create(null);
+    n.phase = (hash(n.id) % 1000) / 1000 * 6.283;
+    n.r = n.kind === "fact" ? 8 : n.kind === "proposal" ? 9 : 5.5;
+    n.i = i;
+  });
+  edges = edges.filter(function (e) { return byId[e.a] && byId[e.b]; });
+  edges.forEach(function (e, i) {
+    e.i = i;
+    adj[e.a][e.b] = true;
+    adj[e.b][e.a] = true;
+  });
+
+  /* ================= DETERMINISTIC LAYOUT =================
+     Per-project clusters seeded with slug-hash jitter, then a short bounded
+     relaxation. No randomness, no animation frames spent settling — it runs
+     once, to completion, before the first paint. */
+  var projects = DATA.projects.slice();
+  if (!projects.length) projects = ["—"];
+  var centers = {};
+  projects.forEach(function (p, i) {
+    var a = (i / projects.length) * 6.283 + unit(p, "spin") * 0.6;
+    var rad = projects.length === 1 ? 0 : 0.27 + unit(p, "rad") * 0.06;
+    centers[p] = [0.5 + Math.cos(a) * rad, 0.5 + Math.sin(a) * rad * 0.82];
+  });
+  function centerOf(n) { return centers[n.project] || centers[projects[0]]; }
+
+  nodes.forEach(function (n) {
+    var c = centerOf(n);
+    // Golden-angle spiral inside the cluster, offset by a per-node hash so two
+    // nodes with adjacent indices don't land on top of each other.
+    var t = unit(n.id, "ang") * 6.283;
+    var rr = 0.04 + unit(n.id, "rad") * 0.13;
+    n.x = c[0] + Math.cos(t) * rr;
+    n.y = c[1] + Math.sin(t) * rr;
+  });
+
+  (function relax() {
+    var ITER = 90;
+    for (var it = 0; it < ITER; it++) {
+      var k = 1 - it / ITER;             // cooling factor
+      // spring along edges
+      edges.forEach(function (e) {
+        var a = byId[e.a], b = byId[e.b];
+        var dx = b.x - a.x, dy = b.y - a.y;
+        var d = Math.hypot(dx, dy) || 0.0001;
+        var pull = (d - 0.12) * 0.06 * k;
+        var ux = (dx / d) * pull, uy = (dy / d) * pull;
+        a.x += ux; a.y += uy; b.x -= ux; b.y -= uy;
+      });
+      /* Repulsion between near neighbours, bucketed into a uniform grid whose
+         cell is the interaction radius. Only the 9 cells around a node can hold
+         anything close enough to push it, so this is O(n) per iteration instead
+         of O(n²) — with every capture shown that is the difference between a
+         responsive page and a multi-second freeze. */
+      var R = 0.075, cells = Object.create(null);
+      for (var i = 0; i < nodes.length; i++) {
+        var n0 = nodes[i];
+        var key = ((n0.x / R) | 0) + "," + ((n0.y / R) | 0);
+        (cells[key] || (cells[key] = [])).push(n0);
+      }
+      for (var i2 = 0; i2 < nodes.length; i2++) {
+        var p = nodes[i2];
+        var cx = (p.x / R) | 0, cy = (p.y / R) | 0;
+        for (var gx = cx - 1; gx <= cx + 1; gx++) {
+          for (var gy = cy - 1; gy <= cy + 1; gy++) {
+            var bucket = cells[gx + "," + gy];
+            if (!bucket) continue;
+            for (var b = 0; b < bucket.length; b++) {
+              var q = bucket[b];
+              if (q.i <= p.i) continue;  // each pair once, and never self
+              var dx2 = q.x - p.x, dy2 = q.y - p.y;
+              var d2 = Math.hypot(dx2, dy2);
+              if (d2 > R || d2 === 0) continue;
+              var push = (R - d2) * 0.5 * k;
+              var vx = (dx2 / d2) * push, vy = (dy2 / d2) * push;
+              p.x -= vx; p.y -= vy; q.x += vx; q.y += vy;
+            }
+          }
+        }
+      }
+      /* Pull back toward the node's own project cluster, then clamp *inside*
+         the loop: clamping only at the end lets nodes pile up against the
+         boundary with no iterations left to redistribute them, which reads as a
+         stack of overlapping rings glued to the edge. */
+      nodes.forEach(function (n) {
+        var c = centerOf(n);
+        n.x += (c[0] - n.x) * 0.012 * k;
+        n.y += (c[1] - n.y) * 0.012 * k;
+        n.x = Math.min(0.97, Math.max(0.03, n.x));
+        n.y = Math.min(0.97, Math.max(0.03, n.y));
+      });
+    }
+  })();
+
+  /* ================= RENDERER (ported from the vision mockup) ============= */
+  var canvas = el("graph"), ctx = canvas.getContext("2d");
+  var W = 0, H = 0, DPR = 1, hoverId = null, selectedId = null;
+  var C = {};
+  function readTokens() {
+    var cs = getComputedStyle(document.documentElement);
+    function v(n) { return cs.getPropertyValue(n).trim(); }
+    C = { blue: v("--blue"), violet: v("--violet"), green: v("--green"),
+          amber: v("--amber"), line2: v("--line-2"), paper: v("--paper"),
+          muted: v("--muted"), mid: v("--mid"), glow: "rgba(27,156,240,.30)" };
+  }
+  readTokens();
+
+  function sizeCanvas() {
+    var box = canvas.parentElement.getBoundingClientRect();
+    if (box.width < 2) return;
+    DPR = Math.min(devicePixelRatio || 1, 2);
+    W = box.width; H = box.height;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (reduced) wake();
+  }
+  new ResizeObserver(sizeCanvas).observe(canvas.parentElement);
+
+  var PADX = 58, PADY = 44;
+
+  /* ---- camera ----
+     Opening the inspector halves the canvas width, so a node on the rim would
+     otherwise sit off-screen behind the pane. The camera centres the selection
+     and zooms to fit it *together with its direct neighbours* — centring the
+     node alone would push the very connections you clicked to see out of view.
+     `cam` is what we render; `camTarget` is where we're heading; each frame
+     eases one toward the other (reduced motion snaps straight there). */
+  var cam = { x: 0.5, y: 0.5, k: 1 };
+  var camTarget = { x: 0.5, y: 0.5, k: 1 };
+
+  function px(n, t) {
+    var dx = reduced ? 0 : Math.sin(t / 1500 + n.phase) * 2.2;
+    var dy = reduced ? 0 : Math.cos(t / 1900 + n.phase * 1.3) * 2.2;
+    // normalized → camera space → pixels
+    var nx = (n.x - cam.x) * cam.k + 0.5;
+    var ny = (n.y - cam.y) * cam.k + 0.5;
+    return [PADX + nx * (W - PADX * 2) + dx, PADY + ny * (H - PADY * 2) + dy];
+  }
+
+  function frameOn(id) {
+    if (!id) { camTarget = { x: 0.5, y: 0.5, k: 1 }; return; }
+    var ids = [id].concat(Object.keys(adj[id] || {}));
+    var xs = [], ys = [];
+    ids.forEach(function (o) { if (byId[o]) { xs.push(byId[o].x); ys.push(byId[o].y); } });
+    if (!xs.length) { camTarget = { x: 0.5, y: 0.5, k: 1 }; return; }
+    var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
+    var minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+    var cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    // Half the stage is now pane, so the visible span must fit in what's left.
+    var spanX = Math.max(maxX - minX, 0.06), spanY = Math.max(maxY - minY, 0.06);
+    var k = Math.min(0.78 / spanX, 0.78 / spanY);
+    camTarget = { x: cx, y: cy, k: Math.max(1, Math.min(3.2, k)) };
+  }
+  function stepCam() {
+    if (reduced) { cam.x = camTarget.x; cam.y = camTarget.y; cam.k = camTarget.k; return; }
+    cam.x += (camTarget.x - cam.x) * 0.12;
+    cam.y += (camTarget.y - cam.y) * 0.12;
+    cam.k += (camTarget.k - cam.k) * 0.12;
+  }
+  function bez(a, mx, my, b, tt) {
+    var u = 1 - tt;
+    return [u * u * a[0] + 2 * u * tt * mx + tt * tt * b[0],
+            u * u * a[1] + 2 * u * tt * my + tt * tt * b[1]];
+  }
+  /* An agent we could not determine is drawn in the neutral ink, never in a
+     legend colour: this is a provenance tool, and colouring an unknown session
+     Claude-blue fabricates the one attribution it exists to report. */
+  function agentColor(n) {
+    if (n.agent === "codex") return C.violet;
+    if (n.agent === "claude") return C.blue;
+    return C.muted;
+  }
+  function edgeColor(e) {
+    if (e.kind === "raw" || e.kind === "curated" || e.kind === "proposal") return C.amber;
+    if (e.kind === "supersedes") return C.green;
+    var a = byId[e.a];
+    return a && a.kind === "session" ? agentColor(a) : C.blue;
+  }
+
+  function draw(t) {
+    if (!W) return;
+    stepCam();
+    ctx.clearRect(0, 0, W, H);
+    // Selection owns the view once it exists: hover is a preview for when
+    // nothing is chosen, so the graph can never disagree with the open pane.
+    var focus = selectedId || hoverId;
+    var pos = {};
+    nodes.forEach(function (n) { pos[n.id] = px(n, t); });
+
+    edges.forEach(function (e) {
+      var a = pos[e.a], b = pos[e.b];
+      var lit = focus && (e.a === focus || e.b === focus);
+      var dim = focus && !lit;
+      var mx = (a[0] + b[0]) / 2 + (a[1] - b[1]) * 0.10;
+      var my = (a[1] + b[1]) / 2 + (b[0] - a[0]) * 0.10;
+
+      ctx.beginPath();
+      ctx.moveTo(a[0], a[1]);
+      ctx.quadraticCurveTo(mx, my, b[0], b[1]);
+      if (lit) {
+        ctx.setLineDash([7, 11]);
+        ctx.lineDashOffset = reduced ? 0 : -(t / 26) % 18;
+        ctx.strokeStyle = edgeColor(e);
+        ctx.globalAlpha = 0.9;
+        ctx.lineWidth = 1.7;
+      } else {
+        ctx.setLineDash([]);
+        ctx.strokeStyle = C.line2;
+        ctx.globalAlpha = dim ? 0.14 : 0.55;
+        ctx.lineWidth = 1;
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+
+      if (!reduced && !dim) {
+        var speed = 1500 + (e.i % 5) * 260;
+        var tt = ((t / speed) + e.i * 0.37) % 1;
+        var p = bez(a, mx, my, b, tt);
+        ctx.beginPath();
+        ctx.arc(p[0], p[1], lit ? 2.6 : 1.9, 0, 7);
+        ctx.fillStyle = edgeColor(e);
+        ctx.globalAlpha = lit ? 0.95 : 0.5;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    });
+
+    nodes.forEach(function (n) {
+      var p = pos[n.id];
+      var lit = !focus || n.id === focus || (adj[focus] && adj[focus][n.id]);
+      ctx.globalAlpha = lit ? 1 : 0.22;
+
+      if (n.kind === "fact" && !reduced) {
+        var hp = ((t / 2800) + n.phase * 0.3) % 1;
+        ctx.beginPath();
+        ctx.arc(p[0], p[1], n.r + 5 + hp * 9, 0, 7);
+        ctx.strokeStyle = C.green;
+        ctx.globalAlpha = (lit ? 1 : 0.22) * (1 - hp) * 0.32;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        ctx.globalAlpha = lit ? 1 : 0.22;
+      }
+
+      if (n.kind === "session") {
+        ctx.beginPath();
+        ctx.arc(p[0], p[1], n.r, 0, 7);
+        ctx.fillStyle = agentColor(n);
+        ctx.fill();
+      } else if (n.kind === "fact") {
+        ctx.beginPath();
+        ctx.arc(p[0], p[1], n.r, 0, 7);
+        ctx.fillStyle = C.paper;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = C.green;
+        if (n.tombstoned) { ctx.globalAlpha = (lit ? 1 : 0.22) * 0.45; }
+        ctx.stroke();
+        ctx.globalAlpha = lit ? 1 : 0.22;
+      } else {
+        ctx.save();
+        ctx.translate(p[0], p[1]);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = C.amber;
+        var s = n.r * 1.25;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(-s / 2, -s / 2, s, s, 2.5);
+        else ctx.rect(-s / 2, -s / 2, s, s);
+        ctx.fill();
+        ctx.restore();
+      }
+      if (n.id === focus && n.kind !== "proposal") {
+        ctx.beginPath();
+        ctx.arc(p[0], p[1], n.r + 5, 0, 7);
+        ctx.strokeStyle = C.glow; ctx.lineWidth = 4; ctx.stroke();
+      }
+      /* Label the focused node only. The mockup labelled every fact because it
+         had six; a real store has hundreds, and a hub can hold two dozen
+         neighbours whose titles are near-identical — labelling them all is an
+         unreadable pile. The pane already enumerates every neighbour with more
+         detail than a canvas label could carry, so one label is enough. */
+      if (n.id === focus) {
+        ctx.font = "10.5px ui-monospace, SF Mono, Menlo, monospace";
+        ctx.fillStyle = C.mid;
+        ctx.textAlign = "center";
+        var label = n.label.length > 46 ? n.label.slice(0, 45) + "…" : n.label;
+        ctx.fillText(label, p[0], p[1] + n.r + 16);
+      }
+      ctx.globalAlpha = 1;
+    });
+  }
+
+  /* The ambient drift is decoration, and a home tab is left open for hours. So
+     the loop is cancellable, pauses when the document is hidden, and parks
+     itself once the camera has settled and nothing is focused — a still graph
+     costs nothing to keep still. Any interaction wakes it. */
+  var rafId = null, lastT = 0, idleFrames = 0;
+  function settled() {
+    return Math.abs(camTarget.x - cam.x) < 0.0005 &&
+           Math.abs(camTarget.y - cam.y) < 0.0005 &&
+           Math.abs(camTarget.k - cam.k) < 0.0005;
+  }
+  function frame(t) {
+    lastT = t || 0;
+    draw(lastT);
+    idleFrames = settled() ? idleFrames + 1 : 0;
+    // Drift never settles, so only park when motion is off entirely.
+    if (reduced && idleFrames > 2) { rafId = null; return; }
+    rafId = requestAnimationFrame(frame);
+  }
+  function wake() {
+    if (rafId === null && !document.hidden) rafId = requestAnimationFrame(frame);
+  }
+  function sleep() {
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) sleep(); else wake();
+  });
+  window.addEventListener("pagehide", sleep);
+
+  sizeCanvas();
+  if (reduced) {
+    requestAnimationFrame(function () { sizeCanvas(); draw(0); });
+  } else {
+    wake();
+  }
+
+  /* ================= HOVER / TOOLTIP / CLICK ================= */
+  var tip = el("tip");
+  function nodeAt(mx, my) {
+    var best = null, bd = 1e9;
+    nodes.forEach(function (n) {
+      // Same t the last frame used: px() drifts each node by a couple of pixels
+      // per frame, so hit-testing at t=0 aims where the dot is not.
+      var p = px(n, lastT);
+      var d = Math.hypot(p[0] - mx, p[1] - my);
+      if (d < Math.max(n.r + 9, 14) && d < bd) { bd = d; best = n; }
+    });
+    return best;
+  }
+  canvas.addEventListener("mousemove", function (e) {
+    var r = canvas.getBoundingClientRect();
+    var n = nodeAt(e.clientX - r.left, e.clientY - r.top);
+    hoverId = n ? n.id : null;
+    canvas.style.cursor = n ? "pointer" : "default";
+    if (n) {
+      tip.style.display = "block";
+      tip.querySelector(".tt").textContent = n.label;
+      tip.querySelector(".ts").textContent = n.sub;
+      tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 250) + "px";
+      tip.style.top = (e.clientY - r.top + 14) + "px";
+    } else {
+      tip.style.display = "none";
+    }
+    if (reduced) wake();
+  });
+  canvas.addEventListener("mouseleave", function () {
+    hoverId = null; tip.style.display = "none"; if (reduced) wake();
+  });
+  canvas.addEventListener("click", function (e) {
+    var r = canvas.getBoundingClientRect();
+    var n = nodeAt(e.clientX - r.left, e.clientY - r.top);
+    if (n) selectNode(n.id); else closeInspector();
+  });
+
+  /* ---- keyboard path into the graph ----
+     Without this the canvas is a dead end: tab order skips from the rail
+     straight past every node, and the data exists only inside a JSON script
+     block that assistive tech does not expose. Arrow keys walk a stable order
+     (connected nodes first, so the meaningful ones come first), Enter inspects,
+     and the focused node is announced through a live region. */
+  var kbIndex = -1;
+  var live = document.createElement("div");
+  live.setAttribute("aria-live", "polite");
+  live.className = "visually-hidden";
+  canvas.parentElement.appendChild(live);
+
+  var walkOrder = nodes.slice().sort(function (a, b) {
+    var da = Object.keys(adj[a.id] || {}).length, db = Object.keys(adj[b.id] || {}).length;
+    if ((da > 0) !== (db > 0)) return db - da;
+    return a.label.localeCompare(b.label);
+  });
+
+  function announce(n) {
+    var nbrs = Object.keys(adj[n.id] || {}).length;
+    live.textContent = n.label + " — " + kindLabel(n) + ", " +
+      (nbrs === 1 ? "1 connection" : nbrs + " connections") +
+      ". Press Enter to inspect.";
+  }
+  canvas.addEventListener("keydown", function (e) {
+    if (!walkOrder.length) return;
+    var step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1
+             : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    if (step) {
+      e.preventDefault();
+      kbIndex = (kbIndex + step + walkOrder.length) % walkOrder.length;
+      var n = walkOrder[kbIndex];
+      hoverId = n.id;
+      announce(n);
+      wake();
+      return;
+    }
+    if (e.key === "Enter" && kbIndex >= 0) {
+      e.preventDefault();
+      selectNode(walkOrder[kbIndex].id);
+    }
+  });
+  canvas.addEventListener("blur", function () {
+    if (!selectedId) { hoverId = null; wake(); }
+  });
+
+  /* ================= INSPECTOR ================= */
+  var edgesByNode = Object.create(null);
+  edges.forEach(function (e) {
+    (edgesByNode[e.a] || (edgesByNode[e.a] = [])).push(e);
+    (edgesByNode[e.b] || (edgesByNode[e.b] = [])).push(e);
+  });
+
+  function nodeColor(n) {
+    if (n.kind === "proposal") return "var(--amber)";
+    if (n.kind !== "session") return "var(--green)";
+    return n.agent === "codex" ? "var(--violet)"
+         : n.agent === "claude" ? "var(--blue)" : "var(--muted)";
+  }
+  function kindLabel(n) {
+    if (n.kind === "fact") {
+      return n.status === "ghost" ? "fact (pruned)"
+           : n.tombstoned ? "tombstoned fact" : "curated fact";
+    }
+    if (n.kind === "proposal") return (n.status === "accepted" ? "installed skill" : "proposed skill");
+    return n.agent === "codex" ? "Codex session"
+         : n.agent === "claude" ? "Claude session" : "session · agent unknown";
+  }
+  function hrefFor(n) {
+    if (n.href) return n.href;
+    if (n.kind === "session" && n.file) {
+      return "/sessions/" + encodeURIComponent(n.project) + "/" + encodeURIComponent(n.file);
+    }
+    return null;
+  }
+  function openLabel(n) {
+    return n.kind === "session" ? "open the capture ▸"
+         : n.kind === "fact" ? "open in Memory ▸" : "open in Suggestions ▸";
+  }
+
+  /* The whole point of a card: why is this node attached to the one I clicked?
+     Phrased from the selected node's point of view, and — for the two edge kinds
+     that carry it — stamped with where the attribution came from. */
+  function relationship(edge, fromId) {
+    var forward = edge.a === fromId;
+    var text, src = null;
+    if (edge.kind === "session") {
+      text = forward ? "fed this fact" : "learned in this session";
+      src = edge.source;
+    } else if (edge.kind === "supersedes") {
+      text = forward ? "superseded by this fact" : "supersedes this fact";
+      src = edge.source;
+    } else {
+      var what = edge.kind === "raw" ? "a raw capture"
+               : edge.kind === "curated" ? "a curated fact" : "another proposal";
+      text = forward ? "cited as evidence by this skill" : "cites this as evidence (" + what + ")";
+    }
+    var chip = "";
+    if (src === "journal") {
+      chip = '<span class="nb-src journal" title="the curator recorded this attribution at fold time">journal</span>';
+    } else if (src === "frontmatter") {
+      chip = '<span class="nb-src frontmatter" title="claimed by the document\'s own frontmatter">frontmatter</span>';
+    }
+    return '<div class="nb-rel"><span class="nb-arrow">↳</span><span><b>' +
+           esc(text) + "</b>" + chip + "</span></div>";
+  }
+
+  function cardMeta(n) {
+    var bits = [];
+    if (n.project) bits.push(n.project);
+    if (n.kind === "session") {
+      if (!n.agent) bits.push("agent unknown");
+      if (n.captured_at) bits.push(String(n.captured_at).slice(0, 10));
+      if (n.prompts != null) bits.push(n.prompts + " prompts kept");
+      if (!n.file) bits.push("capture no longer on disk");
+    } else if (n.kind === "fact") {
+      bits.push(n.status);
+      if (n.pinned) bits.push("pinned");
+      if (n.updated_at) bits.push("updated " + String(n.updated_at).slice(0, 10));
+    } else if (n.status) {
+      bits.push(n.status);
+    }
+    return bits.join(" · ");
+  }
+
+  function card(neighbourId, fromId) {
+    var n = byId[neighbourId];
+    var edge = (edgesByNode[fromId] || []).filter(function (e) {
+      return e.a === neighbourId || e.b === neighbourId;
+    })[0];
+    var href = hrefFor(n);
+    return '<div class="nb-card" data-node="' + esc(n.id) + '" role="button" tabindex="0">' +
+           '<div class="nb-top"><span class="nb-dot' + (n.kind === "proposal" ? " skill" : "") +
+             '" style="background:' + (n.kind === "fact" ? "transparent" : nodeColor(n)) +
+             (n.kind === "fact" ? ";box-shadow:inset 0 0 0 2px var(--green)" : "") + '"></span>' +
+           '<span class="nb-name">' + esc(n.label) + "</span></div>" +
+           '<div class="nb-meta">' + esc(cardMeta(n)) + "</div>" +
+           (n.snippet ? '<div class="nb-body">' + esc(n.snippet) + "</div>" : "") +
+           (edge ? relationship(edge, fromId) : "") +
+           (href ? '<a class="nb-open" href="' + esc(href) + '">' + openLabel(n) + "</a>" : "") +
+           "</div>";
+  }
+
+  var GROUPS = [
+    { kind: "fact", one: "connected fact", many: "connected facts" },
+    { kind: "session", one: "connected session", many: "connected sessions" },
+    { kind: "proposal", one: "connected skill", many: "connected skills" }
+  ];
+
+  var trail = [];
+  function selectNode(id, opts) {
+    opts = opts || {};
+    if (!byId[id]) return;
+    if (selectedId && selectedId !== id && opts.push !== false) trail.push(selectedId);
+    selectedId = id;
+    frameOn(id);
+    var n = byId[id];
+
+    var head = (trail.length ? '<button class="insp-back" id="insp-back">← back</button>' : "") +
+      '<div class="insp-head"><h3>' + esc(n.label) + "</h3>" +
+      '<button class="insp-close" id="insp-x" aria-label="Close">✕</button></div>' +
+      '<div class="insp-kind">' + esc(kindLabel(n)) + "</div>" +
+      '<div class="insp-body">' + esc(cardMeta(n) || n.sub) + "</div>" +
+      (n.snippet ? '<div class="insp-body" style="margin-top:10px">' + esc(n.snippet) + "</div>" : "");
+    var href = hrefFor(n);
+    if (href) head += '<a class="insp-cta" href="' + esc(href) + '">' + openLabel(n) + "</a>";
+
+    var ids = Object.keys(adj[id] || {}).filter(function (o) { return byId[o]; });
+    var body = "";
+    if (!ids.length) {
+      body = '<div class="nb-group">nothing connected</div>' +
+             '<div class="insp-body">This one stands alone — no attributed lineage in either direction.</div>';
+    } else {
+      GROUPS.forEach(function (g) {
+        var group = ids.filter(function (o) { return byId[o].kind === g.kind; });
+        if (!group.length) return;
+        body += '<div class="nb-group">' + group.length + " " +
+                (group.length === 1 ? g.one : g.many) + "</div>" +
+                group.map(function (o) { return card(o, id); }).join("");
+      });
+    }
+    el("insp-in").innerHTML = head + body;
+    el("insp-in").scrollTop = 0;
+    var insp = el("inspector");
+    insp.inert = false;
+    insp.removeAttribute("aria-hidden");
+    insp.classList.add("open");
+    requestAnimationFrame(sizeCanvas);
+    if (opts.history !== false) pushUrl(id);
+    if (reduced) wake();
+  }
+
+  function closeInspector(opts) {
+    opts = opts || {};
+    selectedId = null;
+    trail = [];
+    frameOn(null);
+    var insp = el("inspector");
+    insp.classList.remove("open");
+    // A zero-width pane still holds focusable cards, links and a close button
+    // unless it is explicitly removed from the tab order and the a11y tree.
+    insp.setAttribute("aria-hidden", "true");
+    insp.inert = true;
+    el("insp-in").innerHTML = "";
+    if (canvas.contains(document.activeElement) === false) canvas.focus({ preventScroll: true });
+    requestAnimationFrame(sizeCanvas);
+    if (opts.history !== false) pushUrl(null);
+    if (reduced) wake();
+  }
+
+  el("insp-in").addEventListener("click", function (e) {
+    if (e.target.closest("#insp-x")) { closeInspector(); return; }
+    if (e.target.closest("#insp-back")) {
+      var prev = trail.pop();
+      if (prev) selectNode(prev, { push: false }); else closeInspector();
+      return;
+    }
+    if (e.target.closest(".nb-open")) return;  // a real link — let it navigate
+    var c = e.target.closest("[data-node]");
+    if (c) selectNode(c.dataset.node);
+  });
+  el("insp-in").addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    // Same exemption the click handler has: without it, Enter on a card's
+    // "open in Memory" anchor re-selects the card instead of following the
+    // link, making that link mouse-only.
+    if (e.target.closest(".nb-open")) return;
+    var c = e.target.closest(".nb-card");
+    if (c) { e.preventDefault(); selectNode(c.dataset.node); }
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && selectedId) closeInspector();
+  });
+
+  /* ---- deep links: a selected view is a real URL, so it survives a reload,
+     a bookmark, and the back button. No new server surface — the param is read
+     on load and rewritten with pushState. ---- */
+  function pushUrl(id) {
+    var url = new URL(window.location.href);
+    if (id) url.searchParams.set("node", id); else url.searchParams.delete("node");
+    // Clicking empty canvas with nothing selected used to push a duplicate
+    // entry every time, burying the previous page under junk history.
+    if (url.href === window.location.href) return;
+    history.pushState({ node: id || null }, "", url);
+  }
+  window.addEventListener("popstate", function (e) {
+    var id = (e.state && e.state.node) || new URL(window.location.href).searchParams.get("node");
+    // The browser is the authority here — leaving `trail` alone would point the
+    // in-app back button at the node already on screen.
+    trail = [];
+    if (id && byId[id]) selectNode(id, { history: false, push: false });
+    else closeInspector({ history: false });
+  });
+  var initial = new URL(window.location.href).searchParams.get("node");
+  if (initial && byId[initial]) selectNode(initial, { history: false });
+})();
+</script>
+{% endif %}
+{% endblock %}

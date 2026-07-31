@@ -1,12 +1,20 @@
 ---
 slug: webui-phase-g
-status: awaiting-review
+status: changes-requested
 author: claude
 reviewer: codex
 branch: feat/webui-phase-g-graph
 diff: git diff origin/main...HEAD
 created: 2026-07-31
+rounds: 4
+last_reviewed: 0dc83450e0648a893064ae42239be829fb90b678
 ---
+
+> **Status note (2026-07-31).** The Brief below was written to *open* the relay
+> and describes the branch at `7267633`. Four rounds have since run; the branch
+> is four fix commits further on. The Brief is left as written — it is the
+> record of what was handed over — and the outcome is recorded under
+> [Reviewer findings](#reviewer-findings--reviewer--codex) at the end.
 
 # Review: Phase G — the Web UI graph home surface
 
@@ -143,6 +151,56 @@ pollution id that must not blank the canvas); tab into the canvas and arrow-key.
 
 ## Reviewer findings  _(Reviewer — Codex)_
 
-> Run the diff and review the actual code. One entry per finding.
+**Verdict after 4 rounds: ⚠️ CHANGES REQUESTED.** The loop was stopped by the
+repo owner at round 4 rather than run to APPROVED — the last round's fixes
+(`213828f`) are committed but **were never re-reviewed**. Severity trend:
+CHANGES REQUESTED → BLOCKED → CHANGES REQUESTED → CHANGES REQUESTED. No P0, and
+no P1 since round 2.
 
-**Verdict:** _(pending)_
+Round SHAs, each an immutable artifact the round was pinned to:
+
+| Round | Reviewed | Verdict |
+|---|---|---|
+| 1 | `7267633` | CHANGES REQUESTED — 6 × P2 |
+| 2 | `f9fb9c5` | **BLOCKED** — 1 × P1 + 3 × P2 |
+| 3 | `43e2826` | CHANGES REQUESTED — P1 closed, 3 × P2 |
+| 4 | `0dc8345` | CHANGES REQUESTED — 001–008 all closed, 1 × P2 new + 2 × P3 |
+| — | `213828f` | **not reviewed** — fixes 009, 010, 011, 012 |
+
+**Closed and verified by the reviewer (001–008).** Containment of external
+document identity across five channels — raw, curated, tombstone, the curator
+journal, and proposal documents — each found separately and each closed at the
+enumeration boundary; a `RuntimeError` fail-soft so one symlink loop cannot blank
+the home page; tombstoned facts no longer emitting a guaranteed-404 link;
+proposal nodes no longer fabricating kind or install state; the relaxation loop
+rewritten from quadratic-under-dense-buckets to hard-bounded (2,100 nodes
+346→145 ms, 4,000 nodes 1,256→264 ms, overlapping pairs 572→241 — bounded *and*
+better separated); a D11 schema refusal re-raised explicitly at both catch sites
+rather than degraded into a 200; and the JS half given a real executable
+behaviour suite after a source assertion was shown green while the O(n) claim it
+named was false.
+
+**Open at the point the loop was stopped** — all four addressed in `213828f`,
+none re-reviewed:
+
+- `P2-SAFETY-SECURITY-010` — the project registry was an uncontained **sixth**
+  identity channel: a symlinked `registry.toml` selects which project namespaces
+  the sweep walks. Contained at `StoreHandle.load_registry()`, the shared
+  accessor, because twelve call sites reach it and `_artifact_state` reopens the
+  store.
+- `P2-ROLLOUT-CONFIG-009` — `node` became a required gate tool without the
+  contributor docs saying so. Swept repo-wide; also corrected a wrong version
+  floor, a documented command that does not work, and a "no `package.json`"
+  claim that was false.
+- `P3-MAINTAINABILITY-011` — the repulsion comment claimed an equivalence the
+  Gauss-Seidel update does not have.
+- `P3-UX-API-CONTRACT-012` — the legend and canvas aria label named only
+  "skill", though rule proposals draw the same glyph.
+
+**Gate at this tip:** `make ci` green — ruff, format, mypy, store-chokepoint,
+**1,683 passed / 1 skipped**, and 20 JS tests; py3.11 and py3.13 1,683 each; the
+JS suite on Node 22 and Node 24.
+
+The full round-by-round record, including every finding's text, the reviewer's
+independent probes, and the mutation verification for each fix, is kept outside
+this repo in the relay's tracking card.

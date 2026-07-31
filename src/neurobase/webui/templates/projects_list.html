@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — Projects{% endblock %}
+{% block crumb %}Projects{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1>Projects</h1>
+    <p class="hero-sub">Every folder Neurobase is enabled for, and where its memory lives.</p>
+  </div>
+  <div class="hero-pills">
+    <span class="hero-pill"><span class="pulse-dot" aria-hidden="true"></span>{{ projects | length }} enabled</span>
+    {% if orphans %}<span class="hero-pill">{{ orphans | length }} unregistered</span>{% endif %}
+  </div>
+</div>
+
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+{% if error %}<div class="warning">{{ error }}</div>{% endif %}
+
+<section class="panel">
+  <h1>Enable a folder</h1>
+  <form method="post" action="/projects/add">
+    <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+    <div class="form-row">
+      <div class="field grow">
+        <label for="add-path">Folder</label>
+        <input type="text" id="add-path" name="path" placeholder="/Users/you/Projects/my-repo" spellcheck="false" autocomplete="off" />
+        <span class="hint">An absolute path. Inside a git repo, the repo root is registered — worktrees collapse to one project.</span>
+      </div>
+      <div class="field">
+        <label for="add-slug">Slug (optional)</label>
+        <input type="text" id="add-slug" name="slug" placeholder="derived from the folder name" spellcheck="false" autocomplete="off" />
+        <span class="hint">Only needed on a name collision.</span>
+      </div>
+      <button class="btn primary" type="submit">Enable</button>
+    </div>
+  </form>
+</section>
+
+{% if not projects %}
+<section class="card">
+  <p>No projects are enabled yet. Add a folder above, or run <code class="mono">neurobase enable</code> inside a repo.</p>
+</section>
+{% endif %}
+
+{% for p in projects %}
+<section class="card">
+  <div class="card-head">
+    <div>
+      <h2><span class="mono">{{ p.slug }}</span></h2>
+      <p>{{ p.roots | length }} registered root{{ "" if p.roots | length == 1 else "s" }}</p>
+    </div>
+    <div class="right">
+      {% if p.suppressed %}<span class="status-chip rejected">suppressed</span>
+      {% elif not p.has_tree %}<span class="status-chip muted">no tree</span>
+      {% else %}<span class="status-chip accepted">enabled</span>{% endif %}
+    </div>
+  </div>
+
+  <ul class="proj-roots">
+    {% for r in p.roots %}
+    <li class="proj-root">
+      <span class="path{% if not r.exists %} gone{% endif %}" title="{{ r.path }}">{{ r.path }}</span>
+      {% if not r.exists %}<span class="status-chip gone">missing</span>{% endif %}
+      {% if r.denylisted %}<span class="status-chip rejected" title="Covered by [enable] denylist entry {{ r.denylisted }}">denylisted</span>{% endif %}
+      {% if r.auto_enabled %}<span class="status-chip muted" title="Covered by [enable] auto_enable_roots entry {{ r.auto_enabled }}">auto</span>{% endif %}
+      <form method="post" action="/projects/{{ p.slug }}/remove-root"
+            onsubmit="return confirm('Remove this root from {{ p.slug }}?\n\n{{ r.path }}\n\nThe memory tree is not touched.');">
+        <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+        <input type="hidden" name="root" value="{{ r.path }}" />
+        <button class="btn" type="submit">Remove root</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <div class="proj-counts">
+    {% if p.counts %}
+    <div class="metric"><span class="label">Captures</span><span class="value">{{ p.counts.raw }}{% if p.counts.unconsumed %} · {{ p.counts.unconsumed }} unconsumed{% endif %}</span></div>
+    <div class="metric"><span class="label">Facts</span><span class="value">{{ p.counts.curated }}</span></div>
+    <div class="metric"><span class="label">Nodes</span><span class="value">{{ p.counts.nodes }}</span></div>
+    {% else %}
+    <div class="metric"><span class="label">Counts</span><span class="value">unreadable</span></div>
+    {% endif %}
+  </div>
+
+  <div class="proj-actions">
+    <form method="post" action="/projects/{{ p.slug }}/add-root">
+      <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+      <div class="form-row">
+        <div class="field">
+          <label for="root-{{ p.slug }}">Add another root</label>
+          <input type="text" id="root-{{ p.slug }}" name="path" placeholder="/Users/you/other/checkout" spellcheck="false" autocomplete="off" />
+        </div>
+        <button class="btn" type="submit">Add root</button>
+      </div>
+    </form>
+    <form method="post" action="/projects/{{ p.slug }}/deregister"
+          onsubmit="return confirm('Deregister {{ p.slug }}?\n\nIts memory tree stays on disk — nothing captured is deleted.');">
+      <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+      <button class="btn" type="submit">Deregister</button>
+    </form>
+    <a class="btn danger" href="/projects/{{ p.slug }}/delete">Delete memory…</a>
+  </div>
+</section>
+{% endfor %}
+
+{% if orphans %}
+<section class="panel">
+  <h1>Unregistered memory</h1>
+  <p>These projects have a memory tree in the store but no entry in <code class="mono">registry.toml</code>.
+    Nothing resolves to them, so no session can be captured into them and no sweep walks them — their
+    contents are readable but frozen. Enable the matching folder above to reconnect one, or delete it.</p>
+</section>
+{% for p in orphans %}
+<section class="card">
+  <div class="card-head">
+    <div>
+      <h2><span class="mono">{{ p.slug }}</span></h2>
+      <p>Tree on disk, no registry entry</p>
+    </div>
+    <div class="right"><span class="status-chip proposed">unregistered</span></div>
+  </div>
+  <div class="proj-counts">
+    {% if p.counts %}
+    <div class="metric"><span class="label">Captures</span><span class="value">{{ p.counts.raw }}</span></div>
+    <div class="metric"><span class="label">Facts</span><span class="value">{{ p.counts.curated }}</span></div>
+    <div class="metric"><span class="label">Nodes</span><span class="value">{{ p.counts.nodes }}</span></div>
+    {% else %}
+    <div class="metric"><span class="label">Counts</span><span class="value">unreadable</span></div>
+    {% endif %}
+  </div>
+  <div class="proj-actions">
+    <a class="btn danger" href="/projects/{{ p.slug }}/delete">Delete memory…</a>
+  </div>
+</section>
+{% endfor %}
+{% endif %}
+
+{% if denylist or auto_enable_roots %}
+<section class="panel">
+  <h1>Folder rules</h1>
+  <p>From <code class="mono">config.toml</code>. These apply to Neurobase's <em>automatic</em> actions — new capture
+    and automatic injection — and the denylist wins over both auto-enable and an explicit enable.</p>
+  <dl class="meta">
+    {% if auto_enable_roots %}<dt>auto_enable_roots</dt><dd>{{ auto_enable_roots | join(", ") }}</dd>{% endif %}
+    {% if denylist %}<dt>denylist</dt><dd>{{ denylist | join(", ") }}</dd>{% endif %}
+  </dl>
+</section>
+{% endif %}
+{% endblock %}

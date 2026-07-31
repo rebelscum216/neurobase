@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Neurobase UI — delete {{ project.slug }}{% endblock %}
+{% block crumb %}Projects{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+<section class="panel danger-zone">
+  <h1>Delete <span class="mono">{{ project.slug }}</span> and its memory</h1>
+
+  {% if error %}<div class="warning">{{ error }}</div>{% endif %}
+
+  <p>This removes the registry entry <strong>and permanently deletes</strong> everything captured for
+    this project. It cannot be undone.</p>
+
+  <dl class="meta">
+    <dt>Memory tree</dt><dd>{{ tree_path }}</dd>
+    {% if project.counts %}
+    <dt>Raw captures</dt><dd>{{ project.counts.raw }}</dd>
+    <dt>Curated facts</dt><dd>{{ project.counts.curated }}</dd>
+    <dt>Nodes</dt><dd>{{ project.counts.nodes }}</dd>
+    {% else %}
+    <dt>Contents</dt><dd>unreadable — the tree will still be removed</dd>
+    {% endif %}
+    {% if project.roots %}
+    <dt>Registered root{{ "" if project.roots | length == 1 else "s" }}</dt>
+    <dd>{% for r in project.roots %}{{ r.path }}{% if not loop.last %}<br />{% endif %}{% endfor %}</dd>
+    {% else %}
+    <dt>Registry</dt><dd>not registered — tree only</dd>
+    {% endif %}
+  </dl>
+
+  <p class="hint">Suggestions and the install ledger are store-wide and are <em>not</em> touched. Any skill
+    already accepted for this project keeps its record and will show up as drift in the
+    <a href="/skills">Skills</a> gallery.</p>
+
+  <form method="post" action="/projects/{{ project.slug }}/delete">
+    <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+    <div class="form-row">
+      <div class="field grow">
+        <label class="verbatim" for="confirm">Type <span class="mono">{{ project.slug }}</span> to confirm</label>
+        <input type="text" id="confirm" name="confirm" spellcheck="false" autocomplete="off" />
+      </div>
+      <button class="btn danger" type="submit">Delete permanently</button>
+      <a class="btn" href="/projects">Cancel</a>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <h1>Or keep the memory</h1>
+  <p>Deregistering removes <span class="mono">{{ project.slug }}</span> from the registry and leaves every
+    captured byte on disk. Capture stops; nothing is lost, and re-enabling the same folder restores the
+    project intact.</p>
+  {% if project.registered %}
+  <form method="post" action="/projects/{{ project.slug }}/deregister">
+    <input type="hidden" name="{{ CSRF_FORM_FIELD }}" value="{{ csrf_token }}" />
+    <div class="actions"><button class="btn" type="submit">Deregister, keep memory</button></div>
+  </form>
+  {% else %}
+  <p class="hint">Already unregistered — there is no registry entry to remove.</p>
+  {% endif %}
+</section>
+{% endblock %}

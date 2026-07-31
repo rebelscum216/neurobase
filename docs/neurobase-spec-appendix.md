@@ -2295,3 +2295,57 @@ review surface; later phases extend this section rather than bypassing it.
   unredacted draft, even hand-edited/legacy.
 - Metrics rendering follows §12.9: `None` renders as *insufficient data*, never
   a fake measured zero.
+
+### Projects directory (Phase P)
+
+The registry surfaced as a screen, plus the edits that change it. This is the
+first web route that writes **`registry.toml`** and the first that can **delete
+captured memory**, so it carries rules the read surfaces do not.
+
+- `GET /projects` — every registered project: slug, each registered root,
+  whether that root still exists on disk, whether it is covered by an `[enable]`
+  `denylist` or `auto_enable_roots` entry, and its raw/curated/node counts.
+  Counts are read per project and **MUST fail soft** — an unreadable project
+  degrades its own row, never the page, which is the only place to go and
+  unregister it.
+- The page **MUST also list project trees that have no registry entry.** Such a
+  tree is unreachable — nothing resolves to it, so no hook can capture into it
+  and no sweep walks it — and no other surface reveals it.
+- Registry paths are rendered **verbatim, not display-redacted** (the §12.8 rule
+  is about draft bodies and third-party text). A root has to be readable to be
+  recognized, and removal echoes the stored string back; a masked path could be
+  neither identified nor acted on.
+- `POST /projects/add` and `POST /projects/{slug}/add-root` — register a folder,
+  or attach a second root to an existing project. Both go through
+  `projects.register_project`, in `core/enable.py`'s order: derive and validate
+  the slug, create the **tree**, then write the **registry** entry — so a
+  part-way failure can never leave a registered-but-treeless project. A
+  submitted path **MUST** be absolute (a relative one would resolve against the
+  *server's* cwd), **MUST** already be a directory, and **MUST NOT** be at or
+  under the store root. `add-root` on an unregistered slug answers 404 — a stale
+  link must not become a create.
+- `POST /projects/{slug}/remove-root` — drop one root, matched as an **exact
+  string** against the registry (never a resolved path: a root whose directory
+  is gone is the case removal matters most for). Removing the last root
+  deregisters the project rather than leaving a zero-root entry.
+- `POST /projects/{slug}/deregister` — registry only. The memory tree **MUST**
+  be left intact; re-registering the same folder restores the project.
+- `GET|POST /projects/{slug}/delete` — the one irreversible action in the app,
+  and therefore two steps. The GET renders exactly what will be destroyed (tree
+  path, root paths, live counts) and offers deregister-without-delete as the
+  alternative. The POST **MUST** require the slug typed back and compare it
+  **server-side**; a mismatch answers 409 having touched nothing. Deletion
+  removes `<root>/projects/<slug>/` via `StoreHandle.delete_project_tree`, which
+  validates the slug (`^[a-z0-9-]+$`) *and* re-proves containment after
+  resolution, so neither a crafted slug nor a symlinked project directory can
+  direct the removal outside the store. Store-wide proposals and the ledger are
+  **not** cascaded (see known-gaps G9), and the confirmation page says so.
+- Every mutation here inherits the loopback + same-origin + CSRF gate above; no
+  route re-implements it.
+
+### Parity
+
+Anything the web UI can do to the registry, the CLI can do too — `neurobase
+enable` and `neurobase disable` (`--slug`, `--repo-root`, `--delete-memory`)
+call the same `core.projects` / `StoreHandle` primitives. The two front doors
+share the primitives rather than each holding their own copy of the rules.

@@ -722,3 +722,63 @@ and is the one case that means the probe is worthless.
 its own model predicts* is reporting something real. Raising or relaxing the
 bound would have buried a correct observation about POSIX write semantics; the
 over-count was the finding, not the noise.
+
+---
+
+### G8 — the project-tree delete holds a lock that lives inside the tree it removes
+
+- **status:** open
+- **severity:** minor — a genuine but narrow race, on a deliberate,
+  confirmation-gated action that a single-user local tool performs by hand.
+- **found:** 2026-07-31 by Claude while building the Phase P Projects directory
+  (`StoreHandle.delete_project_tree`), and recorded at the time it was
+  introduced rather than discovered later.
+
+`delete_project_tree` acquires the ADR-0023 per-project write lock and then
+`rmtree`s the project directory — which contains the lockfile it is holding.
+The release itself is safe: `filelock`'s Unix backend only `flock(LOCK_UN)`s and
+closes the descriptor, it never unlinks the path, so the vanished file causes no
+error. The race is on the *other* side. A contender that `open()`s
+`<mem>/.lock` after our acquire but before the `rmtree` ends up holding a
+descriptor on a now-unlinked inode. It will believe it has the lock, and the
+next process to arrive will create a fresh lockfile at the same path and also
+believe it has the lock — so two writers can overlap for exactly as long as the
+first one lives.
+
+**Why it is not fixed here.** Every fix is worse than the gap at this size. A
+store-wide lock serializes unrelated projects. A tombstone-then-sweep needs a
+reaper nobody would otherwise run. Holding the lock at the *parent* directory
+changes the ADR-0023 contract every other write path depends on. The honest
+mitigation is the one already in place: this runs only from an explicit,
+typed-confirmation UI action or `neurobase disable --delete-memory`, never
+automatically, and never concurrently with itself.
+
+**What would make it matter.** Multi-process curation running unattended (a
+scheduled sweep), or any future automatic deletion path. If either lands, this
+becomes real and needs a proper answer first.
+
+---
+
+### G9 — deleting a project's memory leaves its recommender proposals dangling
+
+- **status:** open
+- **severity:** minor — degraded display, not data loss or a wrong write.
+- **found:** 2026-07-31 by Claude, same work as G8.
+
+Proposals and the install ledger are **store-wide**, not project-scoped: a
+proposal carries `project: <slug>` as a field. Deleting a project's memory tree
+(and deregistering it) therefore leaves every proposal that named it in place,
+pointing at a project that no longer exists.
+
+Nothing breaks — the Skills gallery already treats an accepted proposal whose
+artifact is absent as drift (ADR-0020) and keeps it visible and revertable, which
+is a defensible reading of "the project is gone but the skill it installed is
+still on disk." But the Suggestions list will keep showing proposals for a
+project the user believes they deleted, and the delete confirmation page has to
+say so in prose because the code cannot do anything about it.
+
+**The decision this defers:** whether deleting a project should cascade to its
+proposals at all. Cascading would destroy the record of skills still installed on
+disk; not cascading leaves visible orphans. This wants an answer alongside the
+schema-2 profile work (ADR-0016), where proposal storage becomes
+profile-addressed and the scoping question has to be settled anyway.

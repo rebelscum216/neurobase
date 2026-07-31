@@ -30,6 +30,12 @@ candidate = (git_common_root(cwd) or cwd.resolve()).resolve()
 return any(_is_within(candidate, deny) for deny in _resolved_config_dirs(denylist))
 ```
 
+> **Code note (2026-07-31, ADR-0027):** the second line now reads
+> `return denylist_hit(candidate, denylist) is not None`. `denylist_hit` is the
+> same containment loop extracted so the Projects directory can name *which*
+> entry matched. The git-collapse on the first line — the whole subject of this
+> ADR — is unchanged, and so is the behavior.
+
 The cwd is collapsed to its **git root** before comparison, so the compared
 candidate is *always* the repository root. With repo `/work/app` and
 `denylist = ["/work/app/private"]`, a hook firing in `/work/app/private` compares

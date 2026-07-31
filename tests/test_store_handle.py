@@ -349,3 +349,97 @@ def test_method_registry_register_and_resolve(
     assert handle.load_registry() == projects.load_registry(root)
     assert "myrepo" in handle.load_registry()
     assert handle.resolve_project(repo) == "myrepo"
+
+
+# --- Phase P: the disk view, and the one destructive operation ---------------
+
+
+def test_node_count_counts_nodes_and_tolerates_a_missing_tree(handle: StoreHandle) -> None:
+    assert handle.node_count("proj") == 0  # no tree at all is zero, not an error
+    handle.ensure_tree("proj")
+    assert handle.node_count("proj") == 0
+    handle.write_node("proj", "a-node", "body")
+    handle.write_node("proj", "b-node", "body")
+    assert handle.node_count("proj") == 2
+
+
+def test_list_project_trees_is_the_disk_view_independent_of_the_registry(
+    handle: StoreHandle, root: Path, tmp_path: Path
+) -> None:
+    """The registry and the disk can disagree, and only comparing them reveals a
+    tree nothing points at — unreachable by any capture, walked by no sweep."""
+    handle.ensure_tree("registered")
+    handle.ensure_tree("orphan")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    projects.register_project(root, repo, slug="registered")
+    assert handle.list_project_trees() == ["orphan", "registered"]
+    assert list(handle.load_registry()) == ["registered"]
+
+
+def test_list_project_trees_skips_non_slug_entries_and_empty_stores(
+    handle: StoreHandle, root: Path
+) -> None:
+    assert handle.list_project_trees() == []  # no projects/ dir yet
+    handle.ensure_tree("good")
+    (root / "projects" / "Not A Slug").mkdir()
+    (root / "projects" / "loose-file.md").write_text("x", encoding="utf-8")
+    assert handle.list_project_trees() == ["good"]
+
+
+def test_delete_project_tree_removes_everything_under_the_project(
+    handle: StoreHandle, root: Path
+) -> None:
+    handle.ensure_tree("proj")
+    handle.write_raw(
+        "proj",
+        agent="claude",
+        session_id="sid1",
+        cwd="/tmp/repo",
+        branch="main",
+        captured_at=WHEN,
+        body="a captured session",
+    )
+    handle.upsert_curated("proj", "a-fact", "body")
+    handle.write_node("proj", "a-node", "body")
+    assert handle.delete_project_tree("proj") is True
+    assert not (root / "projects" / "proj").exists()
+    assert (root / "projects").is_dir()  # only this project went
+
+
+def test_delete_project_tree_is_false_when_there_is_nothing_to_delete(
+    handle: StoreHandle,
+) -> None:
+    assert handle.delete_project_tree("never-existed") is False
+
+
+def test_delete_project_tree_leaves_other_projects_alone(handle: StoreHandle, root: Path) -> None:
+    handle.ensure_tree("keep")
+    handle.ensure_tree("drop")
+    handle.upsert_curated("keep", "a-fact", "body")
+    handle.delete_project_tree("drop")
+    assert handle.list_project_trees() == ["keep"]
+    assert len(handle.list_curated("keep", active_only=True)) == 1
+
+
+def test_delete_project_tree_refuses_an_invalid_slug(handle: StoreHandle) -> None:
+    """The slug is the only thing naming a directory to remove, so it is validated
+    before any path is built — nothing with a separator or `..` can name a target."""
+    for bad in ("../../etc", "Not A Slug", "", "proj/../.."):
+        with pytest.raises(store.InvalidSlugError):
+            handle.delete_project_tree(bad)
+
+
+def test_delete_project_tree_does_not_follow_a_symlinked_project_dir(
+    handle: StoreHandle, root: Path, tmp_path: Path
+) -> None:
+    """A project directory that is really a symlink out of the store must not let an
+    rmtree escape it. `_require_within_store` resolves before it compares."""
+    outside = tmp_path / "precious"
+    outside.mkdir()
+    (outside / "keep.md").write_text("do not delete me", encoding="utf-8")
+    (root / "projects").mkdir(parents=True, exist_ok=True)
+    (root / "projects" / "sneaky").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="outside this handle's store"):
+        handle.delete_project_tree("sneaky")
+    assert (outside / "keep.md").exists()

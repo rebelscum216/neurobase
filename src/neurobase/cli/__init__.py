@@ -123,6 +123,93 @@ def enable(
 
 
 @app.command()
+def disable(
+    root: str | None = typer.Option(
+        None, "--root", help="Override the store root (default: config/env/~/neurobase)."
+    ),
+    slug: str | None = typer.Option(
+        None, "--slug", help="Project to disable (default: the one this directory resolves to)."
+    ),
+    repo_root: str | None = typer.Option(
+        None,
+        "--repo-root",
+        help="Remove only this one registered root, leaving the project's other roots.",
+    ),
+    delete_memory: bool = typer.Option(
+        False,
+        "--delete-memory",
+        help="Also permanently delete the project's memory tree. Irreversible.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the --delete-memory confirmation."),
+    cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+) -> None:
+    """Unregister a project. Its memory is kept unless --delete-memory is given.
+
+    The inverse of ``enable``, and the same operations the web UI's Projects
+    directory performs — both go through ``core.projects`` so the two front doors
+    cannot drift.
+    """
+    resolved_root = store.resolve_root(root)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
+
+    project_slug = slug or handle.resolve_project(resolved_cwd)
+    if project_slug is None:
+        typer.secho(
+            "Not an enabled project (no registered root matches this directory) "
+            "— pass --slug to name one explicitly.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if repo_root is not None:
+        if not handle.remove_root(project_slug, repo_root):
+            typer.secho(
+                f"{repo_root} is not a registered root of '{project_slug}' "
+                "— it must match the registry entry exactly (see `neurobase status`).",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if project_slug in handle.load_registry():
+            typer.echo(f"Removed root {repo_root} from '{project_slug}'.")
+            return
+        typer.echo(
+            f"Removed root {repo_root} — '{project_slug}' has no roots left and is disabled."
+        )
+    elif handle.deregister_project(project_slug):
+        typer.echo(f"Disabled project '{project_slug}' (memory kept).")
+    else:
+        typer.echo(f"Project '{project_slug}' was not registered.")
+
+    if not delete_memory:
+        mem = handle.memory_dir(project_slug)
+        if mem.exists():
+            typer.echo(f"Memory kept at {mem} — re-enable the folder to restore it.")
+        return
+
+    # Irreversible: confirm against the real contents, not an abstract warning.
+    mem = handle.memory_dir(project_slug)
+    if not mem.exists():
+        typer.echo(f"No memory tree at {mem} — nothing to delete.")
+        return
+    if not yes:
+        raws = len(handle.list_raw(project_slug, unconsumed_only=False))
+        facts = len(handle.list_curated(project_slug, active_only=True))
+        typer.secho(
+            f"About to permanently delete {mem}\n"
+            f"  {raws} raw captures, {facts} active facts, {handle.node_count(project_slug)} nodes",
+            fg=typer.colors.YELLOW,
+        )
+        if not typer.confirm("Delete this memory permanently?"):
+            typer.echo("Left the memory tree in place.")
+            return
+    handle.delete_project_tree(project_slug)
+    typer.echo(f"Deleted {mem.parent}")
+
+
+@app.command()
 def status(
     root: str | None = typer.Option(None, "--root", help="Override the store root."),
     cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),

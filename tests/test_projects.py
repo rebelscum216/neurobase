@@ -270,3 +270,124 @@ def test_resolve_project_longest_prefix_wins(root: Path, tmp_path: Path) -> None
 
 def test_git_common_root_none_for_non_git_dir(tmp_path: Path) -> None:
     assert projects.git_common_root(tmp_path) is None
+
+
+# --- removal (Phase P) -------------------------------------------------------
+#
+# `register_project` had no inverse until the Projects directory needed one. These
+# cover the two rules that make removal safe: an emptied project leaves no zombie
+# entry, and a read-for-rewrite refuses to run against a registry it could not
+# fully parse.
+
+
+def test_remove_root_drops_one_and_keeps_the_rest(root: Path, tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    projects.register_project(root, first, slug="proj")
+    projects.register_project(root, second, slug="proj")
+    assert projects.remove_root(root, "proj", str(second)) is True
+    assert projects.load_registry(root) == {"proj": [str(first)]}
+
+
+def test_removing_the_last_root_removes_the_entry(root: Path, tmp_path: Path) -> None:
+    """A zero-root entry can never be matched by `resolve_project`, so leaving one
+    behind would create an invisible project that every sweep still walks."""
+    only = tmp_path / "only"
+    only.mkdir()
+    projects.register_project(root, only, slug="proj")
+    assert projects.remove_root(root, "proj", str(only)) is True
+    assert projects.load_registry(root) == {}
+
+
+def test_remove_root_is_false_for_an_unknown_slug_or_root(root: Path, tmp_path: Path) -> None:
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    projects.register_project(root, folder, slug="proj")
+    assert projects.remove_root(root, "nosuch", str(folder)) is False
+    assert projects.remove_root(root, "proj", "/not/registered") is False
+    assert projects.load_registry(root) == {"proj": [str(folder)]}
+
+
+def test_remove_root_matches_the_stored_string_not_a_resolved_path(
+    root: Path, tmp_path: Path
+) -> None:
+    """Removal must work for a directory that no longer exists — that is the case
+    it matters most for. Matching on a resolved path would make it the one case
+    that could not be undone."""
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    projects.register_project(root, gone, slug="ghost")
+    gone.rmdir()
+    assert projects.remove_root(root, "ghost", str(gone)) is True
+    assert projects.load_registry(root) == {}
+
+
+def test_deregister_project_removes_every_root(root: Path, tmp_path: Path) -> None:
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    projects.register_project(root, first, slug="proj")
+    projects.register_project(root, second, slug="proj")
+    projects.register_project(root, tmp_path, slug="other")
+    assert projects.deregister_project(root, "proj") is True
+    assert projects.load_registry(root) == {"other": [str(tmp_path)]}
+
+
+def test_deregister_project_is_false_when_not_registered(root: Path) -> None:
+    assert projects.deregister_project(root, "nosuch") is False
+
+
+def test_removal_refuses_a_corrupt_registry_rather_than_truncating_it(
+    root: Path, tmp_path: Path
+) -> None:
+    """The strict-read contract. These reads exist only to be written back, so
+    treating an unparseable registry as empty would rewrite the file from `{}` and
+    silently drop every other project's roots."""
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    projects.register_project(root, folder, slug="proj")
+    registry_file = root / "registry.toml"
+    original = registry_file.read_text(encoding="utf-8")
+    registry_file.write_text(original + "\nthis is not valid toml [[[\n", encoding="utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        projects.deregister_project(root, "proj")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        projects.remove_root(root, "proj", str(folder))
+    assert registry_file.read_text(encoding="utf-8").startswith(original)
+
+
+def test_removal_refuses_a_wrongly_shaped_registry(root: Path, tmp_path: Path) -> None:
+    (root).mkdir(parents=True, exist_ok=True)
+    (root / "registry.toml").write_text('projects = "not a table"\n', encoding="utf-8")
+    with pytest.raises(projects.RegistryShapeError):
+        projects.deregister_project(root, "proj")
+
+
+# --- display-safe config lookups (Phase P) -----------------------------------
+
+
+def test_denylist_hit_names_the_entry_verbatim(tmp_path: Path) -> None:
+    """The UI shows which configured entry matched, in the form the user wrote it."""
+    repo = tmp_path / "umbrella" / "repo"
+    repo.mkdir(parents=True)
+    assert projects.denylist_hit(repo, [str(tmp_path / "umbrella")]) == str(tmp_path / "umbrella")
+    assert projects.denylist_hit(repo, [str(tmp_path / "elsewhere")]) is None
+    assert projects.denylist_hit(repo, []) is None
+
+
+def test_config_hits_skip_relative_entries(tmp_path: Path) -> None:
+    """A relative entry would resolve against the process cwd — non-deterministic
+    scope (review F5), so it is dropped rather than honored."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert projects.denylist_hit(repo, ["relative/path"]) is None
+    assert projects.auto_enable_hit(repo, ["relative/path"]) is None
+
+
+def test_config_hits_do_not_match_a_sibling_by_string_prefix(tmp_path: Path) -> None:
+    sibling = tmp_path / "Projects2"
+    sibling.mkdir()
+    assert projects.auto_enable_hit(sibling, [str(tmp_path / "Projects")]) is None

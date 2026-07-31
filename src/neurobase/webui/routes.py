@@ -26,9 +26,9 @@ from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
-from neurobase.core import redact, search, store
+from neurobase.core import lock, projects, redact, search, store
 from neurobase.core.config import load_config
-from neurobase.core.store_handle import StoreMode, open_store
+from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 from neurobase.recommender import corpus as recommend_corpus
 from neurobase.recommender import install, proposals
 from neurobase.recommender import metrics as recommend_metrics
@@ -82,9 +82,34 @@ def skills_routes() -> list[Route]:
     ]
 
 
+def projects_routes() -> list[Route]:
+    """The Projects directory (app-shell plan, Phase P): which folders have
+    Neurobase enabled, and the registry edits that change that set.
+
+    This is the app's **second** mutating surface, and the first whose writes land
+    outside the recommender's own files: ``/projects/add`` writes ``registry.toml``
+    and creates a memory tree, and ``/projects/{slug}/delete`` removes one. Both go
+    through ``core`` (``projects.*`` / ``StoreHandle``) — nothing here builds a store
+    path or parses the registry itself (ADR-0015)."""
+    return [
+        Route("/projects", _list_projects, methods=["GET"]),
+        Route("/projects/add", _add_project, methods=["POST"]),
+        Route("/projects/{slug}/add-root", _add_project_root, methods=["POST"]),
+        Route("/projects/{slug}/remove-root", _remove_project_root, methods=["POST"]),
+        Route("/projects/{slug}/deregister", _deregister_project, methods=["POST"]),
+        Route("/projects/{slug}/delete", _delete_project, methods=["GET", "POST"]),
+    ]
+
+
 def all_routes() -> list[Route]:
     """Every surface's routes, in one table for the Starlette app (``app.py``)."""
-    return [*suggestions_routes(), *sessions_routes(), *memory_routes(), *skills_routes()]
+    return [
+        *suggestions_routes(),
+        *sessions_routes(),
+        *memory_routes(),
+        *skills_routes(),
+        *projects_routes(),
+    ]
 
 
 # --- small shared helpers ---------------------------------------------------
@@ -148,14 +173,21 @@ def _clean_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _redirect_to(path: str, message: str) -> RedirectResponse:
+    """303 (See Other) to ``path`` after a POST — the correct status for a
+    post/redirect/get so a page reload never re-submits the form — with a short
+    human-readable flash message carried as a query param (this app has no
+    session/cookie state to stash it in, and doesn't need one for a single-user
+    local tool).
+
+    ``path`` is always a literal built by a handler in this module, never anything
+    derived from a request: this must not become an open-redirect helper."""
+    return RedirectResponse(f"{path}?{urlencode({'flash': message})}", status_code=303)
+
+
 def _redirect_with_flash(slug: str, message: str) -> RedirectResponse:
-    """303 (See Other) back to the detail page after a POST — the correct
-    status for a post/redirect/get so a page reload never re-submits the
-    form — with a short human-readable flash message carried as a query
-    param (this app has no session/cookie state to stash it in, and doesn't
-    need one for a single-user local tool)."""
-    query = urlencode({"flash": message})
-    return RedirectResponse(f"/suggestions/{slug}?{query}", status_code=303)
+    """:func:`_redirect_to` aimed at a proposal's detail page."""
+    return _redirect_to(f"/suggestions/{slug}", message)
 
 
 def _error_response(request: Request, status_code: int, message: str) -> Response:
@@ -940,9 +972,323 @@ async def _revert_view(request: Request) -> Response:
     return _redirect_with_flash(slug, "Reverted to proposed — drift repaired.")
 
 
+# --- Projects directory (app-shell plan, Phase P) ----------------------------
+#
+# Registry paths are rendered **verbatim**, without the display-redaction pass the
+# draft/skill surfaces use. They are not third-party text: every one is a directory
+# on this machine that the user typed into this page's own form (or into
+# `neurobase enable`). Redacting them would defeat the surface — a root has to be
+# read to be recognized, and the remove action submits the stored string back
+# verbatim, so a masked path could neither be identified nor acted on.
+
+
+def _project_root_row(path_str: str, denylist: list[str], auto_roots: list[str]) -> dict[str, Any]:
+    """One registered root, with the three facts that decide whether it is actually
+    doing anything: does the directory still exist, is it denylist-suppressed, and
+    is it covered by folder-scoped auto-enable.
+
+    ``Path.is_dir()`` answers False (never raises) for an unreadable or malformed
+    path, which is the right reading here — "not a usable directory"."""
+    path = Path(path_str)
+    return {
+        "path": path_str,
+        "exists": path.is_dir(),
+        "denylisted": projects.denylist_hit(path, denylist),
+        "auto_enabled": projects.auto_enable_hit(path, auto_roots),
+    }
+
+
+def _project_row(
+    handle: StoreHandle, slug: str, roots: list[str], denylist: list[str], auto_roots: list[str]
+) -> dict[str, Any]:
+    """One directory row. Counts are read per project and **fail soft** — a single
+    unreadable project degrades its own numbers to ``None`` rather than 500-ing the
+    page that is the only place to go and unregister it."""
+    counts: dict[str, int] | None
+    try:
+        raws = handle.list_raw(slug, unconsumed_only=False)
+        counts = {
+            "raw": len(raws),
+            "unconsumed": sum(1 for doc in raws if not doc.get("consumed")),
+            "curated": len(handle.list_curated(slug, active_only=True)),
+            "nodes": handle.node_count(slug),
+        }
+    except (OSError, ValueError):
+        counts = None
+    root_rows = [_project_root_row(root, denylist, auto_roots) for root in roots]
+    return {
+        "slug": slug,
+        "roots": root_rows,
+        "registered": bool(roots),
+        "counts": counts,
+        "has_tree": handle.memory_dir(slug).exists(),
+        # A project is suppressed only when *every* root it has is denylisted —
+        # one live root is enough for capture to keep working.
+        "suppressed": bool(root_rows) and all(r["denylisted"] for r in root_rows),
+    }
+
+
+def _projects_context(request: Request, *, error: str | None = None) -> dict[str, Any]:
+    """The directory's full context: every registered project, plus every project
+    that has a tree on disk with **no** registry entry.
+
+    That second group is the point of comparing the two views. An unregistered tree
+    is a dead end — nothing resolves to it, so no hook can capture into it and no
+    sweep walks it — and until now nothing surfaced it at all."""
+    handle = open_store(_root(request), StoreMode.READ)
+    config = load_config()
+    denylist = config.enable.denylist
+    auto_roots = config.enable.auto_enable_roots
+    try:
+        registry = handle.load_registry()
+    except (OSError, ValueError):
+        registry = {}
+    rows = [
+        _project_row(handle, slug, registry[slug], denylist, auto_roots)
+        for slug in sorted(registry)
+    ]
+    orphans = [
+        _project_row(handle, slug, [], denylist, auto_roots)
+        for slug in handle.list_project_trees()
+        if slug not in registry
+    ]
+    return {
+        **_base_context(request),
+        "projects": rows,
+        "orphans": orphans,
+        "store_root": str(handle.root),
+        "denylist": denylist,
+        "auto_enable_roots": auto_roots,
+        "flash": request.query_params.get("flash"),
+        "error": error,
+    }
+
+
+def _projects_page(
+    request: Request, *, error: str | None = None, status_code: int = 200
+) -> Response:
+    """Render the directory. Also the *form-redisplay* path: a rejected add comes
+    back to this page carrying its reason, rather than dumping the user on a
+    standalone error page for a mistyped path."""
+    return _templates(request).TemplateResponse(
+        request,
+        "projects_list.html",
+        _projects_context(request, error=error),
+        status_code=status_code,
+    )
+
+
+async def _list_projects(request: Request) -> Response:
+    return _projects_page(request)
+
+
+def _validate_folder(raw: object, store_root: Path) -> tuple[Path | None, str | None]:
+    """Turn a submitted folder path into a resolved directory, or a reason it was
+    refused. Exactly one of the two is non-``None``.
+
+    This is the one genuinely untrusted input on this surface, so each rule is
+    separate and gives its own message:
+
+    - **Absolute only.** A relative path would resolve against the *server's*
+      working directory, not the user's — the same non-determinism
+      ``projects._resolved_config_entries`` refuses for config entries (review F5).
+    - **Must already exist as a directory**, so a typo registers nothing.
+    - **Not inside the store**, or the curator would capture its own output into
+      itself.
+
+    Resolution happens before every check, so a symlink cannot present one path and
+    register another. The value is only ever written into ``registry.toml`` as a
+    string — the on-disk tree is keyed by the separately-validated *slug* — so this
+    is not the barrier against store traversal; it is a barrier against silently
+    registering something the user did not mean."""
+    text = _clean_str(raw)
+    if text is None:
+        return None, "Enter a folder path."
+    try:
+        candidate = Path(text.strip()).expanduser()
+    except (RuntimeError, ValueError, OSError):
+        return None, "That is not a usable path."
+    if not candidate.is_absolute():
+        return None, (
+            "Enter an absolute path. A relative one would be resolved against the "
+            "server's working directory, not yours."
+        )
+    try:
+        resolved = candidate.resolve()
+        store_resolved = store_root.resolve()
+    except (OSError, RuntimeError):
+        return (
+            None,
+            "That path could not be resolved — a symlink loop, or a directory this "
+            "server cannot read.",
+        )
+    if not resolved.is_dir():
+        return None, f"{resolved} is not an existing directory."
+    if resolved == store_resolved or resolved.is_relative_to(store_resolved):
+        return None, (
+            f"{resolved} is inside the Neurobase store itself. Registering it would make "
+            "the curator capture its own output."
+        )
+    return resolved, None
+
+
+def _register(request: Request, folder: Path, slug: str | None) -> Response:
+    """Register ``folder`` (creating its tree) and redirect back to the directory.
+
+    Ordering mirrors ``core/enable.py`` exactly, and for its reason (review F2):
+    derive and validate the slug first, create the **tree** second, write the
+    **registry** entry last — so a failure part-way can never leave a
+    registered-but-treeless project, which would match ``resolve_project`` forever,
+    never be retried, and silently kill capture for that repo."""
+    root = _write_root(request)
+    handle = open_store(root, StoreMode.WRITE)
+    try:
+        derived = projects.derive_slug(folder, slug)
+        handle.ensure_tree(derived)
+        registered = handle.register_project(folder, slug=slug)
+    except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
+        return _projects_page(request, error=str(exc), status_code=409)
+    except OSError as exc:
+        return _projects_page(
+            request, error=f"Could not create the memory tree: {exc}", status_code=500
+        )
+    message = f"Enabled {registered} at {folder}."
+    if projects.denylist_hit(folder, load_config().enable.denylist):
+        # Mirrors `cli/enable`'s R2-3 warning: the denylist gates automatic capture
+        # even for an explicitly enabled repo, so say so now rather than let the
+        # project look enabled and stay silent forever.
+        message += (
+            " Warning: it is under an [enable] denylist entry, so automatic capture "
+            "and injection stay suppressed."
+        )
+    return _redirect_to("/projects", message)
+
+
+async def _add_project(request: Request) -> Response:
+    """Register a folder as a new project (the browser's ``neurobase enable``)."""
+    form = await request.form()
+    folder, error = _validate_folder(form.get("path"), _root(request))
+    if folder is None:
+        return _projects_page(request, error=error, status_code=400)
+    return _register(request, folder, _clean_str(form.get("slug")))
+
+
+async def _add_project_root(request: Request) -> Response:
+    """Attach a second repo root to an existing project. Refuses an unregistered
+    slug with a 404 rather than quietly creating the project — a stale link must
+    not become a create."""
+    slug = request.path_params["slug"]
+    handle = open_store(_root(request), StoreMode.READ)
+    if slug not in handle.load_registry():
+        return _error_response(request, 404, f"project {slug!r} is not registered")
+    form = await request.form()
+    folder, error = _validate_folder(form.get("path"), _root(request))
+    if folder is None:
+        return _projects_page(request, error=error, status_code=400)
+    return _register(request, folder, slug)
+
+
+async def _remove_project_root(request: Request) -> Response:
+    """Drop one root. The submitted value is the stored string echoed back, matched
+    exactly by ``projects.remove_root`` — a root that no longer exists on disk is
+    still removable, which is the case that matters most."""
+    handle = open_store(_root(request), StoreMode.WRITE)
+    slug = request.path_params["slug"]
+    form = await request.form()
+    target = _clean_str(form.get("root"))
+    if target is None:
+        return _error_response(request, 400, "no root given")
+    if not handle.remove_root(slug, target):
+        return _error_response(
+            request, 404, f"{target} is not a registered root of project {slug!r}"
+        )
+    if slug not in handle.load_registry():
+        return _redirect_to(
+            "/projects",
+            f"Removed {target} — it was {slug}'s last root, so the project is no longer "
+            "registered. Its memory tree is untouched.",
+        )
+    return _redirect_to("/projects", f"Removed {target} from {slug}.")
+
+
+async def _deregister_project(request: Request) -> Response:
+    """Unregister a project, keeping every byte of its memory on disk. The
+    non-destructive half of removal, and the default the page steers toward."""
+    handle = open_store(_root(request), StoreMode.WRITE)
+    slug = request.path_params["slug"]
+    if not handle.deregister_project(slug):
+        return _error_response(request, 404, f"project {slug!r} is not registered")
+    return _redirect_to(
+        "/projects",
+        f"Deregistered {slug}. Its memory tree is untouched — re-registering the same "
+        "folder restores the project intact.",
+    )
+
+
+async def _delete_project(request: Request) -> Response:
+    """Deregister **and** delete the memory tree. Two steps on purpose: GET renders
+    exactly what will be destroyed, and POST requires the slug typed back.
+
+    The typed confirmation is compared server-side, so this cannot be reduced to a
+    single crafted POST the way a bare hidden field could. On a mismatch nothing is
+    touched and the confirm page comes back with a 409 — the same fail-closed shape
+    the accept fingerprint check uses."""
+    root = _root(request)
+    slug = request.path_params["slug"]
+    try:
+        handle = open_store(root, StoreMode.READ)
+        mem = handle.memory_dir(slug)
+    except store.InvalidSlugError:
+        return _error_response(request, 404, f"{slug!r} is not a valid project slug")
+    registry = handle.load_registry()
+    if slug not in registry and not mem.exists():
+        return _error_response(
+            request, 404, f"project {slug!r} has neither a registry entry nor a tree"
+        )
+
+    config = load_config()
+    context = {
+        **_base_context(request),
+        "project": _project_row(
+            handle,
+            slug,
+            registry.get(slug, []),
+            config.enable.denylist,
+            config.enable.auto_enable_roots,
+        ),
+        "tree_path": str(mem.parent),
+        "error": None,
+    }
+    if request.method == "GET":
+        return _templates(request).TemplateResponse(request, "project_delete.html", context)
+
+    form = await request.form()
+    if _clean_str(form.get("confirm")) != slug:
+        context["error"] = f"Type {slug} exactly to confirm. Nothing was deleted."
+        return _templates(request).TemplateResponse(
+            request, "project_delete.html", context, status_code=409
+        )
+
+    # WRITE handle: the D11 schema guard runs at *this* boundary, immediately before
+    # the only irreversible action in the app.
+    write_handle = open_store(root, StoreMode.WRITE)
+    write_handle.deregister_project(slug)
+    try:
+        deleted = write_handle.delete_project_tree(slug)
+    except (OSError, lock.LockTimeout) as exc:
+        return _error_response(
+            request,
+            409,
+            f"{slug} was deregistered, but its memory tree could not be deleted: {exc}",
+        )
+    detail = "and deleted its memory tree" if deleted else "(it had no memory tree)"
+    return _redirect_to("/projects", f"Deregistered {slug} {detail}.")
+
+
 __all__ = [
     "all_routes",
     "memory_routes",
+    "projects_routes",
     "sessions_routes",
     "skills_routes",
     "suggestions_routes",

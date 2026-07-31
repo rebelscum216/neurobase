@@ -655,11 +655,13 @@ not be widened by implication.
 
 ### G7 — the write-lock negative control fails intermittently in CI, and not in the direction its own model predicts
 
-- **status:** open.
-- **severity:** minor — no product code is implicated. The cost is trust: it
-  reddens CI on changes that cannot possibly have caused it (it first bit on a
-  **docs-only** commit), which trains readers to wave failures through on the
-  branch they are least able to check.
+- **status:** **fixed** — the control now asserts `!=` rather than `<`. The
+  mechanism was identified the same day and is recorded below; the entry is kept
+  because the *reasoning* is the durable part, not the one-line change.
+- **severity:** minor — no product code was implicated. The cost was trust: it
+  reddened CI on changes that could not possibly have caused it (it first bit on
+  a **docs-only** commit, then on `main` itself within the hour), which trains
+  readers to wave failures through on the branch they are least able to check.
 - **found:** 2026-07-31 by Claude, on `feat/webui-phase-g-graph` commit
   `7298b8d` (a single added markdown file). `py3.13 · ubuntu-latest` failed; the
   other three matrix jobs passed, and the identical code had gone green ×4 on
@@ -684,24 +686,39 @@ and `write_text` truncates, so a torn read yields an empty or short prefix and
 therefore a *smaller* value; the helper's own comment says it is written to
 "undercount rather than crash". Nothing in that model produces 352.
 
-**So the mechanism is unknown, and this entry deliberately does not guess one.**
-An obvious candidate — the test body executing twice against a `tmp_path` that
-was not recreated, so a second run resumed from ~320 — fits the arithmetic but
-was **not** confirmed, and the pytest tmp dir in the log carries the first-run
-suffix (`test_probe_has_teeth_without_l0`). Do not treat that as the answer.
+**Mechanism — confirmed 2026-07-31, not inferred.** Unlocked corruption is
+**bidirectional**, and the test only modelled one direction. `Path.write_text`
+truncates the file when it *opens* it, but two workers that opened independently
+each write at **their own offset 0**. A shorter write landing over a longer file
+therefore leaves the earlier writer's trailing digits in place, and the value
+*inflates* rather than shrinking. Reduced to three lines:
 
-**Fix direction.** Two separable pieces:
+```python
+fa = open(p, "w"); fb = open(p, "w")   # both truncate
+fa.write("50"); fa.flush()             # A writes 2 bytes
+fb.write("7");  fb.flush()             # B writes 1 byte at ITS offset 0
+# -> the file now reads "70"
+```
 
-1. **Diagnose the over-count before touching the threshold.** A negative control
-   that fails *above* its ceiling is reporting something the test does not model,
-   and raising the bound would bury it. Have the test print the per-worker
-   increment count and the final value on failure, so the next occurrence is
-   self-describing rather than needing this entry.
-2. **Make the control deterministic rather than timing-dependent.** Proving the
-   lock has teeth does not require winning a race: a barrier that forces every
-   unlocked worker to read before any of them writes would demonstrate the lost
-   update every time, on any runner, and remove the whole class of flake.
+One digit of overlap turns 7 into 70. That is how a run of 320 increments
+finishes at 352 or 536: not a miscount, and not a lost update — a *concatenation*
+of two writers' digits. The counter is genuinely corrupt, which is exactly what
+the control set out to prove. Its `<` bound simply scored the loudest possible
+evidence of corruption as a failure.
 
-Until then, a lone failure of this test on a change that cannot have caused it
-should be re-run (`gh run rerun <run-id> --job <job-id>`), not investigated as a
-regression — but a failure alongside *any* other should be believed.
+An earlier draft of this entry floated the pytest `tmp_path` being reused across
+a rerun. That was never confirmed and is **wrong**; the mechanism above is
+reproducible in three lines on any POSIX filesystem.
+
+**Fix (landed).** The assertion is now `!= procs * iters`. That is what the
+docstring always claimed the invariant was — *"if this ever passes at the exact
+total, the probe above proves nothing"* — and it is strictly better than a
+threshold: any deviation, in either direction, is the tooth the control exists to
+demonstrate, so the test no longer depends on which *kind* of corruption a given
+runner happens to produce. It still fails on an exact-total run, which is correct
+and is the one case that means the probe is worthless.
+
+**Lesson worth keeping.** A negative control that fails *outside the direction
+its own model predicts* is reporting something real. Raising or relaxing the
+bound would have buried a correct observation about POSIX write semantics; the
+over-count was the finding, not the noise.

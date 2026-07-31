@@ -151,9 +151,11 @@ go through the handle. The step-5 guard forbids the raw-`root` store/registry
 **accessors** and the `store.toml`/`registry.toml` literals outside the three
 implementation modules. Three documented raw-`root` residuals remain outside that
 accessor coverage (none an unguarded write to schema-versioned content — spec §10):
-`doctor`'s two corrupt-`store.toml` reads (`resolve_project` + `store_toml_path` in
-`cli/diagnostics.py`, `registry.toml`/label reads independent of the store-schema guard,
-allow-listed by (file, name)); the recommender's `proposals`/`ledger` path-builders
+`doctor`'s three corrupt-`store.toml` reads (`resolve_project` + `registry_is_contained`
++ `store_toml_path` in `cli/diagnostics.py`, `registry.toml`/label reads independent of
+the store-schema guard, allow-listed by (file, name); the containment predicate is there
+so a corrupt `store.toml` cannot mask an out-of-store registry on the branch that has no
+handle to ask); the recommender's `proposals`/`ledger` path-builders
 (`corpus.proposals_dir`/`proposal_path`/`ledger_path`), command-guarded; and the
 config-backup facility (`backups.backup_files`/`restore_backup`), a schema-independent
 maintenance exception (opaque config-file copies to/from `<root>/backups/`, safe on any

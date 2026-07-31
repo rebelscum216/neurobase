@@ -42,11 +42,13 @@ that. See ``docs/neurobase-spec-appendix.md`` §10.
 
 **Sanctioned raw-``root`` residuals** (pending the deferred signature removal — not
 covered by this guard, documented in §10):
-- ``doctor``'s two corrupt-``store.toml`` reads — ``projects.resolve_project(root, cwd)``
-  and ``store.store_toml_path(root)`` in ``cli/diagnostics.py`` — allow-listed here by
-  (file, name). Project resolution is a ``registry.toml`` concern, independent of the
-  store-schema guard (ADR-0015 registry carve-out, F1), so it is legitimate when no
-  handle can open.
+- ``doctor``'s **three** corrupt-``store.toml`` reads — ``projects.resolve_project(root,
+  cwd)``, ``projects.registry_is_contained(root)`` and ``store.store_toml_path(root)`` in
+  ``cli/diagnostics.py`` — allow-listed here by (file, name). Project resolution is a
+  ``registry.toml`` concern, independent of the store-schema guard (ADR-0015 registry
+  carve-out, F1), so it is legitimate when no handle can open; the containment predicate
+  is there so a corrupt ``store.toml`` cannot *mask* an out-of-store registry, and that
+  branch has no handle to ask (spec §10).
 - the recommender's ``proposals``/``ledger`` **path-builders**
   (``corpus.proposals_dir`` / ``proposal_path`` / ``ledger_path``), which stay
   root-taking but are guarded at the command entry that opens their handle. Not in the
@@ -120,8 +122,11 @@ PROJECTS_FORBIDDEN = frozenset(
 # Store-metadata filenames — a bare literal is a hand-rolled store path.
 SENSITIVE_LITERALS = frozenset({"store.toml", "registry.toml"})
 
-# The doctor's sanctioned raw-``root`` reads on its no-handle (corrupt-store) path.
-# (posix-relative-to-``src/neurobase``, accessor name).
+# The doctor's THREE sanctioned raw-``root`` reads on its no-handle (corrupt-store)
+# path. (posix-relative-to-``src/neurobase``, accessor name.) Keep this count in step
+# with the module docstring above, spec §10 and ADR-0015 — the guard's safety model is
+# a small auditable exception list, so a stale count leaves the next reviewer unable to
+# tell a sanctioned exemption from an accidental one (Codex P3-DOCS-PLAN-ACCURACY-015).
 ALLOW: frozenset[tuple[str, str]] = frozenset(
     {
         ("cli/diagnostics.py", "resolve_project"),
@@ -205,6 +210,48 @@ class _Visitor(ast.NodeVisitor):
                 self.store_names.add(alias.asname or "neurobase.core.store")
             elif alias.name == "neurobase.core.projects":
                 self.projects_names.add(alias.asname or "neurobase.core.projects")
+        self.generic_visit(node)
+
+    # --- module ALIASING by assignment (Codex P2-SAFETY-SECURITY-013, round 6) ---
+    #
+    # Import forms alone are not the whole static surface. Binding the module to a
+    # second name is plain, lint-clean Python:
+    #
+    #     from neurobase.core import projects
+    #     project_api = projects
+    #     project_api._registry_path(root)      # ← reached the registry, guard silent
+    #
+    # The receiver is then `project_api`, which no import ever named, so `_dotted()`
+    # matched nothing and the check printed OK on a module ruff was also happy with.
+    # Codex demonstrated this as a real production module — the EIGHTH static shape,
+    # after the seven import spellings round 5 added. Propagating simple aliases
+    # closes it without any dataflow analysis: the alias set simply grows.
+    #
+    # `import *` also escapes, and is deliberately NOT chased here — ruff's F403
+    # already rejects it, so it cannot reach a green gate. This shape survived both.
+
+    def _bind_alias(self, targets: list[ast.expr], value: ast.expr) -> None:
+        """Bind every plain-``Name`` target to whichever module ``value`` names."""
+        source = _dotted(value)
+        if source in self.store_names:
+            bucket = self.store_names
+        elif source in self.projects_names:
+            bucket = self.projects_names
+        else:
+            return
+        for target in targets:
+            if isinstance(target, ast.Name):
+                bucket.add(target.id)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        # Covers `a = projects` and the chained `a = b = projects`.
+        self._bind_alias(node.targets, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        # Covers the annotated form, e.g. `a: ModuleType = projects`.
+        if node.value is not None:
+            self._bind_alias([node.target], node.value)
         self.generic_visit(node)
 
     def _flag(self, lineno: int, name: str, detail: str) -> None:

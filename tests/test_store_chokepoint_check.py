@@ -260,6 +260,93 @@ def test_flags_registry_is_contained_outside_diagnostics() -> None:
     assert len(details) == 1 and "registry_is_contained" in details[0]
 
 
+# --- module ALIASING by assignment (Codex P2-SAFETY-SECURITY-013, round 6) ---
+#
+# The eighth static shape, and the one that mattered: round 5 added seven IMPORT
+# spellings, but binding the module to a second name is plain, lint-clean Python and
+# no import ever names the receiver. Codex ran the probe below as a real production
+# module and got ruff clean AND the real checker printing OK — so the guard, its
+# tests, ADR-0015 and spec §10 were all asserting an enforcement property that did
+# not hold. `import *` escapes too and is deliberately not chased: ruff's F403 stops
+# it reaching a green gate, which is exactly what this shape survived.
+
+
+def test_flags_reassigned_module_alias() -> None:
+    """Codex's exact probe, verbatim."""
+    src = (
+        "from neurobase.core import projects\n\n"
+        "project_api = projects\n\n"
+        "def probe(root):\n    return project_api._registry_path(root)\n"
+    )
+    details = _details("webui/other.py", src)
+    assert len(details) == 1 and "projects._registry_path" in details[0]
+
+
+def test_flags_chained_module_alias() -> None:
+    """``a = b = projects`` — every plain-Name target binds."""
+    src = (
+        "from neurobase.core import projects\n\n"
+        "a = b = projects\n\n"
+        "def f(root):\n    return b.load_registry(root)\n"
+    )
+    details = _details("webui/other.py", src)
+    assert len(details) == 1 and "projects.load_registry" in details[0]
+
+
+def test_flags_annotated_module_alias() -> None:
+    src = (
+        "from types import ModuleType\n"
+        "from neurobase.core import projects\n\n"
+        "p: ModuleType = projects\n\n"
+        "def f(root, cwd):\n    return p.resolve_project(root, cwd)\n"
+    )
+    details = _details("adapters/x.py", src)
+    assert len(details) == 1 and "projects.resolve_project" in details[0]
+
+
+def test_flags_an_alias_of_an_alias() -> None:
+    """Aliases accumulate, so a second hop cannot launder the first."""
+    src = (
+        "from neurobase.core import projects\n\n"
+        "x = projects\ny = x\n\n"
+        "def f(root):\n    return y.registry_is_contained(root)\n"
+    )
+    details = _details("curator/x.py", src)
+    assert len(details) == 1 and "projects.registry_is_contained" in details[0]
+
+
+def test_flags_an_alias_of_a_dotted_module_import() -> None:
+    """The alias source may itself be a dotted chain, not a bare Name."""
+    src = (
+        "import neurobase.core.store\n\n"
+        "m = neurobase.core.store\n\n"
+        "def f(root, p):\n    return m.memory_dir(p, root)\n"
+    )
+    details = _details("recommender/x.py", src)
+    assert len(details) == 1 and "store.memory_dir" in details[0]
+
+
+def test_an_unrelated_assignment_does_not_become_a_receiver() -> None:
+    """The false-positive side, aimed at the case that would actually hurt.
+
+    Only an assignment whose VALUE names a tracked module may bind. If binding were
+    unconditional, `handle = open_store(...)` would make `handle` a "projects" alias
+    and `handle.load_registry()` — **the sanctioned pattern this entire guard exists
+    to push people toward** — would be flagged in every module in the tree.
+
+    Written after a mutation: an earlier version of this test used `z = 3` and a bare
+    `return z`, which survived unconditional binding because a Name load is not an
+    Attribute access. It asserted nothing about the risk it named."""
+    src = (
+        "from neurobase.core.store_handle import StoreMode, open_store\n\n"
+        "def f(root, cwd):\n"
+        "    handle = open_store(root, StoreMode.READ)\n"
+        "    registry = handle.load_registry()\n"
+        "    return registry, handle.resolve_project(cwd)\n"
+    )
+    assert _details("webui/other.py", src) == []
+
+
 def test_doctor_registry_is_contained_is_allowlisted() -> None:
     """Doctor's no-handle branch must be able to tell an uncontained registry from an
     absent one even when ``store.toml`` is corrupt, so it has no handle to ask."""

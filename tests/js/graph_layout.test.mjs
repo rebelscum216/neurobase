@@ -188,10 +188,15 @@ test("layout is not catastrophically slow in absolute terms", () => {
   // wrong to imply one (Codex P3-MAINTAINABILITY-014): 10x this laptop's ~264ms is
   // ~2.6s and would sail past this line. What it is set from is the slowest
   // healthy measurement ever OBSERVED — 926ms, on a contended macOS CI runner —
-  // with ~5x headroom above it, a margin no runner contention has ever approached.
-  // It is therefore loose enough never to fire spuriously, and it is not vacuous:
-  // per-scan-cost mutation reached 23,771ms against this line while the ratio
-  // stayed at 1.99 and the scan counts did not move at all.
+  // with ~5x headroom above it. That is ample margin over every healthy run in the
+  // recorded sample, and it has not fired spuriously in that sample. That is the
+  // empirical claim, and it is deliberately not "it can never fire": this is an
+  // ABSOLUTE wall-clock line, so a slow or paused enough runner can still cross it
+  // — promising otherwise would contradict the paragraph above, where this check is
+  // precisely the one that is NOT host-normalized (Codex P3-MAINTAINABILITY-014).
+  //
+  // Nor is it vacuous: per-scan-cost mutation reached 23,771ms against this line
+  // while the ratio stayed at 1.99 and the scan counts did not move at all.
   //
   // Tightening it would recreate the cross-hardware bug this commit fixed. If it
   // ever fires, investigate — do not raise the number.

@@ -3,9 +3,12 @@ path must obtain before touching the store.
 
 ``open_store()`` is the single place the D11 schema guard lives (spec §10:
 *"refuse to operate on a schema newer than the binary"*). It reads and validates
-``<root>/store.toml`` once and hands back a ``StoreHandle``. Because holding a
-handle is proof the schema was already checked, a call site that takes a handle
-cannot forget the guard — the defect recorded as G1 (``docs/known-gaps.md``).
+``<root>/store.toml`` once and hands back a ``StoreHandle``. Because a handle
+*returned by* ``open_store()`` is proof the schema was already checked, a call site
+that obtains its handle that way cannot forget the guard — the defect recorded as G1
+(``docs/known-gaps.md``). That is a property of the supported path, not of the type:
+a handle reaching a call site by some other route proves nothing (see
+``_CONSTRUCTOR_TOKEN``).
 Every production caller now does; making that the *only* way to reach the store is
 ADR-0015's deferred signature-removal step, so until it lands the raw-``root``
 functions still exist beneath these methods and a CI regression check (step 5,
@@ -17,8 +20,9 @@ handle alongside the existing ``root: Path`` store API in
 :mod:`neurobase.core.store`, with no callers. Step 2 added the store and registry
 API onto the handle as **methods** — ``handle.memory_dir(project)``,
 ``handle.write_raw(...)``, ``handle.load_registry()`` — each delegating to the
-``root: Path`` function with the root dropped, since holding the handle already
-proves the schema guard ran. At that point they were **additive and callerless**.
+``root: Path`` function with the root dropped, since a handle from ``open_store()``
+already proves the schema guard ran. At that point they were **additive and
+callerless**.
 
 Since then: step 3 migrated the callers (curator, adapters, MCP, recommender, CLI)
 onto these methods, and step 4 moved the lifecycle commands onto command-side
@@ -116,8 +120,9 @@ _CONSTRUCTOR_TOKEN = object()
 
 @dataclass(frozen=True)
 class StoreHandle:
-    """A store proven to be at a schema this binary supports (or, for ``DOCTOR``/
-    ``PURGE``, one deliberately opened despite an unsupported schema).
+    """A store that ``open_store()`` proved to be at a schema this binary supports
+    (or, for ``DOCTOR``/``PURGE``, one deliberately opened despite an unsupported
+    schema). The proof is `open_store()`'s, not the type's.
 
     Construct one via :func:`open_store` — the supported entry point, and the one
     every production caller uses; direct ``StoreHandle(...)`` is rejected, though it

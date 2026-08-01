@@ -1,8 +1,14 @@
-"""ADR-0015 store chokepoint: ``open_store()`` is the single validated entry to
+"""ADR-0015 store chokepoint: ``open_store()`` is the supported validated entry to
 the store, and the D11 schema guard (spec §10) lives there. These tests pin the
-per-mode behavior and the "an unvalidated store is unrepresentable" property.
+per-mode behavior and the rejection of direct ``StoreHandle(...)`` construction.
 
-Step 1 has no callers — these tests exercise the module directly.
+They do **not** pin "an unvalidated store is unrepresentable" — that claim was
+withdrawn in round 11 of the Codex review (`P2-SAFETY-SECURITY-013`) once three
+in-process routes to a fabricated handle were demonstrated; see
+``_CONSTRUCTOR_TOKEN`` in ``core/store_handle.py`` for the enumeration and why
+closing them is out of scope here.
+
+These tests exercise the module directly rather than through a caller.
 """
 
 from __future__ import annotations
@@ -186,10 +192,16 @@ def test_profile_is_carried_through(root: Path) -> None:
     assert handle.profile == "open-source"
 
 
-# --- enforcement: an unvalidated store is unrepresentable ------------------
+# --- construction: filling in the dataclass by hand is refused --------------
 
 
 def test_direct_construction_is_refused(root: Path) -> None:
+    """Bounded deliberately (Codex `P2-SAFETY-SECURITY-013`, round 11): this proves
+    only that ``StoreHandle(...)`` without the constructor token raises, i.e. that no
+    one obtains a handle by accident. It is **not** evidence that an unchecked handle
+    cannot be built — ``_make``, the importable token, and ``dataclasses.replace``
+    each still get you one. Naming it after the stronger property is what let that
+    claim survive in five documents."""
     with pytest.raises(TypeError):
         StoreHandle(root=root, mode=StoreMode.READ, schema=None, profile=None)
 

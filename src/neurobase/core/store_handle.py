@@ -65,7 +65,10 @@ class StoreMode(Enum):
       readers behave as on an empty store.
     - ``WRITE`` — validate as ``READ`` and create ``store.toml`` on first use.
       Requiring this mode is what closes G1's ``init --guided`` mutate-before-guard
-      hole: a write path cannot obtain a handle without the guard having run.
+      hole: ``open_store(..., WRITE)`` runs the guard before it returns, so a write
+      path that opens its handle the supported way cannot mutate ahead of the check.
+      (That is a property of ``open_store``, not an unforgeable one — see
+      ``_CONSTRUCTOR_TOKEN`` below.)
     - ``DOCTOR`` — inspect any schema, *including one newer than supported*,
       without mutating. The caller reports rather than refuses (D26).
     - ``MIGRATE`` — like ``WRITE``; reserved as the seam for the schema-2 migration
@@ -86,10 +89,28 @@ class StoreMode(Enum):
 # Modes permitted to create ``store.toml`` when it does not yet exist.
 _CREATING_MODES = (StoreMode.WRITE, StoreMode.MIGRATE)
 
-# Only ``open_store()`` holds this token, so it is the only caller that can
-# construct a ``StoreHandle`` — every other construction path raises. This is the
-# "unvalidated store is unrepresentable" property from ADR-0015: you cannot
-# fabricate a handle that skipped the schema check.
+# Rejects *accidental* construction: ``StoreHandle(...)`` without this token raises,
+# so no one obtains a handle by filling in the dataclass fields. That is the whole of
+# what it provides.
+#
+# It is NOT mechanical unforgeability, and this comment used to claim it was — "only
+# ``open_store()`` holds this token", "you cannot fabricate a handle that skipped the
+# schema check" (Codex P2-SAFETY-SECURITY-013, round 11, who demonstrated the first of
+# these; the other two were found verifying it). A determined caller inside this
+# process has at least three routes:
+#
+#   1. ``_make`` below is module-level and importable, and holds the token;
+#   2. this token is itself importable, so ``StoreHandle(..., _token=_CONSTRUCTOR_TOKEN)``
+#      succeeds;
+#   3. ``dataclasses.replace()`` on a legitimately obtained handle copies the token,
+#      so root, mode and schema can all be retargeted.
+#
+# Closing all three needs a sentinel that never escapes ``open_store`` plus something
+# that blocks ``replace`` — deliberately not attempted here (ADR-0015's *deferred*
+# signature-removal step is the intended hard boundary, not Python privacy). What is
+# true and load-bearing: ``open_store()`` is the supported entry point, every
+# production caller uses it, and ``scripts/check_store_chokepoint.py`` is what catches
+# the ordinary relapse.
 _CONSTRUCTOR_TOKEN = object()
 
 
@@ -98,7 +119,10 @@ class StoreHandle:
     """A store proven to be at a schema this binary supports (or, for ``DOCTOR``/
     ``PURGE``, one deliberately opened despite an unsupported schema).
 
-    Construct one only via :func:`open_store`. ``schema is None`` means strictly
+    Construct one via :func:`open_store` — the supported entry point, and the one
+    every production caller uses; direct ``StoreHandle(...)`` is rejected, though it
+    is not the only in-process route (see ``_CONSTRUCTOR_TOKEN``).
+    ``schema is None`` means strictly
     *no ``store.toml`` exists yet* (uninitialized); any integer is a parsed
     on-disk schema, which can exceed :data:`STORE_SCHEMA_VERSION` only for a
     ``DOCTOR`` or ``PURGE`` handle.
@@ -114,13 +138,17 @@ class StoreHandle:
         if self._token is not _CONSTRUCTOR_TOKEN:
             raise TypeError("StoreHandle cannot be constructed directly — call open_store()")
 
-    # --- store accessors (ADR-0015 migration step 2) -------------------------
+    # --- store accessors (added at ADR-0015 migration step 2) ----------------
     # The handle carries the validated root, so these expose the ``core.store``
-    # API with the ``root: Path`` argument dropped — a caller that holds a handle
-    # has already passed the schema guard. They delegate to today's root-taking
-    # functions; step 3 migrates callers onto these methods and step 4 removes the
-    # root-taking functions (their logic moves here). Additive for now: nothing
-    # calls these yet, and the root-taking functions are untouched.
+    # API with the ``root: Path`` argument dropped — a caller that obtained its
+    # handle from ``open_store()`` has already passed the schema guard. They
+    # delegate to the root-taking functions.
+    #
+    # Current state (they were "additive, nothing calls them yet" when written at
+    # step 2): step 3 migrated the callers, so production reaches the store through
+    # these methods. Step 4's other half — removing the root-taking functions so
+    # their logic moves here — is deferred, which is why those functions still exist
+    # underneath.
 
     def memory_dir(self, project: str) -> Path:
         return store.memory_dir(project, self.root)

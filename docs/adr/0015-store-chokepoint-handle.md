@@ -80,7 +80,7 @@ class StoreMode(Enum):
     READ; WRITE; DOCTOR; MIGRATE; PURGE
 
 class StoreHandle:
-    # constructor is private — the ONLY way in is open_store()
+    # constructor is private — open_store() is the supported way in
     root: Path
     mode: StoreMode
     schema: int | None          # None ⇒ uninitialized (no store.toml yet)
@@ -201,7 +201,13 @@ tolerance.
 
 **Enforcement.** The chokepoint only works if the handle is unavoidable:
 
-- `StoreHandle.__init__` is private; `open_store()` is the sole entrypoint.
+- `StoreHandle.__init__` is private; `open_store()` is the supported entrypoint, and
+  the one every production caller uses. Python privacy is a convention, not a
+  boundary — an in-process caller has at least three routes to a fabricated handle
+  (the module-level `_make`, the importable constructor token, and
+  `dataclasses.replace` on a valid handle). This bullet is about ordinary use, not
+  mechanical unforgeability; the hard boundary is the deferred signature removal
+  below (Codex `P2-SAFETY-SECURITY-013`, round 11).
 - Every store and project API *offers* a `StoreHandle` form, not a raw `root: Path`,
   and every production caller uses it — `memory_dir`, `load_registry`,
   `register_project`, `resolve_project`, `list_raw` / `list_curated` / `write_raw` /

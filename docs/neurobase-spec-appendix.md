@@ -932,7 +932,12 @@ Store-tree and registry access obtains a validated `StoreHandle` from
 `open_store` is the **one** place the D11 schema comparison runs — "refuse to operate
 on a schema newer than the binary" is enforced at the boundary, not per command, so a
 call site that goes through the handle cannot forget it. The handle's constructor is
-private; `open_store` is the sole entry point. Every production caller of the
+private and direct `StoreHandle(...)` construction is rejected; `open_store` is the
+**supported** entry point, not a mechanically unforgeable one — an in-process caller
+has at least three routes to a fabricated handle (the module-level `_make`, the
+importable constructor token, and `dataclasses.replace` on a valid handle), so this
+is a convention that ordinary code follows rather than a boundary it cannot cross.
+Every production caller of the
 store-tree and registry **accessors** (below) was converted onto the handle, and the CI
 guard described under *Enforcement* keeps the ordinary regression out — but the
 raw-`root` signatures still exist (their removal is deferred), so a *new* call site is

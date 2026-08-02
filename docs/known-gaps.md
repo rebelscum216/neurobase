@@ -744,3 +744,155 @@ and is the one case that means the probe is worthless.
 its own model predicts* is reporting something real. Raising or relaxing the
 bound would have buried a correct observation about POSIX write semantics; the
 over-count was the finding, not the noise.
+
+---
+
+### G8 — the "current fact set" claim is unconditional, but currency is only maintained while new captures keep arriving
+
+- **status:** open
+- **severity:** minor — nothing is lost or corrupted, and the fold does correct
+  facts whenever a session touches the same ground again. It is filed because the
+  shipped claim has no "while active" qualifier on it, and because the projects
+  most likely to hold rotted facts — quiet ones — are exactly the ones the fold
+  never revisits.
+- **found:** 2026-07-31 by Claude, asked directly whether a periodic process
+  reviews curated facts for consolidation and accuracy.
+
+**The claim.** Three shipped surfaces state it without qualification:
+
+| Where | Text |
+|---|---|
+| `README.md:7` | "curates them into a small, current fact set" |
+| `README.md:37` | "**A curator that deletes.** … a *small, non-redundant, current* fact set" |
+| `docs/how-it-works.md:43` | "folds raw captures into a **small, current, non-redundant** set" |
+
+`README.md:73` then makes it the **differentiator in a comparison table** —
+Neurobase "Curator **folds & deletes** — small, current, non-redundant" against
+three rivals' "no documented automatic pruning."
+
+**What the code does.** Currency is real but *activity-coupled*: every mechanism
+that could correct a fact is reached only through the arrival of new raw
+captures. Five specifics, each in `curator/engine.py`:
+
+1. **No new captures ⇒ no review at all.** `if not raw_docs:` returns
+   `{"status": "noop"}` (`engine.py:382`) **before any brain call**. A project
+   with zero unconsumed raw is never examined, however old its facts are.
+2. **`--if-stale` does not mean what the name suggests.** `is_stale`
+   (`engine.py:729`) is true when an *unconsumed raw* is older than
+   `curate.stale_hours` (12h). It measures unprocessed **input backlog**, never
+   fact age. Nothing anywhere ages, expires, or decays an *active* fact —
+   `tombstone_grace_days` (14) governs only how long already-deleted facts stay
+   recoverable.
+3. **Pinned facts are permanently exempt.** "NEVER tombstone, supersede, or
+   reword it; carry it forward unchanged" (`engine.py:77`). Correct as a consent
+   rule, but it means user-directed facts have *no* correction path at all.
+4. **The prompt biases against re-examination.** "Include only facts that change;
+   omit unchanged ones" (`engine.py:81`) is a payload-economy rule that also
+   discourages revisiting a fact no capture has raised.
+5. **Nothing grounds a fact against the world.** A fact can only be contradicted
+   by a *later conversation that happened to mention the same thing*. No pass
+   re-reads the repo to ask whether a file, flag, or function a fact names still
+   exists. There is no verification step and no confidence signal.
+
+**Why this is a gap and not a backlog item.** By this file's own Conventions, a
+merely-unbuilt feature belongs in the build-plan backlog. What lands it here is
+the **unqualified claim**: the docs promise a property of the fact *set*, while
+the code delivers a property of the *fold*. The two coincide only under continued
+activity, and nothing states that condition. The consequence is live, not
+theoretical — recall injects the synthesized node at every `SessionStart`, so a
+fact that rotted in a quiet project keeps being injected indefinitely, carrying
+the framing header's authority ("background context that may be stale") but none
+of its own provenance-checking.
+
+**Fix direction.** Two independent halves; the first is required either way.
+
+- **Narrow the claim** (cheap, and honest): say the curator keeps the set current
+  *as sessions continue to touch it*, and stop implying scheduled pruning in the
+  comparison table. Note that even a perfect audit pass could not restore the
+  unconditional reading, because rule 3 exempts pinned facts by design.
+- **Add an audit pass** — e.g. `curate --audit`: fold with **zero** new raws,
+  sending the active set alone and asking only "which of these are still true,
+  mergeable, or superseded." Most of the machinery already exists — the plan step
+  already sends the full active set (`engine.py:428`) and already has a
+  `tombstones` output channel; the `noop` gate at `engine.py:382` is precisely
+  what refuses to run it. Grounding facts against the repo (5) is a genuinely new
+  capability and should be scoped separately.
+
+---
+
+### G9 — `seed --from-claude-memory` derives Claude Code's directory name with the wrong encoding, so it imports nothing and exits 0
+
+- **status:** open
+- **severity:** **major** — the command reports success while doing nothing, and
+  it fails for nearly every project path on this machine. A silent no-op is worse
+  than a crash here: seeding is a one-shot bootstrap a user runs once, sees
+  `{"imported": []}`, and reasonably concludes there was simply nothing to
+  import. `--all-projects` amplifies it — the loop at `cli/__init__.py:420` runs
+  the same miss once per registered project and still exits 0.
+- **found:** 2026-07-31 by a parallel Claude session, on the first real
+  `neurobase enable` against a repo with history (Baysis-dev); reported by
+  mailbox. **Independently reproduced 2026-08-01, and again 2026-08-02 against
+  this very repo** (see Reproduction).
+
+**The claim.** `claude_memory_dir` (`recommender/seed.py:68`) documents the
+encoding as *"`~/.claude/projects/<cwd-with-every-'/'-replaced-by-'-'>/memory/`"*
+and its docstring calls that **"live-verified"** (`seed.py:69`). The
+implementation is one line:
+
+```python
+encoded = project_root.as_posix().replace("/", "-")   # seed.py:75
+```
+
+**What Claude Code actually does.** It collapses **dots and spaces to hyphens
+too**, not just separators. The docstring's stated rule is therefore a strict
+subset of the real encoding, and any path containing a `.` or a ` ` resolves to a
+directory that does not exist.
+
+**Why the miss is silent.** `import_from_claude_memory` (`seed.py:331`) treats a
+missing directory as normal — deliberately, and the reasoning is sound in
+isolation:
+
+```python
+mem_dir = claude_memory_dir(project_root)
+if not mem_dir.is_dir():
+    return SeedResult()          # seed.py:338-339
+```
+
+Most projects genuinely have no auto-memory dir, so this must not raise. But the
+empty `SeedResult` is indistinguishable from "looked in the right place and found
+nothing", and the CLI has no error branch after it: control falls through to
+`typer.echo(json.dumps(...))` at `cli/__init__.py:441` and returns normally.
+**Exit code 0, output `{"imported": [], "unchanged": [], "skipped": []}`.**
+
+**Reproduction (this repo, 2026-08-02).** The machine user is `andrew.smith` and
+the checkout lives under `AI Projects`, so the path carries **both** triggers:
+
+| | |
+|---|---|
+| neurobase looks for | `~/.claude/projects/-Users-andrew.smith-AI Projects-Neurobase-neurobase/memory` — **absent** |
+| Claude Code wrote | `~/.claude/projects/-Users-andrew-smith-AI-Projects-Neurobase-neurobase/memory` — **14 facts** |
+
+The dot in `andrew.smith` and the space in `AI Projects` are each independently
+sufficient. On the reporting machine the same defect hid 20 importable facts.
+
+**Workaround.** Pass the true directory to `--from-dir`, which takes the path
+verbatim and does no encoding. Confirmed working by the reporting session (all 20
+facts imported) — so only the derivation is broken, not the importer.
+
+**Fix direction.**
+
+- **Derive the encoding from Claude Code's actual behaviour** rather than
+  restating a remembered rule, and **test a path holding both a dot and a
+  space** — a fixture with only `/` separators passes against the current code
+  and proves nothing.
+- **Make the empty case name the directory it looked for.** A one-line addition
+  to the `SeedResult` or a stderr note would have turned three separate
+  multi-hour investigations into one glance. The "missing dir is not an error"
+  decision can stand; what cannot stand is being unable to tell *absent* from
+  *misaddressed*.
+- **Retire the "live-verified" claim in the `seed.py:69` docstring.** It is not
+  verified, and it is the reason the encoding was trusted rather than checked.
+  This is the same claim-versus-code class as `G8` above and as
+  `P2-SAFETY-SECURITY-013` in the Phase G review — a shipped sentence asserting a
+  property the code does not have, which survives precisely because it reads like
+  a conclusion someone already checked.

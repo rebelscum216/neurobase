@@ -1660,10 +1660,27 @@ Phase 8 adds the machinery §10 left implicit:
   well-known path already covers (this restates the Invariants section's
   rule above; same workstream B tests cover it here).
 
-**`--from-claude-memory`'s discovery path is live-verified, not guessed.**
-Claude Code's per-project auto-memory directory is
-`~/.claude/projects/<cwd-with-every-'/'-replaced-by-'-'>/memory/` — confirmed
-on disk (`/Users/x/Projects/neurobase` →
+**`--from-claude-memory`'s discovery path is derived from observation, and the
+observation has limits.** Claude Code's per-project auto-memory directory is
+`~/.claude/projects/<encoded-cwd>/memory/`, where the encoding rewrites **`/`,
+`.` and ASCII space** to `-`, character-for-character (an existing `-` is
+preserved, so `/a/-b` → `-a--b`). Derived 2026-08-02 from **33 ground-truth
+pairs** — each session file's own recorded `cwd` compared against the directory
+holding it. Those 33 exercise only those three specials, so the class is
+*observed*, not specified; a path containing some other special character may
+encode in a way this evidence never tested, which is why a missing derived
+directory is **reported in `skipped`** rather than returning an empty result.
+
+⚠️ **This corrects the original rule, which said only `'/'` → `'-'` and called
+itself "live-verified" (G9).** The verification was real but the sample was not
+representative: it used `/Users/x/Projects/neurobase`, which contains neither a
+dot nor a space. On a machine whose username is `andrew.smith`, *every* project
+path resolved to a directory that does not exist, and the importer reported
+success while importing nothing. The lesson is recorded in `docs/known-gaps.md`
+G9: a fixture that cannot distinguish the right rule from the wrong one verifies
+nothing, however real the run was.
+
+Confirmed on disk (`/Users/x/Projects/neurobase` →
 `~/.claude/projects/-Users-x-Projects-neurobase/memory/`, containing exactly
 `MEMORY.md` — the index, skipped — plus topic files with frontmatter
 `name`/`description`/`metadata.type`, precisely the shape §10's existing

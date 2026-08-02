@@ -65,15 +65,48 @@ class SeedResult:
         )
 
 
-def claude_memory_dir(project_root: Path) -> Path:
-    """Claude Code's per-project auto-memory dir (spec §12.3, live-verified):
-    ``~/.claude/projects/<cwd-with-every-'/'-replaced-by-'-'>/memory/``.
+#: Characters Claude Code rewrites to ``-`` when it encodes a project path into
+#: a directory name. Derived empirically (see ``encode_project_path``) — NOT a
+#: documented contract, and deliberately not widened beyond what was observed.
+_PROJECT_DIR_REWRITE_RE = re.compile(r"[/. ]")
 
-    ``as_posix()`` (not ``str()``) so the "every '/' → '-'" rule applies on
-    Windows too, where ``str(WindowsPath(...))`` uses ``\\`` and would leave the
-    separators un-encoded."""
-    encoded = project_root.as_posix().replace("/", "-")
-    return Path.home() / ".claude" / "projects" / encoded / "memory"
+
+def encode_project_path(project_root: Path) -> str:
+    """Encode a project path the way Claude Code names its ``projects/`` dir.
+
+    **The rule, and the evidence for it.** Claude Code rewrites ``/``, ``.`` and
+    ``ASCII space`` to ``-``, character-for-character (the encoded name is the
+    same length as the path). Derived on 2026-08-02 from **33 ground-truth pairs**
+    on this machine, recovered by reading each session file's own recorded ``cwd``
+    and comparing it against the directory holding it. Across those pairs only
+    those three characters were ever rewritten; every other character mapped to
+    itself, and an existing ``-`` was preserved (so ``/a/-b`` encodes to ``-a--b``).
+
+    **What is NOT claimed.** The 33 samples exercise only ``/``, ``.`` and space,
+    because those are the only specials that occurred in the paths available. This
+    is an *observed* character class, not a specification, and Claude Code may
+    rewrite other characters this evidence never exercised. That residual is why
+    ``import_from_claude_memory`` reports the directory it looked for instead of
+    silently returning empty: if this encoding is ever wrong again, the failure is
+    visible in the command's own output rather than indistinguishable from
+    "nothing to import".
+
+    (The previous implementation replaced only ``/`` and its docstring called that
+    "live-verified". It was not: any path containing a dot or a space — on this
+    machine, every path, since the username is ``andrew.smith`` — resolved to a
+    directory that does not exist. See ``docs/known-gaps.md`` G9.)
+
+    ``as_posix()`` (not ``str()``) so the rule applies on Windows too, where
+    ``str(WindowsPath(...))`` uses ``\\`` and would leave separators un-encoded.
+    """
+    return _PROJECT_DIR_REWRITE_RE.sub("-", project_root.as_posix())
+
+
+def claude_memory_dir(project_root: Path) -> Path:
+    """Claude Code's per-project auto-memory dir (spec §12.3):
+    ``~/.claude/projects/<encoded-cwd>/memory/``, where the encoding is
+    ``encode_project_path`` — read its docstring before trusting the rule."""
+    return Path.home() / ".claude" / "projects" / encode_project_path(project_root) / "memory"
 
 
 def _slugify(name: str) -> str:
@@ -332,9 +365,16 @@ def import_from_claude_memory(
     import Claude Code's auto-memory dir for ``project_root`` (a derived
     path, never one the user named directly — see ``claude_memory_dir``). A
     missing auto-memory directory is *not* an error: most projects simply
-    don't have one, so this returns an empty ``SeedResult`` rather than
-    raising."""
+    don't have one, so this returns without raising.
+
+    It does **not** return silently. The absent directory is recorded in
+    ``skipped`` so the caller can tell "looked here, nothing there" apart from
+    "found nothing to do". Because the path is *derived* rather than named by the
+    user, a wrong derivation is otherwise indistinguishable from an empty import —
+    which is exactly how G9 stayed invisible through three separate
+    investigations. Naming the directory costs one entry and makes the next
+    encoding drift self-diagnosing."""
     mem_dir = claude_memory_dir(project_root)
     if not mem_dir.is_dir():
-        return SeedResult()
+        return SeedResult(skipped=[(str(mem_dir), "no claude-memory dir at the derived path")])
     return _import_tree(root, project, mem_dir, "claude-memory", extra_patterns=extra_patterns)

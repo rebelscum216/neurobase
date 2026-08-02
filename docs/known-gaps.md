@@ -744,3 +744,76 @@ and is the one case that means the probe is worthless.
 its own model predicts* is reporting something real. Raising or relaxing the
 bound would have buried a correct observation about POSIX write semantics; the
 over-count was the finding, not the noise.
+
+---
+
+### G8 — the "current fact set" claim is unconditional, but currency is only maintained while new captures keep arriving
+
+- **status:** open
+- **severity:** minor — nothing is lost or corrupted, and the fold does correct
+  facts whenever a session touches the same ground again. It is filed because the
+  shipped claim has no "while active" qualifier on it, and because the projects
+  most likely to hold rotted facts — quiet ones — are exactly the ones the fold
+  never revisits.
+- **found:** 2026-07-31 by Claude, asked directly whether a periodic process
+  reviews curated facts for consolidation and accuracy.
+
+**The claim.** Three shipped surfaces state it without qualification:
+
+| Where | Text |
+|---|---|
+| `README.md:7` | "curates them into a small, current fact set" |
+| `README.md:37` | "**A curator that deletes.** … a *small, non-redundant, current* fact set" |
+| `docs/how-it-works.md:43` | "folds raw captures into a **small, current, non-redundant** set" |
+
+`README.md:73` then makes it the **differentiator in a comparison table** —
+Neurobase "Curator **folds & deletes** — small, current, non-redundant" against
+three rivals' "no documented automatic pruning."
+
+**What the code does.** Currency is real but *activity-coupled*: every mechanism
+that could correct a fact is reached only through the arrival of new raw
+captures. Five specifics, each in `curator/engine.py`:
+
+1. **No new captures ⇒ no review at all.** `if not raw_docs:` returns
+   `{"status": "noop"}` (`engine.py:382`) **before any brain call**. A project
+   with zero unconsumed raw is never examined, however old its facts are.
+2. **`--if-stale` does not mean what the name suggests.** `is_stale`
+   (`engine.py:729`) is true when an *unconsumed raw* is older than
+   `curate.stale_hours` (12h). It measures unprocessed **input backlog**, never
+   fact age. Nothing anywhere ages, expires, or decays an *active* fact —
+   `tombstone_grace_days` (14) governs only how long already-deleted facts stay
+   recoverable.
+3. **Pinned facts are permanently exempt.** "NEVER tombstone, supersede, or
+   reword it; carry it forward unchanged" (`engine.py:77`). Correct as a consent
+   rule, but it means user-directed facts have *no* correction path at all.
+4. **The prompt biases against re-examination.** "Include only facts that change;
+   omit unchanged ones" (`engine.py:81`) is a payload-economy rule that also
+   discourages revisiting a fact no capture has raised.
+5. **Nothing grounds a fact against the world.** A fact can only be contradicted
+   by a *later conversation that happened to mention the same thing*. No pass
+   re-reads the repo to ask whether a file, flag, or function a fact names still
+   exists. There is no verification step and no confidence signal.
+
+**Why this is a gap and not a backlog item.** By this file's own Conventions, a
+merely-unbuilt feature belongs in the build-plan backlog. What lands it here is
+the **unqualified claim**: the docs promise a property of the fact *set*, while
+the code delivers a property of the *fold*. The two coincide only under continued
+activity, and nothing states that condition. The consequence is live, not
+theoretical — recall injects the synthesized node at every `SessionStart`, so a
+fact that rotted in a quiet project keeps being injected indefinitely, carrying
+the framing header's authority ("background context that may be stale") but none
+of its own provenance-checking.
+
+**Fix direction.** Two independent halves; the first is required either way.
+
+- **Narrow the claim** (cheap, and honest): say the curator keeps the set current
+  *as sessions continue to touch it*, and stop implying scheduled pruning in the
+  comparison table. Note that even a perfect audit pass could not restore the
+  unconditional reading, because rule 3 exempts pinned facts by design.
+- **Add an audit pass** — e.g. `curate --audit`: fold with **zero** new raws,
+  sending the active set alone and asking only "which of these are still true,
+  mergeable, or superseded." Most of the machinery already exists — the plan step
+  already sends the full active set (`engine.py:428`) and already has a
+  `tombstones` output channel; the `noop` gate at `engine.py:382` is precisely
+  what refuses to run it. Grounding facts against the repo (5) is a genuinely new
+  capability and should be scoped separately.

@@ -195,12 +195,18 @@ non-trivial changes. Before every push, run the full local gate — not just
 the tests:
 
 ```bash
-make ci                       # ruff check + ruff format --check + mypy + pytest (w/ coverage floor)
+make ci                       # ruff + format + mypy + store-chokepoint + pytest (w/ coverage floor) + renderer
 # or, without make (e.g. on Windows):
 uv run python scripts/ci.py
 ```
 
-`scripts/ci.py` is the single source of truth for those four checks, and CI runs
+The gate needs **`uv` and Node 22+** on `PATH` — Node runs `tests/js/`, the
+behaviour suite for the graph renderer's client-side JavaScript, which Python
+cannot execute. There is no npm install: `node --test` and two files. The gate
+**fails** (exit 127) rather than skipping when either tool is missing, because a
+check that quietly skips itself is indistinguishable from one that passes.
+
+`scripts/ci.py` is the single source of truth for those six checks, and CI runs
 the *same* script on every OS in the matrix, so local and CI can't drift. To have
 Git block a red push automatically, opt into the committed pre-push hook once per
 clone:

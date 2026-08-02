@@ -606,3 +606,70 @@ def test_scribe_without_config_stays_opt_in(
 
     assert scribe.scribe(root, transcript_path=transcript, cwd=str(repo), reason="x") is None
     assert not (root / "store.toml").exists()
+
+
+# --- the hook seam under a hostile registry (Codex P2-SAFETY-SECURITY-010) ---
+#
+# This seam is the one every scribe and recall path routes project resolution
+# through, so it is where an uncontained registry would do the most damage: an
+# external selector choosing which namespace a hook CAPTURES INTO. Round 5 found
+# that `resolve_project` still honoured the external selection after round 4's fix.
+
+
+def _point_registry_outside(root: Path, tmp_path: Path, body: str) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir(exist_ok=True)
+    external = outside / "registry.toml"
+    external.write_text(body, encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    link = root / "registry.toml"
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to(external)
+    return external
+
+
+def test_the_hook_seam_ignores_an_external_registrys_selection(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """An already-registered repo, selected only by an out-of-store registry, must
+    read as untracked — the hook then no-ops exactly as for any unregistered repo,
+    rather than capturing into an attacker-chosen namespace."""
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    _point_registry_outside(
+        root, tmp_path, f'[projects.externally-selected]\nroots = ["{repo.resolve()}"]\n'
+    )
+
+    # auto_enable off: the ONLY way this repo could resolve is the external registry.
+    assert resolve_or_auto_enable(root, repo, auto_enable_roots=[], denylist=[]) is None
+
+
+def test_auto_enable_fails_closed_rather_than_rewriting_an_external_registry(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """A qualifying repo would normally be registered here. With an out-of-store
+    registry the write path must refuse — and refuse *as a hook does*, by returning
+    ``None``, never by raising into scribe startup (AGENTS: hooks fail safe)."""
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+    external = _point_registry_outside(root, tmp_path, '[projects.other]\nroots = ["/tmp/other"]\n')
+    before = external.read_text(encoding="utf-8")
+
+    assert (
+        resolve_or_auto_enable(root, repo, auto_enable_roots=[str(workspace)], denylist=[]) is None
+    )
+    assert external.read_text(encoding="utf-8") == before, "the external registry was rewritten"
+    assert "app" not in external.read_text(encoding="utf-8")
+
+
+def test_the_hook_seam_still_auto_enables_under_an_ordinary_registry(
+    tmp_path: Path, workspace: Path
+) -> None:
+    """Positive control for the two above: the guard must not break auto-enable."""
+    root = tmp_path / "store"
+    repo = _make_repo(workspace / "app")
+
+    slug = resolve_or_auto_enable(root, repo, auto_enable_roots=[str(workspace)], denylist=[])
+    assert slug == "app"
+    assert projects.load_registry(root)["app"] == [str(repo.resolve())]

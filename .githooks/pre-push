@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 # Opt-in pre-push guard. Runs the full CI gate (scripts/ci.py) before every push
 # so a red build can't reach the remote — the same gate CI runs, so if this
-# passes, CI's ruff/format/mypy/pytest steps will too.
+# passes, CI's ruff/format/mypy/store-chokepoint/pytest/renderer steps will too.
+# Needs `uv` and Node 22+ on PATH; the gate exits 127 if either is missing.
 #
 # Enable it once per clone (it lives in the repo, but Git won't use it until you
 # point core.hooksPath at it):

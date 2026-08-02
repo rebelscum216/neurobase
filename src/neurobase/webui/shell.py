@@ -25,7 +25,7 @@ from neurobase.recommender import proposals
 # key · label · glyph · href · enabled — order is the rail order (Graph is the
 # home surface). Flip ``enabled`` to True as each surface's route is added.
 _NAV: list[tuple[str, str, str, str, bool]] = [
-    ("graph", "Graph", "◉", "/graph", False),
+    ("graph", "Graph", "◉", "/graph", True),
     ("sessions", "Sessions", "◵", "/sessions", True),
     ("memory", "Memory", "◈", "/memory", True),
     ("suggestions", "Suggestions", "△", "/suggestions", True),
@@ -62,8 +62,9 @@ def _counts(root: Path) -> dict[str, int]:
 
 
 def _is_active(path: str, href: str) -> bool:
-    if href == "/suggestions" and path == "/":
-        return True  # home currently redirects to Suggestions (until Graph lands)
+    # No special case for "/": it returns a RedirectResponse and never renders a
+    # template, so this never runs with that path. The old branch here was
+    # unreachable and had been hand-maintained twice without ever executing.
     return path == href or path.startswith(href + "/")
 
 

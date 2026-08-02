@@ -34,8 +34,12 @@ This file exists because nothing else in `docs/` was the right home for it:
 - **status:** fixed (ADR-0015 — the `StoreHandle` chokepoint; migration steps 1–5 +
   4d, `docs/reviews/2026-07-2*-*handle*.md`, `*-lifecycle-guards.md`). Every command that
   touches **schema-versioned store content** (`memory/`, `registry.toml`) now runs the
-  D11 guard: the store-tree/registry **accessor** class is closed and CI-enforced by
-  `scripts/check_store_chokepoint.py`, and the lifecycle commands open the appropriate
+  D11 guard: every production caller of the store-tree/registry **accessors** was moved
+  onto `open_store(...)` + handle methods, and `scripts/check_store_chokepoint.py` is a
+  conservative regression check that keeps the *ordinary* reintroduction out (it
+  enumerates spellings and has recorded misses — it is not exhaustive enforcement; the
+  unavoidability step, removing the raw-`Path` signatures, stays deferred — see
+  *Resolution*), and the lifecycle commands open the appropriate
   handle command-side (guided `init` = `WRITE`; `init --agent` = `READ`; `uninstall
   --purge-store` = `PURGE`). The config-backup facility is a schema-independent
   maintenance exception (opaque config copies; its non-purge-uninstall/`--restore-backup`
@@ -146,21 +150,39 @@ opens a read-only `DOCTOR` handle instead of re-implementing the comparison (D26
 `uninstall --purge-store` opens a `PURGE` handle before deleting (D25 — wired in 4d,
 which also made `init --agent` open a `READ` handle before installing hooks). The
 pre-guard registry-read
-pattern can no longer compile — `resolve_project`/`load_registry` production callers
-go through the handle. The step-5 guard forbids the raw-`root` store/registry
-**accessors** and the `store.toml`/`registry.toml` literals outside the three
+pattern is gone from production — `resolve_project`/`load_registry` callers all go
+through the handle (re-introducing one still *compiles*, since the raw-`root`
+signatures remain; that removal is the deferred step below). The step-5 guard fails
+the gate on the **enumerated spellings** of the raw-`root` store/registry
+**accessors** and on the `store.toml`/`registry.toml` literals outside the three
 implementation modules. Three documented raw-`root` residuals remain outside that
 accessor coverage (none an unguarded write to schema-versioned content — spec §10):
-`doctor`'s two corrupt-`store.toml` reads (`resolve_project` + `store_toml_path` in
-`cli/diagnostics.py`, `registry.toml`/label reads independent of the store-schema guard,
-allow-listed by (file, name)); the recommender's `proposals`/`ledger` path-builders
+`doctor`'s three corrupt-`store.toml` reads (`resolve_project` + `registry_is_contained`
++ `store_toml_path` in `cli/diagnostics.py`, `registry.toml`/label reads independent of
+the store-schema guard, allow-listed by (file, name); the containment predicate is there
+so a corrupt `store.toml` cannot mask an out-of-store registry on the branch that has no
+handle to ask); the recommender's `proposals`/`ledger` path-builders
 (`corpus.proposals_dir`/`proposal_path`/`ledger_path`), command-guarded; and the
 config-backup facility (`backups.backup_files`/`restore_backup`), a schema-independent
 maintenance exception (opaque config-file copies to/from `<root>/backups/`, safe on any
 schema). The literal removal of the raw-`Path` `store.py`/`projects.py` signatures
 (they remain the low-level implementation the handle methods delegate to, and the test
-suite's store-setup helpers) is deferred; the CI guard is what makes production
-accessor-level omission impossible in the meantime.
+suite's store-setup helpers) is deferred. **That deferral is where the residual risk
+lives, and the CI guard does not remove it** (Codex `P2-SAFETY-SECURITY-013`, PR #11
+rounds 5–9): the guard is a *conservative, enumerated syntactic regression guard*, not a
+proof of impossibility. Three review rounds each found one more lint-clean spelling that
+reached a listed accessor while the check printed OK — a public path helper, a reassigned
+module alias, then tuple unpacking — and a fourth found that the *fix* for a false
+positive had introduced three fresh misses of its own. Recorded static misses: tuple
+unpacking, a class-held alias, a named-expression alias, and an alias bound before its
+import in traversal order. Recorded false positives: rebinding an alias to a non-module
+later in a file, and a **parameter** — of a function, async function, or lambda — that
+merely reuses an alias name (the round-7 special case for that was removed in round 8,
+because un-binding across a whole `FunctionDef` AST suppressed decorators, defaults,
+eager annotations and a nested `global`, which resolve outside the parameter's scope).
+So the guard stops the **ordinary** reintroduction — a new module reaching for a familiar
+accessor — and the signature removal is what would make omission actually impossible.
+See spec §10 and ADR-0015 for the same limit in the same words.
 
 **Residual gaps — CLOSED by ADR-0015 step 4d** (`docs/reviews/2026-07-23-lifecycle-guards.md`).
 The step-5 review (Codex, round 2) found two lifecycle paths the accessor conversion

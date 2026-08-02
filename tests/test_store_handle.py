@@ -1,8 +1,14 @@
-"""ADR-0015 store chokepoint: ``open_store()`` is the single validated entry to
+"""ADR-0015 store chokepoint: ``open_store()`` is the supported validated entry to
 the store, and the D11 schema guard (spec §10) lives there. These tests pin the
-per-mode behavior and the "an unvalidated store is unrepresentable" property.
+per-mode behavior and the rejection of direct ``StoreHandle(...)`` construction.
 
-Step 1 has no callers — these tests exercise the module directly.
+They do **not** pin "an unvalidated store is unrepresentable" — that claim was
+withdrawn in round 11 of the Codex review (`P2-SAFETY-SECURITY-013`) once three
+in-process routes to a fabricated handle were demonstrated; see
+``_CONSTRUCTOR_TOKEN`` in ``core/store_handle.py`` for the enumeration and why
+closing them is out of scope here.
+
+These tests exercise the module directly rather than through a caller.
 """
 
 from __future__ import annotations
@@ -186,10 +192,16 @@ def test_profile_is_carried_through(root: Path) -> None:
     assert handle.profile == "open-source"
 
 
-# --- enforcement: an unvalidated store is unrepresentable ------------------
+# --- construction: filling in the dataclass by hand is refused --------------
 
 
 def test_direct_construction_is_refused(root: Path) -> None:
+    """Bounded deliberately (Codex `P2-SAFETY-SECURITY-013`, round 11): this proves
+    only that ``StoreHandle(...)`` without the constructor token raises, i.e. that no
+    one obtains a handle by accident. It is **not** evidence that an unchecked handle
+    cannot be built — ``_make``, the importable token, and ``dataclasses.replace``
+    each still get you one. Naming it after the stronger property is what let that
+    claim survive in five documents."""
     with pytest.raises(TypeError):
         StoreHandle(root=root, mode=StoreMode.READ, schema=None, profile=None)
 
@@ -349,3 +361,70 @@ def test_method_registry_register_and_resolve(
     assert handle.load_registry() == projects.load_registry(root)
     assert "myrepo" in handle.load_registry()
     assert handle.resolve_project(repo) == "myrepo"
+
+
+# --- registry containment at the accessor boundary (Codex P2-SAFETY-SECURITY-010) ---
+
+
+def _external_registry(root: Path, tmp_path: Path, body: str) -> Path:
+    """Point this store's ``registry.toml`` at a valid registry outside it."""
+    outside = tmp_path / "outside"
+    outside.mkdir(exist_ok=True)
+    external = outside / "registry.toml"
+    external.write_text(body, encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    link = root / "registry.toml"
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to(external)
+    return external
+
+
+def test_all_three_handle_registry_accessors_refuse_an_external_registry(
+    root: Path, tmp_path: Path
+) -> None:
+    """Round 4 guarded ``load_registry`` alone; round 5 proved the other two walked
+    past it. All three are asserted together here so a future fix cannot close one
+    and leave a sibling open — the exact shape of this finding."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    external = _external_registry(
+        root, tmp_path, f'[projects.externally-selected]\nroots = ["{victim}"]\n'
+    )
+    before = external.read_text(encoding="utf-8")
+    handle = open_store(root, StoreMode.WRITE)
+
+    assert handle.load_registry() == {}
+    assert handle.resolve_project(victim) is None
+    with pytest.raises(projects.RegistryNotContainedError):
+        handle.register_project(victim)
+
+    assert external.read_text(encoding="utf-8") == before, "the external file was rewritten"
+
+
+def test_handle_registry_is_contained_separates_hostile_from_absent(
+    root: Path, tmp_path: Path
+) -> None:
+    """Both read as empty; only this predicate tells them apart, which is what lets
+    doctor report one as unhealthy and the other as simply not enabled."""
+    absent = open_store(root, StoreMode.WRITE)
+    assert absent.load_registry() == {}
+    assert absent.registry_is_contained() is True
+
+    _external_registry(root, tmp_path, '[projects.injected]\nroots = ["/tmp/injected"]\n')
+    hostile = open_store(root, StoreMode.WRITE)
+    assert hostile.load_registry() == {}
+    assert hostile.registry_is_contained() is False
+
+
+def test_an_ordinary_registry_still_works_through_the_handle(root: Path, tmp_path: Path) -> None:
+    """Positive control: the guard must not cost a legitimate store its registry."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    handle = open_store(root, StoreMode.WRITE)
+
+    slug = handle.register_project(repo, slug="repo")
+    assert slug == "repo"
+    assert handle.registry_is_contained() is True
+    assert handle.load_registry() == {"repo": [str(repo)]}
+    assert handle.resolve_project(repo) == "repo"

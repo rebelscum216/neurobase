@@ -469,3 +469,54 @@ def test_recall_prompt_reports_unsupported_store_without_erroring(root: Path) ->
     result = anyio.run(_server(root, expose=True).get_prompt, "recall", {})
 
     assert "unsupported" in result.messages[0].content.text.lower()
+
+
+# --- MCP current-project resolution under a hostile registry ----------------
+#
+# Codex P2-SAFETY-SECURITY-010 (round 5). The server resolves the process's cwd to
+# a project ONCE at startup and every implicit write targets it, so an external
+# registry choosing that slug would silently redirect saves into a namespace the
+# operator never registered. `handle.resolve_project` is the seam; this pins the
+# behaviour at the MCP boundary rather than trusting the layer below.
+
+
+def _external_registry(root: Path, tmp_path: Path, body: str) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir(exist_ok=True)
+    external = outside / "registry.toml"
+    external.write_text(body, encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    link = root / "registry.toml"
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to(external)
+    return external
+
+
+def test_mcp_does_not_resolve_a_current_project_from_an_external_registry(
+    root: Path, tmp_path: Path
+) -> None:
+    """The cwd IS registered — but only by a registry outside the store. The server
+    must start, and must refuse the implicit save rather than write into the
+    attacker-selected namespace."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _external_registry(root, tmp_path, f'[projects.externally-selected]\nroots = ["{repo}"]\n')
+
+    srv = _server(root, cwd=repo)
+
+    with pytest.raises(Exception, match="no valid project resolved"):
+        _call(srv, "memory_remember", fact="should not land anywhere")
+    assert not (root / "projects" / "externally-selected").exists()
+
+
+def test_mcp_still_resolves_a_current_project_from_an_ordinary_registry(
+    root: Path, tmp_path: Path
+) -> None:
+    """Positive control: the guard must not cost a legitimate implicit save."""
+    _register(root, tmp_path, "alpha")
+
+    srv = _server(root, cwd=tmp_path / "alpha")
+    result = _call(srv, "memory_remember", fact="a real fact worth keeping")
+
+    assert result["project"] == "alpha"

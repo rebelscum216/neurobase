@@ -32,7 +32,7 @@ from neurobase.core.store_handle import StoreMode, open_store
 from neurobase.recommender import corpus as recommend_corpus
 from neurobase.recommender import install, proposals
 from neurobase.recommender import metrics as recommend_metrics
-from neurobase.webui import skills_scan
+from neurobase.webui import graph_view, skills_scan
 
 # Statuses `edit`/`accept` must never operate on — re-checked here so a stale link
 # gives a clean 409 at the request boundary. The authoritative guard now lives
@@ -41,10 +41,15 @@ from neurobase.webui import skills_scan
 _EDIT_BLOCKED_STATUSES = proposals.EDIT_BLOCKED_STATUSES
 
 
+def graph_routes() -> list[Route]:
+    """The graph home surface (app-shell plan, Phase G)."""
+    return [Route("/graph", _graph_home, methods=["GET"])]
+
+
 def suggestions_routes() -> list[Route]:
     """The full Suggestions route table (plan's "Routes" section)."""
     return [
-        Route("/", _redirect_to_suggestions, methods=["GET"]),
+        Route("/", _redirect_home, methods=["GET"]),
         Route("/suggestions", _list_suggestions, methods=["GET"]),
         Route("/suggestions/{slug}", _suggestion_detail, methods=["GET"]),
         Route("/suggestions/{slug}/accept", _accept_view, methods=["GET", "POST"]),
@@ -84,7 +89,13 @@ def skills_routes() -> list[Route]:
 
 def all_routes() -> list[Route]:
     """Every surface's routes, in one table for the Starlette app (``app.py``)."""
-    return [*suggestions_routes(), *sessions_routes(), *memory_routes(), *skills_routes()]
+    return [
+        *graph_routes(),
+        *suggestions_routes(),
+        *sessions_routes(),
+        *memory_routes(),
+        *skills_routes(),
+    ]
 
 
 # --- small shared helpers ---------------------------------------------------
@@ -168,8 +179,62 @@ def _error_response(request: Request, status_code: int, message: str) -> Respons
     )
 
 
-async def _redirect_to_suggestions(request: Request) -> RedirectResponse:
-    return RedirectResponse("/suggestions")
+async def _redirect_home(request: Request) -> RedirectResponse:
+    """``/`` is the Graph home surface (app-shell plan, Phase G). It redirected to
+    ``/suggestions`` for as long as ``/graph`` did not exist."""
+    return RedirectResponse("/graph")
+
+
+# --- GET /graph (home surface) ----------------------------------------------
+
+
+def _graph_home(request: Request) -> Response:
+    """Server-rendered graph page. The payload is embedded in the document — no
+    fetch endpoint in v1, so there is no new JSON surface to CSRF-protect or
+    authorize; a page reload is the refresh (plan, Phase G).
+
+    Deliberately a plain ``def``: Starlette runs sync handlers in a threadpool and
+    ``async def`` ones inline on the event loop. Composition here is entirely
+    blocking filesystem I/O measured in hundreds of milliseconds, and this is the
+    route ``/`` now redirects to — as a coroutine it would stall every other
+    request in the process for the whole of that.
+
+    Composition is fail-soft the way the rail is: this is the app's *home*, and a
+    single unreadable file should degrade a node, not blank the page. The catch
+    is deliberately broad — ``shell_context`` uses a bare ``except Exception``
+    for the same reason, and a hand-edited ``provenance: 5`` raises ``TypeError``
+    deep in ``core/graph.py``, which a narrow ``(OSError, ValueError)`` would let
+    500 the front door while every other surface still renders.
+    ``UnsupportedSchemaError`` stays loud, and is re-raised **explicitly** rather
+    than relying on where it is thrown. It was true that only the
+    request-boundary ``open_store`` above could raise it — until accepted-proposal
+    liveness was added: ``proposals.artifact_state`` reopens the store while
+    re-deriving candidate targets, so a D11 refusal can now arrive from *inside*
+    composition, and the broad guard would quietly turn spec §10/§14's "refuse to
+    operate" into a degraded 200 (Codex P1-SAFETY-SECURITY-007). Position is not a
+    guarantee; the ``raise`` is.
+    """
+    root = _root(request)
+    handle = open_store(root, StoreMode.READ)
+    # `?orphans=1` opts into the unattributed captures the default view hides.
+    orphans = request.query_params.get("orphans") == "1"
+    degraded = False
+    try:
+        payload = graph_view.graph_payload(handle, root, include_orphan_sessions=orphans)
+    except store.UnsupportedSchemaError:
+        raise  # D11 → unsupported_schema_handler's typed 409, never a soft page
+    except Exception:  # noqa: BLE001 - the home page must never 500 on bad data
+        payload = {"nodes": [], "edges": [], "counts": {}, "projects": []}
+        degraded = True
+    context = {
+        "payload": payload,
+        "counts": payload["counts"],
+        "orphans": orphans,
+        # An empty graph because the store *could not be read* must not look
+        # identical to an empty graph because nothing has been captured yet.
+        "degraded": degraded,
+    }
+    return _templates(request).TemplateResponse(request, "graph.html", context)
 
 
 # --- GET /suggestions --------------------------------------------------------

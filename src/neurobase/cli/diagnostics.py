@@ -228,10 +228,11 @@ def _agent_check(binary: str, which: Callable[[str], str | None]) -> Check:
 
 def _store_checks(root: Path, cwd: Path) -> list[Check]:
     checks: list[Check] = []
-    # Sanctioned raw-root call #1 of doctor's two (the other is resolve_project in
-    # _project_check): the store.toml path is the report *label*, needed even when the
-    # store is corrupt and no handle can open. Allow-listed by (file, name) in the
-    # step-5 chokepoint guard and named in spec §10; see _project_check's docstring.
+    # Sanctioned raw-root call #1 of doctor's THREE (the other two are resolve_project
+    # and registry_is_contained in _project_check): the store.toml path is the report
+    # *label*, needed even when the store is corrupt and no handle can open. Allow-listed
+    # by (file, name) in the step-5 chokepoint guard and named in spec §10; see
+    # _project_check's docstring.
     meta = store.store_toml_path(root)
     # D26: doctor inspects store health through a DOCTOR handle. DOCTOR never
     # writes store.toml and — unlike READ/WRITE — carries a schema *newer* than we
@@ -280,14 +281,38 @@ def _project_check(handle: StoreHandle | None, root: Path, cwd: Path) -> Check:
     (no handle), fall back to the registry directly so a broken store.toml does
     not also mask an otherwise-healthy project check.
 
-    The no-handle branch is one of doctor's **two** sanctioned raw-root reads (the
-    other is ``store.store_toml_path`` in ``_store_checks``), allow-listed in the
-    step-5 chokepoint guard (``scripts/check_store_chokepoint.py``) by (file, name).
-    It is legitimate here because ``registry.toml`` is a separate concern from the
-    store-schema chokepoint (ADR-0015 registry carve-out, F1), so resolving a project
-    without a validated handle must still work when ``store.toml`` is corrupt. The
-    guard enforces the store/registry **accessor + metadata-literal** invariant in
-    ``src/`` (spec §10); it is not an exhaustive raw-root detector."""
+    The no-handle branch holds doctor's sanctioned raw-root registry reads (the
+    other sanctioned read is ``store.store_toml_path`` in ``_store_checks``),
+    allow-listed in the step-5 chokepoint guard
+    (``scripts/check_store_chokepoint.py``) by (file, name). It is legitimate here
+    because ``registry.toml`` is a separate concern from the store-schema chokepoint
+    (ADR-0015 registry carve-out, F1), so resolving a project without a validated
+    handle must still work when ``store.toml`` is corrupt. The guard checks the
+    enumerated store/registry **accessor** spellings + metadata literals in ``src/``
+    (spec §10); it is not an exhaustive raw-root detector.
+
+    **Containment is checked before resolution** (Codex P2-SAFETY-SECURITY-010,
+    round 5). An out-of-store ``registry.toml`` selects nothing, so resolution
+    returns ``None`` — indistinguishable, here, from an ordinary unregistered repo.
+    Reporting that as "not enabled" would send the operator to run ``neurobase
+    enable``, which fails closed against the same registry, while the real problem
+    (a selector pointing outside the store) went unreported. Empty is the correct
+    *operational* posture; it must not read as healthy, and this check is where that
+    distinction belongs. The fallback branch asks the same question without a
+    handle, so a corrupt ``store.toml`` cannot mask a hostile registry either."""
+    contained = (
+        handle.registry_is_contained()
+        if handle is not None
+        # Sanctioned raw-root fallback — see the docstring above and the guard's ALLOW.
+        else projects.registry_is_contained(root)
+    )
+    if not contained:
+        return _check(
+            "project",
+            "error",
+            f"the registry for {root} resolves outside the store — it selects no projects",
+            "Remove or replace the registry symlink so it points inside the store.",
+        )
     try:
         slug = (
             handle.resolve_project(cwd)

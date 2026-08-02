@@ -270,3 +270,208 @@ def test_resolve_project_longest_prefix_wins(root: Path, tmp_path: Path) -> None
 
 def test_git_common_root_none_for_non_git_dir(tmp_path: Path) -> None:
     assert projects.git_common_root(tmp_path) is None
+
+
+# --- registry containment: the SELECTOR channel (Codex P2-SAFETY-SECURITY-010) ---
+#
+# The registry is not another document — it decides which project namespaces get
+# walked at all. Round 4 guarded ``StoreHandle.load_registry`` only; round 5's probe
+# walked past it through ``resolve_project`` → the low-level ``load_registry``, still
+# resolving an attacker-selected slug on the capture, recall, status, curate, doctor
+# and MCP paths, and ``register_project`` carried an external ``injected`` entry into
+# the mapping handed to the writer. The guard therefore lives at this module's
+# accessor boundary, which every registry read in the process reaches.
+
+
+def _external_registry(root: Path, tmp_path: Path, body: str) -> Path:
+    """A store whose ``registry.toml`` is a symlink to a valid registry OUTSIDE it.
+
+    Returns the external file. It is deliberately *valid* TOML naming a *real* slug:
+    a fixture the parser rejects would be dropped as malformed before containment was
+    ever consulted, and would pass with the guard deleted — the vacuity that bit this
+    review loop twice already."""
+    outside = tmp_path / "outside"
+    outside.mkdir(exist_ok=True)
+    external = outside / "registry.toml"
+    external.write_text(body, encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    link = root / "registry.toml"
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to(external)
+    return external
+
+
+def test_registry_is_contained_for_an_ordinary_store(root: Path, tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    projects.register_project(root, plain, slug="plain")
+    assert projects.registry_is_contained(root) is True
+
+
+def test_registry_is_contained_when_absent(root: Path) -> None:
+    """Absent is not hostile: a missing registry resolves to its own would-be
+    location, is contained, and reads as empty one layer down."""
+    root.mkdir(parents=True)
+    assert projects.registry_is_contained(root) is True
+    assert projects.load_registry(root) == {}
+
+
+def test_registry_is_contained_through_a_symlinked_store_root(root: Path, tmp_path: Path) -> None:
+    """The failure mode of guarding a path built from ``root`` itself is refusing a
+    whole LEGITIMATE store (macOS ``/var`` → ``/private/var``). Both sides resolve."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    projects.register_project(root, plain, slug="plain")
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(root, target_is_directory=True)
+
+    assert projects.registry_is_contained(linked_root) is True
+    assert projects.load_registry(linked_root) == {"plain": [str(plain)]}
+
+
+def test_registry_is_contained_through_a_symlinked_PARENT(root: Path, tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    projects.register_project(root, plain, slug="plain")
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(root.parent, target_is_directory=True)
+
+    via_parent = linked_parent / root.name
+    assert projects.registry_is_contained(via_parent) is True
+    assert projects.load_registry(via_parent) == {"plain": [str(plain)]}
+
+
+def test_registry_is_contained_for_a_relative_root(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    projects.register_project(root, plain, slug="plain")
+    monkeypatch.chdir(tmp_path)
+
+    relative = Path(root.name)
+    assert projects.registry_is_contained(relative) is True
+    assert projects.load_registry(relative) == {"plain": [str(plain)]}
+
+
+def test_an_external_registry_is_not_contained(root: Path, tmp_path: Path) -> None:
+    _external_registry(root, tmp_path, '[projects.injected]\nroots = ["/tmp/injected"]\n')
+    assert projects.registry_is_contained(root) is False
+
+
+def test_load_registry_reads_an_external_registry_as_empty(root: Path, tmp_path: Path) -> None:
+    external = _external_registry(
+        root, tmp_path, '[projects.injected]\nroots = ["/tmp/injected"]\n'
+    )
+    # The fixture really is a valid registry: read from its own directory it parses,
+    # so this test cannot pass because the file was malformed.
+    assert projects.load_registry(external.parent) == {"injected": ["/tmp/injected"]}
+    assert projects.load_registry(root) == {}
+
+
+def test_resolve_project_refuses_an_external_registrys_selection(
+    root: Path, tmp_path: Path
+) -> None:
+    """**The round-5 bypass, verbatim.** ``handle.load_registry()`` returned ``{}``
+    while ``resolve_project`` still resolved the attacker-selected slug, because it
+    called the low-level reader directly."""
+    target = tmp_path / "victim"
+    target.mkdir()
+    _external_registry(root, tmp_path, f'[projects.externally-selected]\nroots = ["{target}"]\n')
+
+    assert projects.resolve_project(root, target) is None
+
+
+def test_register_project_fails_closed_on_an_external_registry(root: Path, tmp_path: Path) -> None:
+    """Read-for-rewrite must refuse *before* reading: fail-soft-to-empty here would
+    both import the external entries and rewrite a file outside the store."""
+    external = _external_registry(
+        root, tmp_path, '[projects.injected]\nroots = ["/tmp/injected"]\n'
+    )
+    before = external.read_text(encoding="utf-8")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    with pytest.raises(projects.RegistryNotContainedError):
+        projects.register_project(root, plain, slug="plain")
+
+    assert external.read_text(encoding="utf-8") == before, "the external file was rewritten"
+    assert "plain" not in before
+
+
+def test_write_registry_refuses_an_external_target(root: Path, tmp_path: Path) -> None:
+    """The writer guards independently of the reader. ``register_project`` already
+    fails one step earlier, so this covers a future second writer that would otherwise
+    have to remember the rule."""
+    external = _external_registry(root, tmp_path, '[projects.a]\nroots = ["/tmp/a"]\n')
+    before = external.read_text(encoding="utf-8")
+
+    with pytest.raises(projects.RegistryNotContainedError):
+        projects._write_registry(root, {"attacker": ["/tmp/attacker"]})
+
+    assert external.read_text(encoding="utf-8") == before
+
+
+def test_a_registry_symlink_loop_never_raises_and_selects_nothing(root: Path) -> None:
+    """A self-referential ``registry.toml``.
+
+    The *containment verdict* is deliberately not asserted, because it is
+    Python-version-dependent in exactly the way ``StoreHandle.contains`` already
+    documents (``test_contains_never_raises_on_a_symlink_loop``): on ≤3.12
+    ``Path.resolve()`` raises and the ``except`` branch returns False; on 3.13 it
+    returns the loop path itself, which is under the root, so the verdict is True.
+    Pinning either answer would make this test pass on one leg of the matrix and
+    fail on the other — the py3.13-only failure this project has already been bitten
+    by twice.
+
+    What must hold on every version is what a caller can actually observe: no
+    exception escapes into a read path (spec §13 fail-soft), and the loop selects
+    nothing. On 3.13 that second guarantee comes from one layer down — ``exists()``
+    is False for a loop, so the file reads as absent."""
+    root.mkdir(parents=True)
+    link = root / "registry.toml"
+    link.symlink_to(link)
+
+    assert isinstance(projects.registry_is_contained(root), bool)
+    assert projects.load_registry(root) == {}
+    assert projects.resolve_project(root, root) is None
+
+
+def test_strict_read_refuses_an_external_registry_directly(root: Path, tmp_path: Path) -> None:
+    """The read-for-rewrite guard, asserted at its own layer.
+
+    Found by mutation: deleting this guard left every other test green, because
+    ``register_project``'s *writer* refuses the same target a moment later and
+    raises the same error. The observable outcome was identical while the
+    dangerous behaviour — reading an external registry and importing its entries
+    into the mapping handed to the writer — had come back. A guard whose only
+    witness is a sibling guard is not tested."""
+    _external_registry(root, tmp_path, '[projects.injected]\nroots = ["/tmp/injected"]\n')
+    with pytest.raises(projects.RegistryNotContainedError):
+        projects._read_registry(root)
+
+
+def test_containment_is_checked_BEFORE_the_registry_is_read(root: Path, tmp_path: Path) -> None:
+    """Ordering, made observable.
+
+    The external registry here is **unparseable**. If containment is checked first
+    the error is ``RegistryNotContainedError``; if the file is read first, TOML
+    parsing fails and the error is ``TOMLDecodeError``. So the exception *type*
+    witnesses the order — which is the whole requirement ("fail closed before
+    reading or rewriting"), and is otherwise invisible because neither path
+    produces an observable write."""
+    _external_registry(root, tmp_path, "this is not valid TOML {{{\n")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    with pytest.raises(projects.RegistryNotContainedError):
+        projects.register_project(root, plain, slug="plain")
+
+
+# (A third test asserting "external entries are never imported" was written and then
+# DELETED: it unlinked the symlink before registering, so it exercised ordinary
+# registration and passed with every guard removed. The import is not observable from
+# outside — no write survives either way — so the ordering test above, which witnesses
+# it through the exception type, is the real assertion. A test that cannot fail is
+# worse than no test, because it reads like coverage.)

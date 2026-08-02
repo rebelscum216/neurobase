@@ -32,11 +32,24 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: true
 
+      # `templates/graph.html` ships ~700 lines of client logic Python cannot
+      # execute. `tests/js/` drives the real script with node's built-in test
+      # runner — no npm install, no dependencies, no node_modules, so this step is a
+      # runtime and nothing else. It is REQUIRED, not best-effort: scripts/ci.py
+      # fails the gate when node is missing, because a suite that skips itself is
+      # the same false confidence the source assertions gave (Phase G review,
+      # round 2).
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
       - name: Sync dependencies
         run: uv sync
 
-      # The four checks (ruff · format · mypy · pytest-with-coverage) live in
-      # scripts/ci.py so local dev (`make ci`) and CI share one source of truth
-      # and can't drift. The coverage floor is enforced on every matrix cell.
-      - name: CI gate (ruff + format + mypy + pytest w/ coverage floor)
+      # The six checks (ruff · format · mypy · store-chokepoint ·
+      # pytest-with-coverage · node --test) live in scripts/ci.py so local dev
+      # (`make ci`) and CI share one source of truth and can't drift. The coverage
+      # floor is enforced on every matrix cell.
+      - name: CI gate (ruff + format + mypy + pytest w/ coverage floor + renderer)
         run: uv run python scripts/ci.py

@@ -93,8 +93,12 @@ def resolve_or_auto_enable(
         store.InvalidSlugError,
         tomllib.TOMLDecodeError,
         # register_project reads the registry strictly (it is about to rewrite
-        # it), so a valid-TOML-but-wrong-shape registry raises here too.
+        # it), so a valid-TOML-but-wrong-shape registry raises here too — as does
+        # an out-of-store one, which that path refuses rather than importing
+        # (Codex P2-SAFETY-SECURITY-010). Auto-enable is a hook seam, so both must
+        # land as "no project", never as an exception into a hook.
         projects.RegistryShapeError,
+        projects.RegistryNotContainedError,
         OSError,
     ):
         return None

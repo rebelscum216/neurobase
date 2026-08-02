@@ -73,7 +73,7 @@ neurobase/
 ├── Makefile                  ← `make ci` → scripts/ci.py; local dev shortcuts
 ├── .githooks/pre-push        ← opt-in gate guard (git config core.hooksPath .githooks)
 ├── .claude/skills/           ← project skills (e.g. xcode-review, the Author role)
-└── .github/workflows/ci.yml  ← 3-OS × 2-Python matrix; each job runs scripts/ci.py
+└── .github/workflows/ci.yml  ← 2-OS × 2-Python matrix; each job runs scripts/ci.py
 ```
 
 `core/` (Phase 1 + `linkify` Phase 3), `brain/` (Phase 2), `curator/` (Phase
@@ -228,11 +228,13 @@ uv run neurobase --help     # run the CLI from the dev env
 make ci                     # ← the FULL gate, exactly as CI runs it
 uv run python scripts/ci.py # the same gate without make (Windows / no-make)
 
-# The four checks the gate bundles, individually:
+# The six checks the gate bundles, individually:
 uv run pytest               # run the suite — the contract enforcer
 uv run ruff check .         # lint
 uv run ruff format .        # format
 uv run mypy src tests       # types (lenient to start)
+uv run python scripts/check_store_chokepoint.py   # regression check: no enumerated raw-root accessor
+node --test 'tests/js/*.test.mjs'                 # the graph renderer's behaviour (Node 22+)
 uv run pre-commit install   # optional: enable the pre-commit hooks
 
 # The gate runs pytest under coverage and enforces a floor; to reproduce it:
@@ -240,10 +242,23 @@ uv run pytest --cov=src/neurobase --cov-branch --cov-report=term-missing
 ```
 
 **Run the full gate before every push — not just `pytest`.** [`scripts/ci.py`](scripts/ci.py)
-is the single source of truth for the four checks (`ruff check` · `ruff format
---check` · `mypy src tests` · `pytest` under coverage); CI invokes that *same*
-script on the 3-OS × 2-Python matrix, so local and CI can't drift. Opt into the
-committed pre-push hook to have Git enforce it automatically:
+is the single source of truth for the six checks (`ruff check` · `ruff format
+--check` · `mypy src tests` · store-chokepoint · `pytest` under coverage ·
+`node --test tests/js/*.test.mjs`); CI invokes that *same* script on the
+2-OS × 2-Python matrix (ubuntu + macos; Windows parked 2026-07-20), so local and
+CI can't drift.
+
+**Prerequisites: `uv` and Node 22+.** Node runs `tests/js/`, the behaviour suite
+for the graph renderer's client-side JavaScript — Python cannot execute it, and
+round 2 of the Phase G review proved source assertions about it are worthless (a
+regex test stayed green while the complexity claim it named was false). There is
+no npm install; it is a runtime and two files. A missing or too-old runtime
+**fails** the gate with exit 127 — deliberately not a skip, since a suite that
+skips itself is the same false confidence the source assertions gave. Node 22 is
+the floor because it is what `.github/workflows/ci.yml` pins; on Node 20 the test
+runner cannot expand the suite's glob.
+
+Opt into the committed pre-push hook to have Git enforce the gate automatically:
 
 ```bash
 git config core.hooksPath .githooks   # once per clone; runs scripts/ci.py on push

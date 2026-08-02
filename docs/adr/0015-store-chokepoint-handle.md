@@ -80,7 +80,7 @@ class StoreMode(Enum):
     READ; WRITE; DOCTOR; MIGRATE; PURGE
 
 class StoreHandle:
-    # constructor is private — the ONLY way in is open_store()
+    # constructor is private — open_store() is the supported way in
     root: Path
     mode: StoreMode
     schema: int | None          # None ⇒ uninitialized (no store.toml yet)
@@ -131,6 +131,68 @@ surface**, exactly as today. After a handle opens:
   corrupt registry as it does today — a write path is allowed to refuse a store it
   cannot safely rewrite.
 
+**Registry CONTAINMENT is part of this chokepoint** _(added 2026-07-31 — Codex
+`P2-SAFETY-SECURITY-010`, PR #11 rounds 4–5)._ Parseability is fail-soft, but
+*ownership* is not a parse concern at all. `<root>/registry.toml` is the store's
+**selector** — it decides which project namespaces any sweep walks — so a symlinked
+registry selects namespaces from **outside** the store while every document
+enumeration remains correctly contained. That is the same raw-root class this ADR
+exists to close, one level up: not "which file did we read" but "which store did we
+read *for*".
+
+Two things this ADR got wrong in the first attempt, both worth recording because the
+shape recurs:
+
+1. **Altitude.** The guard was first placed on `StoreHandle.load_registry()` alone.
+   `resolve_project` and `register_project` delegate to the raw-root functions, which
+   reach the low-level reader directly — so an external registry read as `{}` through
+   the guarded method while still resolving the attacker-selected slug on the capture,
+   recall, `status`, `curate`, `doctor` and MCP paths. **A guard on one method of an
+   accessor trio is a guard on one caller.** Containment therefore lives at the
+   `core/projects.py` accessor boundary itself, which every registry read in the
+   process reaches — including doctor's sanctioned no-handle fallback, which by
+   definition has no handle to guard. The handle's three methods are plain delegates,
+   deliberately: a second guard above could disagree with the one below, and two
+   containment definitions that can drift is the failure this ADR's whole design
+   avoids.
+2b. **And the enforcement model cannot be made universal one spelling at a time**
+   _(round 7)._ Closing (2) by listing the names was still not enough: a **reassigned
+   module alias** (`project_api = projects`) reached the helper with the checker printing
+   OK, and closing *that* left **tuple unpacking** and a **class-held alias** — while the
+   alias fix itself introduced a **false positive** on parameter shadowing, flagging the
+   sanctioned `handle.load_registry()` pattern. Three rounds, three more spellings. The
+   conclusion recorded here deliberately is that **the claim was wrong, not just the
+   code**: an AST checker with no scope or dataflow semantics cannot support a universal
+   "omission is impossible / no false positives" contract, and adding one form per review
+   round does not converge on one. So step 5 is now described everywhere — here, in the
+   guard's own docstring, in spec §10 and in G1 — as a **conservative, enumerated
+   syntactic regression guard** with its residuals named. **The unavoidability guarantee
+   rests on the deferred signature-removal step below, not on this check.** If that step
+   is ever cancelled rather than deferred, this ADR's core claim needs revisiting, not
+   another alias form.
+
+2. **The enforcement model must be able to SEE the exemption.** The first fix promoted
+   `_registry_path` to a public `registry_path` so the guard could name the file it was
+   proving. But `scripts/check_store_chokepoint.py` matches accessors **by name**, and
+   the `"registry.toml"` literal is hidden inside that helper — so the public spelling
+   handed every production module a CI-approved way to reach the registry from a raw
+   root, exactly the reintroduction step 5 exists to make mechanically hard (Codex
+   `P2-SAFETY-SECURITY-013`). The helper is private again, and `registry_path`,
+   `_registry_path` and `registry_is_contained` are all in the forbidden set, so
+   re-publishing it fails the gate rather than silently reopening the hole. **Making a
+   name public inside `core` is not the problem; making it public while the guard
+   cannot see it is.**
+
+Posture, mirroring the read/write split above: read paths fail **soft** to empty (one
+hostile selector must not blank a surface — §13, and the regression this project
+already paid for once); the read-for-rewrite path fails **closed**, before the read,
+since reading an external registry would import its entries into the mapping handed to
+the writer and then follow the symlink to rewrite a file outside the store. Because
+"uncontained" and "absent" both read as empty, `doctor` gets
+`projects.registry_is_contained(root)` — allow-listed by (file, name) as its third
+sanctioned raw-root read — and reports the uncontained case as an **error**. Empty is
+the right operational answer; it must not read as *healthy*.
+
 The handle carries only the `store.toml` schema verdict; registry validation lives on
 the registry accessors, not the whole-store gate. Concretely, the per-surface
 fail-soft wrappers that exist today (`_safe_registry`, `build_server()`'s
@@ -139,16 +201,32 @@ tolerance.
 
 **Enforcement.** The chokepoint only works if the handle is unavoidable:
 
-- `StoreHandle.__init__` is private; `open_store()` is the sole entrypoint.
-- Every store and project API takes a `StoreHandle`, not a raw `root: Path` —
-  `memory_dir`, `load_registry`, `register_project`, `resolve_project`,
-  `list_raw` / `list_curated` / `write_raw` / `upsert_curated` / `write_node` /
-  `rebuild_index`, and the recommender's corpus/ledger accessors.
+- `StoreHandle.__init__` is private; `open_store()` is the supported entrypoint, and
+  the one every production caller uses. Python privacy is a convention, not a
+  boundary — an in-process caller has at least three routes to a fabricated handle
+  (the module-level `_make`, the importable constructor token, and
+  `dataclasses.replace` on a valid handle). This bullet is about ordinary use, not
+  mechanical unforgeability; the hard boundary is the deferred signature removal
+  below (Codex `P2-SAFETY-SECURITY-013`, round 11).
+- Every store and project API *offers* a `StoreHandle` form, not a raw `root: Path`,
+  and every production caller uses it — `memory_dir`, `load_registry`,
+  `register_project`, `resolve_project`, `list_raw` / `list_curated` / `write_raw` /
+  `upsert_curated` / `write_node` / `rebuild_index`, and the recommender's
+  corpus/ledger accessors. The raw-`root` forms still *exist* beneath them until the
+  next bullet lands, so this is a completed migration, not yet an enforced signature.
 - The raw-`Path` signatures are removed (not merely deprecated) — a lingering
-  overload re-arms the same footgun.
-- A **CI check** (AST-based) forbids constructing store paths from a bare root or
-  reading `registry.toml` / `store.toml` / `memory/` outside `core/store.py`,
-  `core/store_handle.py`, and `core/projects.py`.
+  overload re-arms the same footgun. **This step is deferred, not done** (see
+  *Consequences*): it is what would make the chokepoint genuinely unavoidable, and
+  until it lands the guarantee rests on it rather than on the CI check below.
+- A **CI check** (AST-based) fails the gate when a module outside `core/store.py`,
+  `core/store_handle.py` and `core/projects.py` names a raw-`root` store/registry
+  **accessor** through one of an *enumerated* set of receiver spellings, or writes a
+  `store.toml` / `registry.toml` literal. It keys on those names, **not** on path
+  shape — it does not detect store paths built from a bare root, because that shape is
+  indistinguishable from the Claude app's own `~/.claude/projects/<x>/memory`. It is a
+  conservative regression check with recorded static misses and false positives, not a
+  proof of unreachability; the residuals are enumerated in the guard's docstring, in
+  spec §10, and in G1.
 
 **D24 — MCP failures surface as structured tool errors (spec §13).**
 `build_server()` opens a `READ` handle. A newer-schema store must **not** raise at
@@ -196,14 +274,19 @@ mapping `schema is None` → "not initialized" (warn), `schema > MAX` → "unsup
 
 ## Consequences
 
-- **G1 closes at the type level.** A new call site cannot touch the store without an
-  `open_store()`, so the next author *cannot* forget the guard — the compiler (well,
-  the type checker + CI) forces it. `init`'s mutate-before-guard, `mcp serve`'s
-  no-guard, and `status --recommender`'s early return all resolve as a consequence
-  of requiring the handle, not by patching each in isolation.
-- **The pre-guard registry read disappears.** `resolve_project`/`load_registry`
-  require a handle, so the pervasive "read `registry.toml` before the guard" pattern
-  can no longer compile.
+- **G1 closes at the type level — once the signature removal lands.** That is the
+  intended end state: a new call site could not touch the store without an
+  `open_store()`, and the type checker would force it. What has shipped is the
+  migration plus a regression check, so today the next author is *discouraged*, not
+  prevented — see the deferred bullet under *Enforcement*, and the residual account
+  in G1 and spec §10. `init`'s mutate-before-guard, `mcp serve`'s no-guard, and
+  `status --recommender`'s early return all resolve as a consequence of requiring
+  the handle, not by patching each in isolation.
+- **The pre-guard registry read disappears from production.**
+  `resolve_project`/`load_registry` are reached through a handle everywhere that
+  ships, so the pervasive "read `registry.toml` before the guard" pattern is gone
+  from the tree. Re-introducing it still compiles while the raw signatures remain;
+  the CI check is what catches the ordinary case.
 - **`doctor` de-duplicates.** One schema comparison (D26); the drift risk the
   known-gaps entry flags is removed.
 - **Cost is one validation per invocation.** `open_store()` reads/parses
@@ -221,7 +304,9 @@ mapping `schema is None` → "not initialized" (warn), `schema > MAX` → "unsup
   never a startup failure. **This ADR is the proposal; the spec appendix is the
   law** — fold these in when implementing.
 - **Follow-up for known-gaps.** On accept, mark G1 `fixed` (link the migration PRs)
-  once step 4 lands; the CI check (step 5) is what keeps it fixed.
+  once step 4 lands; the CI check (step 5) is what keeps the *ordinary* reintroduction
+  out — see the round-7 note above for what it does and does not prove, and why the
+  deferred signature removal is still the load-bearing part.
 
 ## Alternatives considered
 

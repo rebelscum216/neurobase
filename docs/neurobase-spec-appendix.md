@@ -931,9 +931,18 @@ Store-tree and registry access obtains a validated `StoreHandle` from
 `open_store(root, mode)` (`core/store_handle.py`) before touching the store.
 `open_store` is the **one** place the D11 schema comparison runs — "refuse to operate
 on a schema newer than the binary" is enforced at the boundary, not per command, so a
-new call site cannot forget it. The handle's constructor is private; `open_store` is the
-sole entry point. The store-tree and registry **accessors** (below) are all behind the
-handle and CI-enforced. The two lifecycle commands run the D11 guard too, command-side
+call site that obtains its handle from `open_store()` cannot forget it. The handle's constructor is
+private and direct `StoreHandle(...)` construction is rejected; `open_store` is the
+**supported** entry point, not a mechanically unforgeable one — an in-process caller
+has at least three routes to a fabricated handle (the module-level `_make`, the
+importable constructor token, and `dataclasses.replace` on a valid handle), so this
+is a convention that ordinary code follows rather than a boundary it cannot cross.
+Every production caller of the
+store-tree and registry **accessors** (below) was converted onto the handle, and the CI
+guard described under *Enforcement* keeps the ordinary regression out — but the
+raw-`root` signatures still exist (their removal is deferred), so a *new* call site is
+not yet mechanically prevented from reaching one. See "What that guard does and does
+not prove" below. The two lifecycle commands run the D11 guard too, command-side
 (ADR-0015 step 4d): `init --agent` opens a `READ` handle at its entry before installing
 hooks; `uninstall --purge-store` opens a `PURGE` handle immediately before deleting the
 root. Both are command-guarded (not accessor-CI-enforced), like the recommender
@@ -983,32 +992,82 @@ schema-independent by design — see the maintenance exception below.
   roots. A corrupt registry therefore raises there — `TOMLDecodeError`, `OSError`,
   or `projects.RegistryShapeError`; `core/enable.py` catches all three and fails
   closed, per the auto-enable posture above.
+- **The registry MUST be contained by its own store.** `<root>/registry.toml` is
+  the store's **selector**, not another document: it decides which project
+  namespaces any sweep walks at all. A `registry.toml` that resolves outside
+  `<root>` — a symlink — therefore selects namespaces from outside the store, and
+  containing the five *document* enumerations (raw, curated, tombstone, journal,
+  proposals) while accepting an external selector leaves the identity boundary
+  incomplete. Containment is decided by resolving **both** sides, so a store whose
+  own root is reached through a symlink (macOS `/var` → `/private/var`, a symlinked
+  parent, a relative path) is unaffected; an absent registry is contained, since it
+  resolves to its own would-be location.
+  The rule binds the **whole accessor boundary in `core/projects.py`**, not one
+  method above it: read paths (`load_registry`, and therefore `resolve_project`)
+  **fail soft to empty / `None`**, preserving the §13 posture — one hostile selector
+  must not blank a whole surface; the read-for-**rewrite** path (`register_project`,
+  and the writer itself) **fails closed** with `projects.RegistryNotContainedError`,
+  *before* the read, because merely reading an external registry would import its
+  entries into the mapping handed to the writer and then follow the symlink to
+  rewrite a file outside the store. `core/enable.py` catches it and fails closed,
+  so a hook never raises.
+  **Empty is not healthy.** An uncontained registry and an absent one both read as
+  empty, so `doctor` distinguishes them via `projects.registry_is_contained(root)`
+  and reports the uncontained case as an **error**, not as "not enabled" — which
+  would send the operator to run `neurobase enable`, which fails closed against the
+  same registry, while the real problem went unreported.
 
 **Enforcement.** Production store-tree and registry access (`src/neurobase/`) goes
 through `open_store(...)` + a `StoreHandle`. The CI guard
-`scripts/check_store_chokepoint.py` fails the gate when a module **outside** the three
+`scripts/check_store_chokepoint.py` fails the gate on the enumerated spellings (see the
+limits below) when a module **outside** the three
 implementation modules (`core/store.py`, `core/store_handle.py`, `core/projects.py`)
 calls a raw-`root` store/registry **accessor** — `memory_dir`, `ensure_tree`,
 `list_raw` / `list_curated` / `list_tombstoned`, `write_raw`, `upsert_curated`,
 `write_node`, `rebuild_index`, `load_registry`, `register_project`,
-`resolve_project`, … (whether
+`resolve_project`, `registry_path` / `_registry_path`, `registry_is_contained`, …
+(whether
 reached as `store.x` / `projects.x`, via a dotted module, or by a direct/relative
 import) — or references the `store.toml` / `registry.toml` metadata filenames. The
 guard keys on those accessors and literals, **not** on path shape: a handle-derived
 `handle.memory_dir(p) / "nodes"` is fine, and a bare `root / "projects" / … / "memory"`
 layout is not shape-distinguishable from the Claude app's own
-`~/.claude/projects/<x>/memory`, so it is not matched (the accessor contract is exactly
-what is mechanically enforceable without false positives).
+`~/.claude/projects/<x>/memory`, so it is not matched.
+
+**What that guard does and does not prove.** It is a **conservative, enumerated
+syntactic regression guard**: it recognizes the listed accessor names through an
+enumerated set of receiver spellings (attribute, dotted module, direct/relative/aliased
+import, and simple module aliases bound by assignment). It is **not** a proof that
+raw-`root` access is impossible, and it is **not** free of false positives. Three review
+rounds each surfaced one further lint-clean spelling that reached a listed accessor while
+the check printed OK — a public path helper, a reassigned module alias, then tuple
+unpacking — which is why this now states the limit instead of re-asserting the guarantee.
+Recorded residuals: **tuple unpacking**, a **class-held alias**, a named-expression
+alias, and an alias bound before its import in traversal order are static misses;
+rebinding a module alias to a non-module later in a file is a false positive, as is a
+**parameter** (of a function, async function, or lambda) that merely reuses an alias
+name — a round-7 special case for that was removed in round 8, because un-binding the
+name across the whole `FunctionDef` AST suppressed decorators, defaults, eager
+annotations and a nested `global`, which resolve outside the parameter's scope.
+Dynamic forms (`globals()[...]`, `importlib.import_module`) are out of scope; `import *`
+needs no handling because ruff rejects it (F403/F405) before the gate.
+**The unavoidability guarantee therefore rests on ADR-0015's deferred step** — removing
+the raw-`Path` signatures so there is nothing for any spelling to reach. Until that
+lands, this check is what stops the *ordinary* reintroduction, and should be read as
+exactly that much.
 
 Some raw-`root` constructions **remain** outside the accessor guard's coverage, in three
 kinds — none is an unguarded write to **schema-versioned store content** (`memory/`,
 `registry.toml`):
 
-- **`doctor`'s two corrupt-`store.toml` reads** (allow-listed) —
+- **`doctor`'s three corrupt-`store.toml` reads** (allow-listed) —
   `projects.resolve_project(root, cwd)` (project resolution is a `registry.toml`
   concern, independent of the store-schema guard, and must survive when no handle can
-  open) and `store.store_toml_path(root)` (the report label, built before `open_store`).
-  Both live only in `cli/diagnostics.py` and are allow-listed in the guard by (file, name).
+  open), `projects.registry_is_contained(root)` (the health question above: a corrupt
+  `store.toml` must not *mask* a hostile registry, and this branch has no handle to
+  ask), and `store.store_toml_path(root)` (the report label, built before `open_store`).
+  All three live only in `cli/diagnostics.py` and are allow-listed in the guard by
+  (file, name).
 - **the recommender's proposal/ledger path-builders** (command-guarded) —
   `corpus.proposals_dir` / `proposal_path` / `ledger_path` build `<root>/proposals/…`
   and `<root>/recommender/ledger.jsonl` from a bare root, but every caller is guarded by

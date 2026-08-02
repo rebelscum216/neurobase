@@ -33,14 +33,16 @@ def client(app: Starlette) -> TestClient:
     return TestClient(app, base_url="http://127.0.0.1:8765")
 
 
-def test_get_root_redirects_to_suggestions(client: TestClient) -> None:
-    # Web UI Phase 1 "Routes" table: `GET /` -> redirect to `/suggestions`.
+def test_get_root_redirects_to_the_graph_home_surface(client: TestClient) -> None:
+    # `GET /` redirected to `/suggestions` for as long as the Graph surface did
+    # not exist (Web UI Phase 1 "Routes" table). The app-shell plan's Phase G
+    # makes Graph the home surface and moves this redirect with it.
     # follow_redirects=False so this test asserts the redirect itself, not
     # (also) the destination page's content — that belongs to
-    # test_webui_suggestions.py.
+    # test_webui_graph.py.
     response = client.get("/", follow_redirects=False)
     assert response.status_code in (302, 307)
-    assert response.headers["location"] == "/suggestions"
+    assert response.headers["location"] == "/graph"
 
 
 def test_get_root_follows_through_to_a_real_page(client: TestClient) -> None:

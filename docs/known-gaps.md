@@ -817,3 +817,82 @@ of its own provenance-checking.
   `tombstones` output channel; the `noop` gate at `engine.py:382` is precisely
   what refuses to run it. Grounding facts against the repo (5) is a genuinely new
   capability and should be scoped separately.
+
+---
+
+### G9 — `seed --from-claude-memory` derives Claude Code's directory name with the wrong encoding, so it imports nothing and exits 0
+
+- **status:** open
+- **severity:** **major** — the command reports success while doing nothing, and
+  it fails for nearly every project path on this machine. A silent no-op is worse
+  than a crash here: seeding is a one-shot bootstrap a user runs once, sees
+  `{"imported": []}`, and reasonably concludes there was simply nothing to
+  import. `--all-projects` amplifies it — the loop at `cli/__init__.py:420` runs
+  the same miss once per registered project and still exits 0.
+- **found:** 2026-07-31 by a parallel Claude session, on the first real
+  `neurobase enable` against a repo with history (Baysis-dev); reported by
+  mailbox. **Independently reproduced 2026-08-01, and again 2026-08-02 against
+  this very repo** (see Reproduction).
+
+**The claim.** `claude_memory_dir` (`recommender/seed.py:68`) documents the
+encoding as *"`~/.claude/projects/<cwd-with-every-'/'-replaced-by-'-'>/memory/`"*
+and its docstring calls that **"live-verified"** (`seed.py:69`). The
+implementation is one line:
+
+```python
+encoded = project_root.as_posix().replace("/", "-")   # seed.py:75
+```
+
+**What Claude Code actually does.** It collapses **dots and spaces to hyphens
+too**, not just separators. The docstring's stated rule is therefore a strict
+subset of the real encoding, and any path containing a `.` or a ` ` resolves to a
+directory that does not exist.
+
+**Why the miss is silent.** `import_from_claude_memory` (`seed.py:331`) treats a
+missing directory as normal — deliberately, and the reasoning is sound in
+isolation:
+
+```python
+mem_dir = claude_memory_dir(project_root)
+if not mem_dir.is_dir():
+    return SeedResult()          # seed.py:338-339
+```
+
+Most projects genuinely have no auto-memory dir, so this must not raise. But the
+empty `SeedResult` is indistinguishable from "looked in the right place and found
+nothing", and the CLI has no error branch after it: control falls through to
+`typer.echo(json.dumps(...))` at `cli/__init__.py:441` and returns normally.
+**Exit code 0, output `{"imported": [], "unchanged": [], "skipped": []}`.**
+
+**Reproduction (this repo, 2026-08-02).** The machine user is `andrew.smith` and
+the checkout lives under `AI Projects`, so the path carries **both** triggers:
+
+| | |
+|---|---|
+| neurobase looks for | `~/.claude/projects/-Users-andrew.smith-AI Projects-Neurobase-neurobase/memory` — **absent** |
+| Claude Code wrote | `~/.claude/projects/-Users-andrew-smith-AI-Projects-Neurobase-neurobase/memory` — **14 facts** |
+
+The dot in `andrew.smith` and the space in `AI Projects` are each independently
+sufficient. On the reporting machine the same defect hid 20 importable facts.
+
+**Workaround.** Pass the true directory to `--from-dir`, which takes the path
+verbatim and does no encoding. Confirmed working by the reporting session (all 20
+facts imported) — so only the derivation is broken, not the importer.
+
+**Fix direction.**
+
+- **Derive the encoding from Claude Code's actual behaviour** rather than
+  restating a remembered rule, and **test a path holding both a dot and a
+  space** — a fixture with only `/` separators passes against the current code
+  and proves nothing.
+- **Make the empty case name the directory it looked for.** A one-line addition
+  to the `SeedResult` or a stderr note would have turned three separate
+  multi-hour investigations into one glance. The "missing dir is not an error"
+  decision can stand; what cannot stand is being unable to tell *absent* from
+  *misaddressed*.
+- **Retire the "live-verified" claim in the `seed.py:69` docstring.** It is not
+  verified, and it is the reason the encoding was trusted rather than checked.
+  This is the same claim-versus-code class as `G8` above and as
+  `P2-SAFETY-SECURITY-013` in the Phase G review — a shipped sentence asserting a
+  property the code does not have, which survives precisely because it reads like
+  a conclusion someone already checked.

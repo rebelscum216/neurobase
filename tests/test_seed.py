@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -488,32 +489,49 @@ def test_claude_memory_dir_path_construction(
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
-        # The G9 regression: a dot AND a space, both of which the old
-        # `.replace("/", "-")` preserved. A fixture with only separators passes
-        # against the buggy implementation and proves nothing.
+        # The exact probe result. A real session was run in this directory and
+        # Claude Code produced this name; every special collapsed to "-".
+        ("/private/tmp/nbprobe_A (B).C+D/x_y", "-private-tmp-nbprobe-A--B--C-D-x-y"),
+        # The G9 regression: a dot AND a space, both of which the original
+        # `.replace("/", "-")` preserved.
         (
             "/Users/andrew.smith/AI Projects/Neurobase",
             "-Users-andrew-smith-AI-Projects-Neurobase",
         ),
-        # Each trigger in isolation, so a half-fix cannot pass.
+        # Each trigger in isolation, so a partial fix cannot pass. The underscore
+        # case is the one the FIRST fix got wrong: its class was [/. ], derived
+        # from 33 samples that happened to contain no underscore.
         ("/Users/a.b/proj", "-Users-a-b-proj"),
         ("/Users/ab/My Proj", "-Users-ab-My-Proj"),
-        # No specials at all — the case the old test used; must still hold.
+        ("/Users/ab/my_project", "-Users-ab-my-project"),
+        ("/Users/ab/proj(1)", "-Users-ab-proj-1-"),
+        ("/Users/ab/a+b", "-Users-ab-a-b"),
+        # An existing hyphen survives, so adjacent specials yield runs of "-".
+        ("/Users/ab/-already", "-Users-ab--already"),
+        # No specials at all — the case the original test used; must still hold.
         ("/Users/x/Projects/neurobase", "-Users-x-Projects-neurobase"),
     ],
 )
-def test_encode_project_path_rewrites_dots_and_spaces_not_only_separators(
+def test_encode_project_path_rewrites_every_non_alnum_not_only_separators(
     path: str, expected: str
 ) -> None:
-    """`encode_project_path` must rewrite `.` and ` ` as well as `/` (G9)."""
+    """Every character outside [A-Za-z0-9-] becomes "-" (G9).
+
+    Guards against BOTH prior wrong rules: the original `[/]`, and the first
+    fix's `[/. ]` which still preserved underscores.
+    """
     encoded = seed.encode_project_path(Path(path))
     assert encoded == expected
     # Character-for-character: the encoded name is the same length as the path.
     assert len(encoded) == len(path)
-    # The pre-fix implementation replaced only "/", so it would have left a dot
-    # or a space in place. Assert this fixture actually distinguishes the two.
-    if "." in path or " " in path:
-        assert encoded != path.replace("/", "-")
+    # Only [A-Za-z0-9-] may survive.
+    assert re.fullmatch(r"[A-Za-z0-9-]*", encoded), encoded
+    # Assert each fixture actually discriminates against the two prior rules.
+    if any(c not in "/" for c in path if not (c.isalnum() or c == "-")):
+        assert encoded != path.replace("/", "-"), "fixture cannot catch the original bug"
+    if any(c not in "/. " for c in path if not (c.isalnum() or c == "-")):
+        naive = path.replace("/", "-").replace(".", "-").replace(" ", "-")
+        assert encoded != naive, "fixture cannot catch the first fix's [/. ] rule"
 
 
 def test_encode_project_path_preserves_an_existing_hyphen() -> None:

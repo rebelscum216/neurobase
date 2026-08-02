@@ -822,14 +822,14 @@ of its own provenance-checking.
 
 ### G9 — `seed --from-claude-memory` derives Claude Code's directory name with the wrong encoding, so it imports nothing and exits 0
 
-- **status:** **fixed** — `encode_project_path` now rewrites `.` and ` ` as well
-  as `/`, derived empirically from **33 ground-truth pairs** (each session file's
-  own recorded `cwd` compared against the directory holding it) rather than from a
-  remembered rule; and a missing derived directory is now **reported in
-  `skipped`**, naming the exact path searched, so a future encoding drift is
-  visible in the command's own output instead of silent. The entry is kept because
-  the *reasoning* is the durable part — see **Residual** below, which states what
-  the evidence does and does not license.
+- **status:** **fixed** — `encode_project_path` now rewrites **every character
+  outside `[A-Za-z0-9-]`** to `-`, established by **direct experiment** (a real
+  session run in a directory containing `_`, space, `(`, `)`, `.` and `+`) and
+  cross-checked against 33 independently recovered ground-truth pairs; and a
+  missing derived directory is now **reported in `skipped`**, naming the exact
+  path searched, so a future drift is visible instead of silent. The entry is kept
+  because the *reasoning* is the durable part: **two successive fixes were wrong
+  in the same way before the experiment settled it** — see *Resolution*.
 - **severity:** **major** — the command reports success while doing nothing, and
   it fails for nearly every project path on this machine. A silent no-op is worse
   than a crash here: seeding is a one-shot bootstrap a user runs once, sees
@@ -904,32 +904,54 @@ facts imported) — so only the derivation is broken, not the importer.
   property the code does not have, which survives precisely because it reads like
   a conclusion someone already checked.
 
-**Resolution (2026-08-02).** All three fix directions landed.
+**Resolution (2026-08-02).** All three fix directions landed — but only after a
+second wrong answer, which is the most useful part of this entry.
 
-- **The encoding was derived, not recalled.** 33 ground-truth pairs were recovered
-  by reading each session file's own recorded `cwd` and comparing it against the
-  directory holding it. Result: a character-for-character, length-preserving
-  substitution in which `/`, `.` and ASCII space each become `-`, an existing `-`
-  is preserved (`/a/-b` → `-a--b`), and no other character is rewritten. One
-  apparent counter-example — a `cwd` of `.../mergely` inside a directory named
-  `...-mergely-bwe` — is a renamed folder, not an encoding rule: that directory's
-  dominant `cwd` matches its own name and the old path no longer exists.
-- **The regression test uses a path with both a dot and a space**, plus each
-  trigger in isolation, so neither the original bug nor a half-fix can pass. Both
-  halves were mutation-verified: reverting the character class fails the three
-  dot/space fixtures (and correctly leaves the no-specials case passing), and
-  removing the `skipped` entry fails the reporting test.
-- **The `"live-verified"` claim is gone**, replaced by a docstring that states the
-  evidence and its limits.
+**The rule is `[^A-Za-z0-9-]` → `-`**, character-for-character (encoded name and
+path are always the same length), with an existing `-` preserved so `/a/-b` →
+`-a--b`.
 
-**Residual — what the evidence does not license.** The 33 samples exercise only
-`/`, `.` and space, because those are the only specials that occurred in the
-available paths. The rewritten character class is therefore *observed*, not
-specified: Claude Code may rewrite characters this evidence never tested. That
-residual is the reason the second fix matters more than the first — a wrong
-derivation can no longer be silent, because the missing directory is named in
-`skipped`. Verified end-to-end on the two reported paths: `TransactionTracker`
-resolves to **16** previously-invisible facts and `Baysis-dev` to **24**. The
+**Three attempts, and why the first two failed identically.** Each inferred a rule
+from paths that could not distinguish it from the truth:
+
+| # | Rule | Evidence | Why it was wrong |
+|---|---|---|---|
+| 1 | `/` only | "live-verified" against `/Users/x/Projects/neurobase` | The sample had no dot and no space. Real verification, unrepresentative input. |
+| 2 | `/`, `.`, space | 33 ground-truth pairs, honestly documented as *observed, not specified* | None of the 33 paths contained an underscore. Would still have missed every `my_project`. |
+| 3 | `[^A-Za-z0-9-]` | **A deliberate experiment** | — |
+
+Attempt 2 is the instructive one: its caveat was *correct* and *explicit* — the
+class was labelled observed-not-specified, and the residual was written into the
+docstring, the spec and this entry. It was still shipped-wrong, because a
+documented residual is not a closed one. **The evidence was reachable the whole
+time; nobody had run the experiment.**
+
+**The experiment.** A throwaway directory containing `_`, space, `(`, `)`, `.` and
+`+`, one real session run inside it, then read back what Claude Code named it:
+
+```
+/private/tmp/nbprobe_A (B).C+D/x_y   →   -private-tmp-nbprobe-A--B--C-D-x-y
+```
+
+Every special collapsed to `-`. The resulting rule then reproduced **33 of 34**
+recovered ground-truth pairs; the one exception is a renamed folder, not an
+encoding failure (`.../mergely` recorded inside `...-mergely-bwe`, whose dominant
+`cwd` matches its own name and whose old path no longer exists). The superseded
+`[/. ]` rule reproduced only 32.
+
+**Tests.** The regression fixtures include the probe result verbatim plus each
+trigger in isolation — dot, space, **underscore**, parens, plus — and assert that
+each fixture actually discriminates against *both* prior rules, so neither the
+original bug nor the first fix can pass. All three behaviours are
+mutation-verified: reverting to `[/]` fails 7 fixtures, reverting to `[/. ]` still
+fails 4, and removing the `skipped` entry fails the reporting test.
+
+**Residual.** Non-ASCII characters remain untested; by the rule above they should
+also collapse to `-`, but no sample or probe covered them. This is precisely why
+the *reporting* half matters more than the encoding half — a wrong derivation is
+now visible in the command's own output instead of indistinguishable from
+"nothing to import". Verified end-to-end: `TransactionTracker` resolves to **16**
+previously-invisible facts, `Baysis-dev` to **24**. The
 `neurobase` sub-checkout resolves correctly to a directory that genuinely has no
 `memory/` subdir — which the command now *reports* rather than presenting as a
 successful empty import.

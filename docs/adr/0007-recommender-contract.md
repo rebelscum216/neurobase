@@ -205,14 +205,20 @@ already-locked decision rather than introducing a new one.
   `--project`/`--all-projects` as explicit widenings.
 
   > **⚠️ Correction, 2026-08-02 (G9).** The encoding in the bullet above is
-  > **wrong**, and is left in place because an accepted ADR is immutable. Claude
-  > Code also rewrites `.` and ASCII space to `-`, not only `/`. The
-  > "live-verified" claim was true of the *run* but not of the *rule*: the sample
-  > path `/Users/x/Projects/neurobase` contains neither a dot nor a space, so it
-  > could not distinguish the stated rule from the real one. On a machine whose
-  > username is `andrew.smith`, every project path therefore resolved to a
-  > directory that does not exist and `seed --from-claude-memory` exited 0 having
-  > imported nothing. Corrected rule and its evidence: spec §12.3 and
+  > **wrong**, and is left in place because an accepted ADR is immutable. The real
+  > rule is that Claude Code rewrites **every character outside `[A-Za-z0-9-]`**
+  > to `-`, not only `/`. The "live-verified" claim was true of the *run* but not
+  > of the *rule*: the sample path `/Users/x/Projects/neurobase` contains no
+  > character that could distinguish the stated rule from the real one. On a
+  > machine whose username is `andrew.smith`, every project path therefore
+  > resolved to a directory that does not exist and `seed --from-claude-memory`
+  > exited 0 having imported nothing.
+  >
+  > Worth recording for anyone tempted to infer this rule again: a *first*
+  > correction (`/`, `.`, space) was also wrong, despite being derived from 33
+  > ground-truth samples and honestly labelled "observed, not specified" — none of
+  > those samples contained an underscore. Only a deliberate experiment settled
+  > it. Corrected rule and its evidence: spec §12.3 and
   > `recommender/seed.encode_project_path`; full write-up in
   > `docs/known-gaps.md` G9. **The decision this ADR records is unaffected** —
   > discovery is still derived rather than asked for, with `--from-dir` as the

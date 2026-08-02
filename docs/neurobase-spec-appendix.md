@@ -1660,25 +1660,28 @@ Phase 8 adds the machinery §10 left implicit:
   well-known path already covers (this restates the Invariants section's
   rule above; same workstream B tests cover it here).
 
-**`--from-claude-memory`'s discovery path is derived from observation, and the
-observation has limits.** Claude Code's per-project auto-memory directory is
-`~/.claude/projects/<encoded-cwd>/memory/`, where the encoding rewrites **`/`,
-`.` and ASCII space** to `-`, character-for-character (an existing `-` is
-preserved, so `/a/-b` → `-a--b`). Derived 2026-08-02 from **33 ground-truth
-pairs** — each session file's own recorded `cwd` compared against the directory
-holding it. Those 33 exercise only those three specials, so the class is
-*observed*, not specified; a path containing some other special character may
-encode in a way this evidence never tested, which is why a missing derived
-directory is **reported in `skipped`** rather than returning an empty result.
+**`--from-claude-memory`'s discovery path is established by experiment.** Claude
+Code's per-project auto-memory directory is `~/.claude/projects/<encoded-cwd>/memory/`,
+where the encoding rewrites **every character outside `[A-Za-z0-9-]`** to `-`,
+character-for-character (encoded name and path are the same length; an existing
+`-` is preserved, so `/a/-b` → `-a--b`).
 
-⚠️ **This corrects the original rule, which said only `'/'` → `'-'` and called
-itself "live-verified" (G9).** The verification was real but the sample was not
-representative: it used `/Users/x/Projects/neurobase`, which contains neither a
-dot nor a space. On a machine whose username is `andrew.smith`, *every* project
-path resolved to a directory that does not exist, and the importer reported
-success while importing nothing. The lesson is recorded in `docs/known-gaps.md`
-G9: a fixture that cannot distinguish the right rule from the wrong one verifies
-nothing, however real the run was.
+Established 2026-08-02 by running a real session in a directory deliberately
+containing `_`, space, `(`, `)`, `.` and `+`, then reading back the name Claude
+Code produced (`/private/tmp/nbprobe_A (B).C+D/x_y` →
+`-private-tmp-nbprobe-A--B--C-D-x-y`). The rule reproduces **33 of 34**
+independently recovered ground-truth pairs; the exception is a renamed folder,
+not an encoding failure.
+
+⚠️ **This supersedes two earlier statements of the rule, both wrong the same way
+(G9).** The original said `'/'` → `'-'` and called itself "live-verified" — real
+run, unrepresentative sample (`/Users/x/Projects/neurobase`: no dot, no space).
+The first correction said `'/'`, `'.'` and space, derived from 33 samples and
+honestly labelled *observed, not specified* — but none of those 33 contained an
+underscore, so it would still have missed every `my_project` path. **A documented
+residual is not a closed one**: the experiment that settled it was available the
+whole time. Non-ASCII characters remain untested, which is why a missing derived
+directory is **reported in `skipped`** rather than returning an empty result.
 
 Confirmed on disk (`/Users/x/Projects/neurobase` →
 `~/.claude/projects/-Users-x-Projects-neurobase/memory/`, containing exactly

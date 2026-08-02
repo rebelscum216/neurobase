@@ -65,36 +65,51 @@ class SeedResult:
         )
 
 
-#: Characters Claude Code rewrites to ``-`` when it encodes a project path into
-#: a directory name. Derived empirically (see ``encode_project_path``) — NOT a
-#: documented contract, and deliberately not widened beyond what was observed.
-_PROJECT_DIR_REWRITE_RE = re.compile(r"[/. ]")
+#: Claude Code rewrites every character outside ``[A-Za-z0-9-]`` to ``-`` when it
+#: encodes a project path into a directory name. Established by direct experiment,
+#: not inference — see ``encode_project_path``.
+_PROJECT_DIR_REWRITE_RE = re.compile(r"[^A-Za-z0-9-]")
 
 
 def encode_project_path(project_root: Path) -> str:
     """Encode a project path the way Claude Code names its ``projects/`` dir.
 
-    **The rule, and the evidence for it.** Claude Code rewrites ``/``, ``.`` and
-    ``ASCII space`` to ``-``, character-for-character (the encoded name is the
-    same length as the path). Derived on 2026-08-02 from **33 ground-truth pairs**
-    on this machine, recovered by reading each session file's own recorded ``cwd``
-    and comparing it against the directory holding it. Across those pairs only
-    those three characters were ever rewritten; every other character mapped to
-    itself, and an existing ``-`` was preserved (so ``/a/-b`` encodes to ``-a--b``).
+    **The rule.** Every character outside ``[A-Za-z0-9-]`` becomes ``-``,
+    character-for-character: the encoded name is always the same length as the
+    path, and an existing ``-`` is preserved (so ``/a/-b`` → ``-a--b``).
 
-    **What is NOT claimed.** The 33 samples exercise only ``/``, ``.`` and space,
-    because those are the only specials that occurred in the paths available. This
-    is an *observed* character class, not a specification, and Claude Code may
-    rewrite other characters this evidence never exercised. That residual is why
-    ``import_from_claude_memory`` reports the directory it looked for instead of
-    silently returning empty: if this encoding is ever wrong again, the failure is
-    visible in the command's own output rather than indistinguishable from
+    **How it was established — by experiment, not inference.** A throwaway
+    directory was created containing ``_``, space, ``(``, ``)``, ``.`` and ``+``, a
+    real session was run in it, and the directory name Claude Code produced was
+    read back::
+
+        /private/tmp/nbprobe_A (B).C+D/x_y
+        -private-tmp-nbprobe-A--B--C-D-x-y
+
+    Every one of those characters was rewritten. The rule then reproduced **33 of
+    34** independently recovered ground-truth pairs (each session file's own
+    recorded ``cwd`` versus the directory holding it); the single exception is a
+    renamed folder, not an encoding failure — that directory's dominant ``cwd``
+    matches its own name and the old path no longer exists.
+
+    **Why the probe mattered.** Two earlier versions of this function were both
+    wrong, and both were wrong the same way — a rule inferred from paths that
+    could not distinguish it from the truth:
+
+    * The original replaced only ``/`` and called itself "live-verified". It was
+      verified, against ``/Users/x/Projects/neurobase`` — no dot, no space.
+    * The first fix replaced ``/``, ``.`` and space, honestly documented as an
+      *observed* class from 33 samples. Those 33 contained no underscore, so it
+      would still have missed every ``my_project`` path.
+
+    Only running a session in a deliberately hostile directory settled it. See
+    ``docs/known-gaps.md`` G9.
+
+    **Residual.** Non-ASCII characters are untested; by the rule above they should
+    also collapse to ``-``, but no sample or probe covered them. This is why
+    ``import_from_claude_memory`` reports the directory it searched instead of
+    returning empty — a wrong derivation stays visible rather than looking like
     "nothing to import".
-
-    (The previous implementation replaced only ``/`` and its docstring called that
-    "live-verified". It was not: any path containing a dot or a space — on this
-    machine, every path, since the username is ``andrew.smith`` — resolved to a
-    directory that does not exist. See ``docs/known-gaps.md`` G9.)
 
     ``as_posix()`` (not ``str()``) so the rule applies on Windows too, where
     ``str(WindowsPath(...))`` uses ``\\`` and would leave separators un-encoded.

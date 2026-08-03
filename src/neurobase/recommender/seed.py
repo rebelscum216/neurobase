@@ -65,15 +65,63 @@ class SeedResult:
         )
 
 
-def claude_memory_dir(project_root: Path) -> Path:
-    """Claude Code's per-project auto-memory dir (spec §12.3, live-verified):
-    ``~/.claude/projects/<cwd-with-every-'/'-replaced-by-'-'>/memory/``.
+#: Claude Code rewrites every character outside ``[A-Za-z0-9-]`` to ``-`` when it
+#: encodes a project path into a directory name. Established by direct experiment,
+#: not inference — see ``encode_project_path``.
+_PROJECT_DIR_REWRITE_RE = re.compile(r"[^A-Za-z0-9-]")
 
-    ``as_posix()`` (not ``str()``) so the "every '/' → '-'" rule applies on
-    Windows too, where ``str(WindowsPath(...))`` uses ``\\`` and would leave the
-    separators un-encoded."""
-    encoded = project_root.as_posix().replace("/", "-")
-    return Path.home() / ".claude" / "projects" / encoded / "memory"
+
+def encode_project_path(project_root: Path) -> str:
+    """Encode a project path the way Claude Code names its ``projects/`` dir.
+
+    **The rule.** Every character outside ``[A-Za-z0-9-]`` becomes ``-``,
+    character-for-character: the encoded name is always the same length as the
+    path, and an existing ``-`` is preserved (so ``/a/-b`` → ``-a--b``).
+
+    **How it was established — by experiment, not inference.** A throwaway
+    directory was created containing ``_``, space, ``(``, ``)``, ``.`` and ``+``, a
+    real session was run in it, and the directory name Claude Code produced was
+    read back::
+
+        /private/tmp/nbprobe_A (B).C+D/x_y
+        -private-tmp-nbprobe-A--B--C-D-x-y
+
+    Every one of those characters was rewritten. The rule then reproduced **33 of
+    34** independently recovered ground-truth pairs (each session file's own
+    recorded ``cwd`` versus the directory holding it); the single exception is a
+    renamed folder, not an encoding failure — that directory's dominant ``cwd``
+    matches its own name and the old path no longer exists.
+
+    **Why the probe mattered.** Two earlier versions of this function were both
+    wrong, and both were wrong the same way — a rule inferred from paths that
+    could not distinguish it from the truth:
+
+    * The original replaced only ``/`` and called itself "live-verified". It was
+      verified, against ``/Users/x/Projects/neurobase`` — no dot, no space.
+    * The first fix replaced ``/``, ``.`` and space, honestly documented as an
+      *observed* class from 33 samples. Those 33 contained no underscore, so it
+      would still have missed every ``my_project`` path.
+
+    Only running a session in a deliberately hostile directory settled it. See
+    ``docs/known-gaps.md`` G9.
+
+    **Residual.** Non-ASCII characters are untested; by the rule above they should
+    also collapse to ``-``, but no sample or probe covered them. This is why
+    ``import_from_claude_memory`` reports the directory it searched instead of
+    returning empty — a wrong derivation stays visible rather than looking like
+    "nothing to import".
+
+    ``as_posix()`` (not ``str()``) so the rule applies on Windows too, where
+    ``str(WindowsPath(...))`` uses ``\\`` and would leave separators un-encoded.
+    """
+    return _PROJECT_DIR_REWRITE_RE.sub("-", project_root.as_posix())
+
+
+def claude_memory_dir(project_root: Path) -> Path:
+    """Claude Code's per-project auto-memory dir (spec §12.3):
+    ``~/.claude/projects/<encoded-cwd>/memory/``, where the encoding is
+    ``encode_project_path`` — read its docstring before trusting the rule."""
+    return Path.home() / ".claude" / "projects" / encode_project_path(project_root) / "memory"
 
 
 def _slugify(name: str) -> str:
@@ -332,9 +380,16 @@ def import_from_claude_memory(
     import Claude Code's auto-memory dir for ``project_root`` (a derived
     path, never one the user named directly — see ``claude_memory_dir``). A
     missing auto-memory directory is *not* an error: most projects simply
-    don't have one, so this returns an empty ``SeedResult`` rather than
-    raising."""
+    don't have one, so this returns without raising.
+
+    It does **not** return silently. The absent directory is recorded in
+    ``skipped`` so the caller can tell "looked here, nothing there" apart from
+    "found nothing to do". Because the path is *derived* rather than named by the
+    user, a wrong derivation is otherwise indistinguishable from an empty import —
+    which is exactly how G9 stayed invisible through three separate
+    investigations. Naming the directory costs one entry and makes the next
+    encoding drift self-diagnosing."""
     mem_dir = claude_memory_dir(project_root)
     if not mem_dir.is_dir():
-        return SeedResult()
+        return SeedResult(skipped=[(str(mem_dir), "no claude-memory dir at the derived path")])
     return _import_tree(root, project, mem_dir, "claude-memory", extra_patterns=extra_patterns)

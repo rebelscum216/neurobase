@@ -822,7 +822,14 @@ of its own provenance-checking.
 
 ### G9 — `seed --from-claude-memory` derives Claude Code's directory name with the wrong encoding, so it imports nothing and exits 0
 
-- **status:** open
+- **status:** **fixed** — `encode_project_path` now rewrites **every character
+  outside `[A-Za-z0-9-]`** to `-`, established by **direct experiment** (a real
+  session run in a directory containing `_`, space, `(`, `)`, `.` and `+`) and
+  cross-checked against 33 independently recovered ground-truth pairs; and a
+  missing derived directory is now **reported in `skipped`**, naming the exact
+  path searched, so a future drift is visible instead of silent. The entry is kept
+  because the *reasoning* is the durable part: **two successive fixes were wrong
+  in the same way before the experiment settled it** — see *Resolution*.
 - **severity:** **major** — the command reports success while doing nothing, and
   it fails for nearly every project path on this machine. A silent no-op is worse
   than a crash here: seeding is a one-shot bootstrap a user runs once, sees
@@ -896,3 +903,123 @@ facts imported) — so only the derivation is broken, not the importer.
   `P2-SAFETY-SECURITY-013` in the Phase G review — a shipped sentence asserting a
   property the code does not have, which survives precisely because it reads like
   a conclusion someone already checked.
+
+**Resolution (2026-08-02).** All three fix directions landed — but only after a
+second wrong answer, which is the most useful part of this entry.
+
+**The rule is `[^A-Za-z0-9-]` → `-`**, character-for-character (encoded name and
+path are always the same length), with an existing `-` preserved so `/a/-b` →
+`-a--b`.
+
+**Three attempts, and why the first two failed identically.** Each inferred a rule
+from paths that could not distinguish it from the truth:
+
+| # | Rule | Evidence | Why it was wrong |
+|---|---|---|---|
+| 1 | `/` only | "live-verified" against `/Users/x/Projects/neurobase` | The sample had no dot and no space. Real verification, unrepresentative input. |
+| 2 | `/`, `.`, space | 33 ground-truth pairs, honestly documented as *observed, not specified* | None of the 33 paths contained an underscore. Would still have missed every `my_project`. |
+| 3 | `[^A-Za-z0-9-]` | **A deliberate experiment** | — |
+
+Attempt 2 is the instructive one: its caveat was *correct* and *explicit* — the
+class was labelled observed-not-specified, and the residual was written into the
+docstring, the spec and this entry. It was still shipped-wrong, because a
+documented residual is not a closed one. **The evidence was reachable the whole
+time; nobody had run the experiment.**
+
+**The experiment.** A throwaway directory containing `_`, space, `(`, `)`, `.` and
+`+`, one real session run inside it, then read back what Claude Code named it:
+
+```
+/private/tmp/nbprobe_A (B).C+D/x_y   →   -private-tmp-nbprobe-A--B--C-D-x-y
+```
+
+Every special collapsed to `-`. The resulting rule then reproduced **33 of 34**
+recovered ground-truth pairs; the one exception is a renamed folder, not an
+encoding failure (`.../mergely` recorded inside `...-mergely-bwe`, whose dominant
+`cwd` matches its own name and whose old path no longer exists). The superseded
+`[/. ]` rule reproduced only 32.
+
+**Tests.** The regression fixtures include the probe result verbatim plus each
+trigger in isolation — dot, space, **underscore**, parens, plus — and assert that
+each fixture actually discriminates against *both* prior rules, so neither the
+original bug nor the first fix can pass. All three behaviours are
+mutation-verified: reverting to `[/]` fails 7 fixtures, reverting to `[/. ]` still
+fails 4, and removing the `skipped` entry fails the reporting test.
+
+**Residual.** Non-ASCII characters remain untested; by the rule above they should
+also collapse to `-`, but no sample or probe covered them. This is precisely why
+the *reporting* half matters more than the encoding half — a wrong derivation is
+now visible in the command's own output instead of indistinguishable from
+"nothing to import". Verified end-to-end: `TransactionTracker` resolves to **16**
+previously-invisible facts, `Baysis-dev` to **24**. The
+`neurobase` sub-checkout resolves correctly to a directory that genuinely has no
+`memory/` subdir — which the command now *reports* rather than presenting as a
+successful empty import.
+
+---
+
+### G10 — a session's richest record can expire before anything reads it, and the fallback is silent
+
+- **status:** open
+- **severity:** moderate — no data loss in the store's own terms (the
+  deterministic capture always survives), but the loss is **permanent and
+  invisible**. Distill is the only step that ever summarizes a whole session; once
+  its input is gone the session can never be distilled, on any later pass, and
+  nothing anywhere records that a richer record was available and missed.
+- **found:** 2026-08-01 by Claude, while establishing whether any per-session
+  summary is durable. Filed 2026-08-02. Distinct from **G8**: G8 is "established
+  facts stop being re-examined once a project goes quiet"; this is "the best
+  available source for a session summary can disappear before first distillation."
+
+**The dependency.** `distill` is the only LLM pass that reads a whole session, and
+it reads it from the **transcript on disk**, not from the store. The raw capture
+records `transcript_path` in frontmatter and the digest cache is keyed by a
+fingerprint of the raw body plus the transcript's **path, size, and mtime**
+(`curator/distill.py`). Neurobase does not own that file, does not copy it, and
+does not pin it — the agent harness does, and harnesses rotate, truncate, and
+delete their own session logs on their own schedule.
+
+**The window.** Distill runs only inside `curate`, and `curate --if-stale` — the
+detached spawn from `SessionStart` that drives the common case — refuses to run
+until an unconsumed raw is older than `curate.stale_hours` (**12h** by default).
+So there is a *guaranteed minimum delay* between a session ending and its
+transcript first being read, and the delay is unbounded above: if no session
+starts in that project again, the pass never fires at all. Every hour in that
+window is one where the transcript can vanish.
+
+**Why it is silent.** A missing or unreadable transcript is a **fallback, not an
+error**: distill returns the original document, the pass proceeds on the
+deterministic skim, and the summary's `fallback` counter increments. That counter
+is the only trace, it is not attributed to a particular session, and nothing in
+the store, the UI, or `doctor` ever says "this session had a transcript and no
+longer does." A capture that fell back is indistinguishable from one that was
+never eligible.
+
+**Evidence.** On this machine at the time of filing, **7 of 102 captured sessions
+had ever been distilled** — `baysis-dev` 7 of 8, `neurobase` 0 of 4, and
+`commandcenter` **0 of 90**. The `commandcenter` store was backfilled on
+2026-07-15 from sessions dated 2026-07-03 onward, so most of its transcripts were
+already days old when the store was created. That is consistent with wholesale
+expiry before first curation, though it is not proof — no record survives that
+could distinguish "transcript gone" from "never resolvable," which is precisely
+the defect.
+
+**Fix direction.** Ordered cheapest first; the first is worth doing regardless of
+the others.
+
+- **Make the loss observable.** At capture time the transcript is known to exist —
+  record enough (existence, size, mtime) that a later pass can distinguish *gone*
+  from *never there*, and surface "N sessions lost their transcript before
+  distillation" in the `curate` summary and in `doctor`. This does not save a
+  single session, but it converts a silent permanent loss into a reported one.
+- **Decouple distillation from the staleness gate.** The 12h window exists to keep
+  the `SessionStart` spawn cheap on the common case; it is not a statement about
+  when a transcript is readable. Distilling eagerly at capture time — or on a much
+  shorter clock than the fold — removes most of the window. Note this trades the
+  hook's no-LLM guarantee, so it must not run *in* the hook.
+- **Do not rely on the harness keeping the file.** The durable fix is for the
+  session's richest available representation to be captured while it is
+  demonstrably present, rather than referenced by path and read later. See
+  `docs/notes/2026-08-01-memory-layering-ideas.md` §5.1 — an agent-authored wrap
+  summary is a strictly better source than the transcript *and* has no expiry, so
+  the two fixes converge.

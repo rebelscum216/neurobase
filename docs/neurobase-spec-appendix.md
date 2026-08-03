@@ -1660,10 +1660,30 @@ Phase 8 adds the machinery §10 left implicit:
   well-known path already covers (this restates the Invariants section's
   rule above; same workstream B tests cover it here).
 
-**`--from-claude-memory`'s discovery path is live-verified, not guessed.**
-Claude Code's per-project auto-memory directory is
-`~/.claude/projects/<cwd-with-every-'/'-replaced-by-'-'>/memory/` — confirmed
-on disk (`/Users/x/Projects/neurobase` →
+**`--from-claude-memory`'s discovery path is established by experiment.** Claude
+Code's per-project auto-memory directory is `~/.claude/projects/<encoded-cwd>/memory/`,
+where the encoding rewrites **every character outside `[A-Za-z0-9-]`** to `-`,
+character-for-character (encoded name and path are the same length; an existing
+`-` is preserved, so `/a/-b` → `-a--b`).
+
+Established 2026-08-02 by running a real session in a directory deliberately
+containing `_`, space, `(`, `)`, `.` and `+`, then reading back the name Claude
+Code produced (`/private/tmp/nbprobe_A (B).C+D/x_y` →
+`-private-tmp-nbprobe-A--B--C-D-x-y`). The rule reproduces **33 of 34**
+independently recovered ground-truth pairs; the exception is a renamed folder,
+not an encoding failure.
+
+⚠️ **This supersedes two earlier statements of the rule, both wrong the same way
+(G9).** The original said `'/'` → `'-'` and called itself "live-verified" — real
+run, unrepresentative sample (`/Users/x/Projects/neurobase`: no dot, no space).
+The first correction said `'/'`, `'.'` and space, derived from 33 samples and
+honestly labelled *observed, not specified* — but none of those 33 contained an
+underscore, so it would still have missed every `my_project` path. **A documented
+residual is not a closed one**: the experiment that settled it was available the
+whole time. Non-ASCII characters remain untested, which is why a missing derived
+directory is **reported in `skipped`** rather than returning an empty result.
+
+Confirmed on disk (`/Users/x/Projects/neurobase` →
 `~/.claude/projects/-Users-x-Projects-neurobase/memory/`, containing exactly
 `MEMORY.md` — the index, skipped — plus topic files with frontmatter
 `name`/`description`/`metadata.type`, precisely the shape §10's existing

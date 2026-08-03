@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -485,15 +486,81 @@ def test_claude_memory_dir_path_construction(
     assert seed.claude_memory_dir(project_root) == expected
 
 
-def test_import_from_claude_memory_missing_dir_is_not_an_error(
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        # The exact probe result. A real session was run in this directory and
+        # Claude Code produced this name; every special collapsed to "-".
+        ("/private/tmp/nbprobe_A (B).C+D/x_y", "-private-tmp-nbprobe-A--B--C-D-x-y"),
+        # The G9 regression: a dot AND a space, both of which the original
+        # `.replace("/", "-")` preserved.
+        (
+            "/Users/andrew.smith/AI Projects/Neurobase",
+            "-Users-andrew-smith-AI-Projects-Neurobase",
+        ),
+        # Each trigger in isolation, so a partial fix cannot pass. The underscore
+        # case is the one the FIRST fix got wrong: its class was [/. ], derived
+        # from 33 samples that happened to contain no underscore.
+        ("/Users/a.b/proj", "-Users-a-b-proj"),
+        ("/Users/ab/My Proj", "-Users-ab-My-Proj"),
+        ("/Users/ab/my_project", "-Users-ab-my-project"),
+        ("/Users/ab/proj(1)", "-Users-ab-proj-1-"),
+        ("/Users/ab/a+b", "-Users-ab-a-b"),
+        # An existing hyphen survives, so adjacent specials yield runs of "-".
+        ("/Users/ab/-already", "-Users-ab--already"),
+        # No specials at all — the case the original test used; must still hold.
+        ("/Users/x/Projects/neurobase", "-Users-x-Projects-neurobase"),
+    ],
+)
+def test_encode_project_path_rewrites_every_non_alnum_not_only_separators(
+    path: str, expected: str
+) -> None:
+    """Every character outside [A-Za-z0-9-] becomes "-" (G9).
+
+    Guards against BOTH prior wrong rules: the original `[/]`, and the first
+    fix's `[/. ]` which still preserved underscores.
+    """
+    encoded = seed.encode_project_path(Path(path))
+    assert encoded == expected
+    # Character-for-character: the encoded name is the same length as the path.
+    assert len(encoded) == len(path)
+    # Only [A-Za-z0-9-] may survive.
+    assert re.fullmatch(r"[A-Za-z0-9-]*", encoded), encoded
+    # Assert each fixture actually discriminates against the two prior rules.
+    if any(c not in "/" for c in path if not (c.isalnum() or c == "-")):
+        assert encoded != path.replace("/", "-"), "fixture cannot catch the original bug"
+    if any(c not in "/. " for c in path if not (c.isalnum() or c == "-")):
+        naive = path.replace("/", "-").replace(".", "-").replace(" ", "-")
+        assert encoded != naive, "fixture cannot catch the first fix's [/. ] rule"
+
+
+def test_encode_project_path_preserves_an_existing_hyphen() -> None:
+    """A path segment that already contains `-` yields a double hyphen — the
+    encoding does not collapse runs. Confirmed against a real scratchpad dir."""
+    assert seed.encode_project_path(Path("/tmp/-Users-x-proj")) == "-tmp--Users-x-proj"
+
+
+def test_import_from_claude_memory_missing_dir_is_not_an_error_but_is_reported(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _isolate_home(tmp_path, monkeypatch)
+    """A missing auto-memory dir must not raise — but must not be silent either.
 
-    result = seed.import_from_claude_memory(root, "proj", tmp_path / "some-project")
+    G9: the derived path is not something the user named, so an empty result is
+    indistinguishable from a wrong derivation. The looked-for path is reported in
+    `skipped` precisely so the next encoding drift is visible in the output.
+    """
+    _isolate_home(tmp_path, monkeypatch)
+    project_root = tmp_path / "some-project"
+
+    result = seed.import_from_claude_memory(root, "proj", project_root)
 
     assert result.imported == []
-    assert result.skipped == []
+    assert result.unchanged == []
+    # The miss is reported, and it names the exact directory that was searched.
+    assert len(result.skipped) == 1
+    reported_path, reason = result.skipped[0]
+    assert reported_path == str(seed.claude_memory_dir(project_root))
+    assert "no claude-memory dir" in reason
 
 
 def test_import_from_claude_memory_imports_topic_files_skips_index(

@@ -17,6 +17,7 @@ from neurobase.brain.base import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_TIMEOUT_SECONDS,
     BrainError,
+    BrainUsage,
     RetryableBrainError,
     call_with_retry,
     parse_plan_json,
@@ -102,7 +103,15 @@ def _default_runner(cmd: list[str], *, timeout: int) -> subprocess.CompletedProc
 
 class ClaudeCLIBrain:
     """`claude -p` backend. CLI backends use the CLI's own model, so no model
-    override is passed (spec §10 config note)."""
+    override is passed (spec §10 config note).
+
+    Accumulates per-call token usage in ``self.usage`` (see ``BrainUsage``), which
+    the curator records on its journal entry. Two reasons that is worth the few
+    lines: curation cost was previously unanswerable from any artifact, and — found
+    while adding this — **the CLI's model is not stable across invocations**. Two
+    probes with identical flags reported `claude-opus-4-8[1m]` and
+    `claude-opus-5[1m]`. Anything comparing two brain calls has to record which
+    model served each, or it cannot claim they were comparable."""
 
     name = "claude-cli"
 
@@ -116,6 +125,7 @@ class ClaudeCLIBrain:
         self._timeout = timeout
         self._max_tokens = max_tokens
         self._runner = runner
+        self.usage = BrainUsage()
 
     def _once(self, system: str, user: str) -> str:
         """One attempt: returns the model's answer string from ``.result``.
@@ -155,6 +165,9 @@ class ClaudeCLIBrain:
         result = envelope.get("result")
         if not isinstance(result, str):
             raise RetryableBrainError("claude -p envelope had no string .result")
+        # Accounting after the success checks: a retried attempt should not be
+        # counted, and a failed one has no usable usage block.
+        self.usage.record(envelope)
         return result
 
     def text(self, system: str, user: str) -> str:

@@ -557,3 +557,57 @@ def test_no_fold_when_the_budget_stops_the_pass_before_any_batch_commits(root: P
     # model — so assert on the artifact synthesis always writes.
     node = store.memory_dir("proj", root) / "nodes" / f"{engine.node_name('proj')}.md"
     assert node.exists()
+
+
+# --- usage proxying through the budget wrapper ----------------------------
+
+
+def test_budgeted_brain_proxies_usage_from_one_shared_inner() -> None:
+    """Every wrapper and every `for_distill()` view shares one inner brain, so the
+    counters must accumulate across the whole pass regardless of which view made
+    the call — that is what makes a single per-pass total meaningful."""
+    from neurobase.brain.base import BrainUsage
+
+    class Inner:
+        name = "inner"
+
+        def __init__(self) -> None:
+            self.usage = BrainUsage()
+
+        def text(self, system: str, user: str) -> str:
+            self.usage.record({"usage": {"input_tokens": 7, "output_tokens": 1}})
+            return "x"
+
+        def plan_json(self, system: str, user: str) -> dict:
+            self.usage.record({"usage": {"input_tokens": 3, "output_tokens": 2}})
+            return {"upserts": [], "tombstones": []}
+
+    inner = Inner()
+    wrapper = budget_mod.BudgetedBrain(inner, budget_mod.explicit_budget())
+    distill_view = wrapper.for_distill()
+
+    distill_view.text("s", "u")
+    wrapper.plan_json("s", "u")
+
+    assert wrapper.usage is inner.usage
+    assert distill_view.usage is inner.usage  # the view is not a separate ledger
+    assert inner.usage.calls == 2
+    assert inner.usage.input_tokens == 10
+
+
+def test_budgeted_brain_usage_is_none_when_the_backend_reports_nothing() -> None:
+    """The Codex CLI's JSON stream carries no token fields, and every fake in this
+    suite has no counters — so `usage` must be absent rather than zero. A zero
+    total would read as "curation was free"."""
+
+    class NoUsage:
+        name = "no-usage"
+
+        def text(self, system: str, user: str) -> str:
+            return "x"
+
+        def plan_json(self, system: str, user: str) -> dict:
+            return {"upserts": [], "tombstones": []}
+
+    wrapper = budget_mod.BudgetedBrain(NoUsage(), budget_mod.explicit_budget())
+    assert wrapper.usage is None

@@ -14,9 +14,10 @@ curator turns that into "leave every raw unconsumed" (decision D9's hard rule).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_RETRIES = 1
@@ -84,3 +85,56 @@ def call_with_retry(attempt, *, retries: int = DEFAULT_RETRIES):
             last = exc
     assert last is not None
     raise BrainError(str(last)) from last
+
+
+@dataclasses.dataclass
+class BrainUsage:
+    """Token/cost counters accumulated across a brain's calls.
+
+    Optional by design: a brain MAY expose ``usage``, and readers use
+    ``getattr(brain, "usage", None)`` — so backends that report nothing (the Codex
+    CLI's JSON stream carries no token fields) and the test fakes both stay valid
+    without implementing it. That keeps this off the ``Brain`` protocol, which every
+    fake in the suite would otherwise have to satisfy.
+
+    ``models`` counts calls per model id because CLI backends do not pin a model:
+    two `claude -p` probes with identical flags reported different ones, so "both
+    calls used the same model" is a claim that needs evidence, not an assumption.
+    """
+
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cost_usd: float = 0.0
+    models: dict[str, int] = dataclasses.field(default_factory=dict)
+
+    def record(self, envelope: dict[str, Any]) -> None:
+        """Fold one CLI envelope's usage in. Tolerant by intent: a missing or
+        malformed ``usage`` block must never fail a brain call that otherwise
+        succeeded — accounting is observability, not correctness."""
+        self.calls += 1
+        usage = envelope.get("usage")
+        if isinstance(usage, dict):
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ):
+                value = usage.get(field)
+                if isinstance(value, int):
+                    setattr(self, field, getattr(self, field) + value)
+        cost = envelope.get("total_cost_usd")
+        if isinstance(cost, (int, float)):
+            self.cost_usd += float(cost)
+        model_usage = envelope.get("modelUsage")
+        if isinstance(model_usage, dict):
+            for model in model_usage:
+                self.models[str(model)] = self.models.get(str(model), 0) + 1
+
+    def as_dict(self) -> dict[str, Any]:
+        out = dataclasses.asdict(self)
+        out["cost_usd"] = round(self.cost_usd, 6)
+        return out

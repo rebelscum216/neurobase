@@ -57,7 +57,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0024](0024-reopen-a-rejected-proposal.md) | `reopen` — the one sanctioned `rejected → proposed` transition (Reconsider/un-reject) | Accepted | Web UI reconsider action |
 | [0025](0025-brain-call-harness-isolation.md) | Brain-call harness isolation — the curator call must *be* a curator call | Accepted | G5 |
 | [0026](0026-denylist-is-repo-scoped.md) | `denylist` matching is repo-scoped — an entry inside a repo is not a carve-out (revises ADR-0019 denylist granularity) | Accepted | independent review I3/I5/I7 |
-| [0027](0027-authored-raw-authority-field.md) | `authority` on a raw — an agent-authored digest is a distinct capture class, on schema 1 (D45–D48) | **Proposed** | memory-layering note decision 6 |
+| [0027](0027-authored-raw-authority-field.md) | `authority` on a raw — an agent-authored digest is a distinct capture class, on schema 1 (D45–D48) | Accepted | memory-layering note decision 6 |
 
 ADRs 0016–0018 are the three **Phase-0** decisions promoted from the
 [hardening plan](../notes/2026-07-21-hardening-plan-draft.md) (per the

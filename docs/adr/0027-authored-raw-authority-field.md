@@ -1,7 +1,11 @@
 # ADR-0027: `authority` on a raw — an agent-authored digest is a distinct capture class, on schema 1
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-04
+- **Accepted via** a 3-round Claude↔Codex relay (baton:
+  [`docs/reviews/2026-08-04-route-memory-layering-s11.md`](../reviews/2026-08-04-route-memory-layering-s11.md)),
+  verdict `APPROVED WITH NITS` on `632ad48`. 13 findings, no P0/P1. Immutable from here
+  ([ADR README](README.md)) — a change needs a superseding ADR.
 - **Resolves:** decision 6 ("ship the session slice schema-1-only") of the
   memory-layering working note, 2026-08-01, §9.4/§10.2/§11.4. ⚠️ **That note is
   unpublished** — it is a private lab notebook, not committed to this repo, so the
@@ -231,6 +235,9 @@ internals directly is a one-off harness, not a demonstration of a supported path
   item in the [build-plan Backlog](../neurobase-build-plan.md), which deliberately ranks
   no remedy. ([`G12`](../known-gaps.md) is the narrower, separate defect that the
   sizing *comment* encodes a false cost model.)
-- **Process note.** This ADR is `Proposed`, not `Accepted`, and is not the routing of
-  §11 in full — only the one slice that is decidable on evidence already in hand. The
-  rest of §11 still needs walking piece by piece, which is the standing next action.
+- **Process note.** This ADR is **not** the routing of §11 in full — only the one slice
+  decidable on evidence already in hand (note decision 6). Decisions 1, 2, 3, 5, 7
+  (`VaultProvider` shipped vs. personal) and 8 (derive vs. duplicate) remain open and
+  are Andrew's to make; §§11.1/11.6 stayed notebook. What this ADR settles is narrow by
+  design, and D47's implementation requirements are the part that must not be dropped
+  when the Backlog verb is eventually built.

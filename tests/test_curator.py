@@ -1036,3 +1036,38 @@ def test_curator_prompts_keep_their_untrusted_data_fence(prompt: str) -> None:
     # not evidence that *this* call is one of them. (Substring only — PLAN_SYSTEM
     # emphasises it as "NOT grounds to decline", NODE_SYSTEM does not.)
     assert "grounds to decline" in text
+
+
+def test_brain_usage_rides_the_journal_and_never_the_summary(root: Path) -> None:
+    """Same split `fold` and `distill_detail` use. The summary's key set is pinned
+    (see `test_summary_key_set_is_exact_and_carries_no_fold`), so token accounting
+    must not grow it — and the journal is where per-pass detail already lives."""
+    from neurobase.brain.base import BrainUsage
+
+    class UsageBrain(FakeBrain):
+        name = "usage-fake"
+
+        def __init__(self, plan: dict) -> None:
+            super().__init__(plan)
+            self.usage = BrainUsage()
+
+        def plan_json(self, system: str, user: str) -> dict:
+            self.usage.record(
+                {
+                    "usage": {"input_tokens": 40, "output_tokens": 9},
+                    "total_cost_usd": 0.02,
+                    "modelUsage": {"claude-opus-5[1m]": {}},
+                }
+            )
+            return super().plan_json(system, user)
+
+    _write_raw(root, "proj", "r1.md")
+    plan = {"upserts": [{"slug": "f", "body": "b", "from_raw": ["r1.md"]}], "tombstones": []}
+
+    summary = engine.curate(root, "proj", UsageBrain(plan))
+
+    assert "brain_usage" not in summary  # pinned key set is untouched
+    record = _read_log(root, "proj")[-1]
+    usage = record["brain_usage"]
+    assert usage["input_tokens"] == 40
+    assert usage["models"] == {"claude-opus-5[1m]": 1}

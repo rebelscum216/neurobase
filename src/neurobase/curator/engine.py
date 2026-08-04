@@ -305,11 +305,17 @@ def _log_pass(
     *,
     fold: dict[str, Any] | None = None,
     distill_detail: dict[str, int] | None = None,
+    brain_usage: dict[str, Any] | None = None,
 ) -> None:
     """Append one pass record to the journal. ``fold`` (ADR-0022 B2), when
     given, rides alongside the summary keys — it is deliberately NOT a summary
     key, because the CLI prints the summary as JSON and the fold carries raw
     session ids (loopback-only sensitivity, spec §2).
+
+    ``brain_usage`` likewise: token/cost totals for the pass, plus which model ids
+    served it — CLI backends do not pin a model, so "the same model ran this pass"
+    needs recording rather than assuming. It answers "what does curation cost us",
+    which no artifact could previously report.
 
     ``distill_detail`` rides the record for the same reason: it decomposes
     ``fallback`` by cause (G10's vanished transcript vs an agent with no verified
@@ -322,6 +328,8 @@ def _log_pass(
         record["fold"] = fold
     if distill_detail:
         record["distill_detail"] = distill_detail
+    if brain_usage:
+        record["brain_usage"] = brain_usage
     with (mem / CURATOR_LOG).open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -424,6 +432,14 @@ def _curate_unlocked(
         "fallback": distill_all_counts["fallback"],
     }
     distill_detail = {k: v for k, v in distill_all_counts.items() if k not in distill_counts}
+
+    def _usage_now() -> dict[str, Any] | None:
+        """Token/cost totals so far, or ``None`` when the backend reports none — the
+        Codex CLI's JSON stream carries no token fields, and the test fakes have no
+        counters, so this must degrade to absent rather than to zeros (a zero would
+        read as "curation was free")."""
+        usage = getattr(brain, "usage", None)
+        return usage.as_dict() if usage is not None else None
 
     remaining = list(raw_docs)
     plans: list[dict[str, Any]] = []
@@ -547,7 +563,13 @@ def _curate_unlocked(
                 **distill_counts,
                 "error": plan_error,
             }
-            _log_pass(handle, project, summary, distill_detail=distill_detail)
+            _log_pass(
+                handle,
+                project,
+                summary,
+                distill_detail=distill_detail,
+                brain_usage=_usage_now(),
+            )
             return summary
         dry_summary: dict[str, Any] = {
             "status": "dry-run",
@@ -575,7 +597,13 @@ def _curate_unlocked(
             **distill_counts,
             "error": plan_error,
         }
-        _log_pass(handle, project, summary, distill_detail=distill_detail)
+        _log_pass(
+            handle,
+            project,
+            summary,
+            distill_detail=distill_detail,
+            brain_usage=_usage_now(),
+        )
         return summary
 
     # Reconcile the fold's removal lists against pass-end reality (D22). The
@@ -712,6 +740,7 @@ def _curate_unlocked(
         summary,
         fold=fold if batch_count else None,
         distill_detail=distill_detail,
+        brain_usage=_usage_now(),
     )
     return summary
 

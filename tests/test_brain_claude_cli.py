@@ -189,3 +189,128 @@ def test_missing_binary_raises_brain_error_without_retry() -> None:
     with pytest.raises(BrainError, match="not found"):
         ClaudeCLIBrain(runner=runner).text("sys", "user")
     assert len(calls) == 1  # not retryable
+
+
+# --- token accounting (BrainUsage) ---------------------------------------
+#
+# Curation cost was previously unanswerable from any artifact: the envelope's
+# `usage` block was parsed for `.result` and discarded. `models` is the
+# load-bearing field — two probes of `claude -p` with identical flags reported
+# different model ids, so "these two calls are comparable" needs evidence.
+
+
+def _usage_envelope(
+    result: str = "ok",
+    *,
+    input_tokens: int = 100,
+    output_tokens: int = 20,
+    cache_read: int = 5_000,
+    cache_creation: int = 0,
+    cost: float = 0.01,
+    model: str = "claude-opus-5[1m]",
+) -> str:
+    return json.dumps(
+        {
+            "type": "result",
+            "is_error": False,
+            "result": result,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_creation,
+            },
+            "total_cost_usd": cost,
+            "modelUsage": {model: {"inputTokens": input_tokens}},
+        }
+    )
+
+
+def test_usage_accumulates_across_calls() -> None:
+    def runner(cmd, *, timeout):
+        return _proc(_usage_envelope())
+
+    brain = ClaudeCLIBrain(runner=runner)
+    brain.text("sys", "a")
+    brain.text("sys", "b")
+
+    assert brain.usage.calls == 2
+    assert brain.usage.input_tokens == 200
+    assert brain.usage.output_tokens == 40
+    assert brain.usage.cache_read_input_tokens == 10_000
+    assert brain.usage.cost_usd == pytest.approx(0.02)
+
+
+def test_usage_records_which_model_served_each_call() -> None:
+    """The reason this field exists: the CLI does not pin a model. A pass whose
+    calls were served by two different models cannot support a same-model claim,
+    and without this the mixture is invisible."""
+    envelopes = iter(
+        [
+            _usage_envelope(model="claude-opus-5[1m]"),
+            _usage_envelope(model="claude-opus-4-8[1m]"),
+            _usage_envelope(model="claude-opus-5[1m]"),
+        ]
+    )
+
+    def runner(cmd, *, timeout):
+        return _proc(next(envelopes))
+
+    brain = ClaudeCLIBrain(runner=runner)
+    for _ in range(3):
+        brain.text("sys", "user")
+
+    assert brain.usage.models == {"claude-opus-5[1m]": 2, "claude-opus-4-8[1m]": 1}
+    assert len(brain.usage.models) > 1  # the mixture is what a reader must see
+
+
+def test_a_missing_or_malformed_usage_block_never_fails_the_call() -> None:
+    """Accounting is observability, not correctness: an envelope that answers
+    correctly but reports no usage must still return its answer. The pre-existing
+    envelopes in this file have no `usage` key at all, which is the same path."""
+
+    def runner(cmd, *, timeout):
+        return _proc(
+            json.dumps(
+                {
+                    "type": "result",
+                    "is_error": False,
+                    "result": "still fine",
+                    "usage": "not-a-dict",
+                    "total_cost_usd": "free",
+                    "modelUsage": ["not", "a", "dict"],
+                }
+            )
+        )
+
+    brain = ClaudeCLIBrain(runner=runner)
+    assert brain.text("sys", "user") == "still fine"
+    assert brain.usage.calls == 1  # the call happened…
+    assert brain.usage.input_tokens == 0  # …but nothing was claimed about it
+    assert brain.usage.models == {}
+
+
+def test_a_failed_attempt_is_not_counted() -> None:
+    """`record()` runs after the success checks, so a non-zero exit contributes
+    nothing — otherwise a retried call would inflate the totals and a failing
+    backend would look expensive rather than broken."""
+
+    def runner(cmd, *, timeout):
+        return _proc("boom", stderr="nope", returncode=1)
+
+    brain = ClaudeCLIBrain(runner=runner)
+    with pytest.raises(BrainError):
+        brain.text("sys", "user")
+    assert brain.usage.calls == 0
+
+
+def test_as_dict_is_json_safe_and_rounds_cost() -> None:
+    def runner(cmd, *, timeout):
+        return _proc(_usage_envelope(cost=0.0123456789))
+
+    brain = ClaudeCLIBrain(runner=runner)
+    brain.text("sys", "user")
+    payload = brain.usage.as_dict()
+    json.dumps(payload)  # must survive the journal writer
+    assert payload["cost_usd"] == 0.012346
+    assert payload["models"] == {"claude-opus-5[1m]": 1}

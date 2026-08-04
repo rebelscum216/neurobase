@@ -32,7 +32,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from neurobase.brain.base import DEFAULT_RETRIES, Brain
 
@@ -225,6 +225,15 @@ class BudgetedBrain:
     def for_distill(self) -> BudgetedBrain:
         """The same ledger, charged against the distill allowance."""
         return BudgetedBrain(self._inner, self._budget, distilling=True)
+
+    @property
+    def usage(self) -> Any:
+        """Delegate to the wrapped brain, or ``None`` when it reports nothing.
+
+        Every wrapper and every ``for_distill()`` view shares one inner brain, so
+        the counters accumulate across the whole pass regardless of which view made
+        the call — which is what makes a single per-pass total meaningful."""
+        return getattr(self._inner, "usage", None)
 
     def plan_json(self, system: str, user: str) -> dict:
         self._budget.debit(distilling=self._distilling)

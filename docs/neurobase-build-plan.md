@@ -287,30 +287,36 @@ Cursor — AGENTS.md route makes read-side cheap) · `recall <topic>` explicit p
 · Obsidian starter vault config · basic-memory importer · PEP 541 claim on
 `neurobase` · multi-machine story (git-sync the store; docs only, no service).
 
-**Authored session digests — `neurobase wrap`, justified on curation cost alone.**
-Retroactive transcript distill is *structurally* cache-hostile, not merely slow.
-Measured 2026-08-04 over 22 calls / 6 generations: **959,550 cache-creation tokens at a
-0.44% cache hit rate**, because distill chunks a transcript no later call re-reads —
-every chunk is unique, so the cache is written and never read. Per-capture distill
-latency measured **1.8–2.3 min** (worst 3 m 32 s), which is separately why
-`auto_max_raws: 40` cannot fit `auto_max_seconds: 900`. The relief is not a better
-schedule: a body written as a **v1 raw** (no `transcript_path`) skips distill entirely
-— `_distill_one` returns before any cache, render or brain call
+**Authored session digests — an authored-body ingestion path, justified on curation cost
+alone.** Retroactive transcript distill is *structurally* cache-hostile, not merely
+slow. Measured 2026-08-04 over 22 calls / 6 generations: **959,550 cache-creation tokens
+at a 0.44% cache hit rate**, because distill chunks a rendered transcript that later
+passes do not re-read, so across clean session-distill calls the prompt cache is
+normally written without being read back. Per-capture distill latency measured
+**1.8–2.3 min** (worst 3 m 32 s) — the same measurement behind `G12`. The relief is not
+a better schedule: a body written as a **v1 raw** (no `transcript_path`) skips distill
+entirely — `_distill_one` returns before any cache, render or brain call
 (`curator/distill.py:478-481`) and the curator folds the body as written (`:607-609`) —
-so a wrapped session costs the fold and nothing else, and is never exposed to `G10`.
-The CLI verb is the thin part (`neurobase wrap --summary -`, fed by the summary `/wrap`
-already writes, per "derive, don't duplicate"). **The real work is identity, ordering,
-locking, redaction and provenance:** a raw is keyed by `captured_at`, not `session_id`
-(`core/store.py:200-211`), and the scribe stamps a fresh one every capture
-(`adapters/claude/scribe.py:347`), so a naive wrap-time write *adds* a second raw and
-the fold sees the session twice — live evidence is four raws for one session in
-`transactiontracker`. Needs [ADR-0027](adr/0027-authored-raw-authority-field.md)'s
-`authority` field to stay honest about what it wrote, the project write lock
-(ADR-0023) to order against `SessionEnd` capture, and its own D13 pass because
-`write_raw` writes the supplied body as-is.
-*Justified independently of whether authored summaries read better* — §10.3 of
-`docs/notes/2026-08-01-memory-layering-ideas.md` is still open, and the cost argument
-does not depend on it. Codex sessions stay skims either way (no verified renderer).
+so a wrapped session adds no distill cost, and is never exposed to `G10`.
+**The real work is identity, ordering, locking, redaction and provenance**, and it is
+not thin: a raw is addressed by the whole `(captured_at, agent, sid8(session_id))` tuple
+(`core/store.py:200-211`) — `session_id` alone cannot address one — and the scribe
+stamps a fresh timestamp every capture (`adapters/claude/scribe.py:347`), so a naive
+wrap-time write *adds* a second raw and the fold sees the session twice; live evidence
+is four raws for one session in `transactiontracker`. Needs
+[ADR-0027](adr/0027-authored-raw-authority-field.md)'s `authority` field (with D47's
+`_raw_payload` exclusion and its paired fixtures) to stay honest about what it wrote,
+the project write lock (ADR-0023) to order against `SessionEnd` capture, and its own D13
+pass because `write_raw` writes the supplied body as-is.
+⚠️ **The interface is NOT decided.** `neurobase wrap --summary -` fed by the summary
+`/wrap` already writes ("derive, don't duplicate") is **one candidate**, and on its own
+it is insufficient — it carries no session or agent identity. Ratifying the CLI contract
+and the `/wrap` relationship is a **separate decision owed before implementation**;
+ADR-0027's "Deliberately not decided here" records the same status. Sequence that
+decision first, then the verb.
+*Justified independently of whether authored summaries read better* — that question is
+still open and the cost argument does not depend on it. Codex sessions stay skims either
+way (no verified renderer).
 
 **Project doc schema — a consistent `docs/` shape Neurobase can actually read.**
 Today ADRs, working notes, review batons, and known-gaps are conventions of *this*

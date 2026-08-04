@@ -2,9 +2,14 @@
 
 - **Status:** Proposed
 - **Date:** 2026-08-04
-- **Resolves:** decision 6 ("ship the session slice schema-1-only") of
-  [`docs/notes/2026-08-01-memory-layering-ideas.md`](../notes/2026-08-01-memory-layering-ideas.md)
-  §9.4/§10.2/§11.4
+- **Resolves:** decision 6 ("ship the session slice schema-1-only") of the
+  memory-layering working note, 2026-08-01, §9.4/§10.2/§11.4. ⚠️ **That note is
+  unpublished** — it is a private lab notebook, not committed to this repo, so the
+  section references in this ADR are provenance for the author and are **not
+  inspectable by a reader of the public repo**. The committed, inspectable evidence for
+  the claims below is the code cited inline plus
+  [`docs/notes/spikes/2026-08-04-stance-test.py`](../notes/spikes/2026-08-04-stance-test.py)
+  and its write-up. Nothing in this ADR's Decision section depends on the note.
 - **Unblocks:** the `neurobase wrap` authored-digest verb in the
   [build plan](../neurobase-build-plan.md) §6 Backlog
 - **Related:** [ADR-0014](0014-transcript-distill-curation.md) (D15–D17, the distill
@@ -25,9 +30,12 @@ measured.** A 22-call, 6-generation run across three sessions spent 154,283 outp
 tokens against **959,550 cache-creation tokens**, at a **0.44% cache hit rate** on the
 first clean run. (A later 9.34% figure is an artifact of one retry re-reading its own
 cached content and is not the figure of record.) That rate is not a tuning failure to
-be improved: distill chunks a transcript no subsequent call will ever read again, so
-every chunk is unique content — the cache is *written and never read*, and the write
-premium is paid on roughly a million tokens per pass of this size. Per-capture distill
+be improved: distill chunks a rendered transcript that later passes do not re-read — the
+digest cache, not the prompt cache, is what prevents re-distilling — so across clean
+session-distill calls the chunks are normally unique and the prompt cache is written
+without being read back. (Stated as a strong tendency rather than a guarantee: a retry
+re-reads its own prompt, which is exactly what produced the 9.34% artifact above, and
+identical content across sessions is not mechanically impossible.) Per-capture distill
 latency was separately measured at **1.8–2.3 min** across 27 captures, worst single
 capture 3 m 32 s. The measurement is attributable only because PR #17 (`0b553fa`)
 records tokens, cost and per-model call counts on the pass journal entry.
@@ -40,9 +48,11 @@ fingerprint, cache read, transcript render or brain call. `distill_docs` appends
 document **unchanged** ([`:607-609`](../../src/neurobase/curator/distill.py)), so the
 curator plans over the raw's own body. No distill call, no digest-cache entry, no
 transcript read — and therefore nothing that can expire, which means a wrapped session
-is not exposed to **`G10`** at all. One bound survives: an exceptionally large body can
-still be trimmed by the plan-payload assembler at `plan_payload_max_bytes`
-(`curator/engine.py:345,465`), so "the fold sees the body" is true up to that ceiling.
+is not exposed to **`G10`** at all. One bound survives: a raw whose body alone exceeds
+`plan_payload_max_bytes` is body-truncated (with `OVERSIZE_RAW_MARKER`) by
+`_truncate_raw_to_fit`, selected from `_next_plan_batch` when a single raw cannot fit a
+batch ([`curator/engine.py:145-200`](../../src/neurobase/curator/engine.py)). So "the
+fold sees the body" is true up to that ceiling.
 
 **3. But a body written that way is indistinguishable from a captured one.** Every raw
 today carries exactly `agent`, `session_id`, `cwd`, `branch`, `captured_at`, `consumed`
@@ -74,23 +84,65 @@ as `captured` being written explicitly, but they mean the same thing; no reader 
 treat the distinction as significant.
 
 **D46 — this lands on store schema 1. It does not bump `STORE_SCHEMA_VERSION`, and it
-does not wait for schema 2.** The precedent is ADR-0014, which introduced
-`capture_version: 2` as a **per-document** marker while `STORE_SCHEMA_VERSION` stayed
-`1` ([`core/store.py:29`](../../src/neurobase/core/store.py)). The D11 guard refuses
-only a store whose recorded `schema` *exceeds* the running binary's
-([`:120-123`](../../src/neurobase/core/store.py)); an additive optional key on a
-document never crosses it. Gating this on ADR-0016's schema 2 inverts the dependency:
-schema 2's record/source identity would then be justified by a premise — that authored
-digests are worth having — which nothing has yet tested. A migration of one optional
-key is cheaper than an abstraction built before the feature is known to be worth it.
+does not wait for schema 2.** The reason is that **D11 governs the store's identity, not
+its documents' keys**: the schema comparison lives in `open_store` and only there
+([`core/store_handle.py:366-425`](../../src/neurobase/core/store_handle.py)), and what
+it compares is the integer in `store.toml`. An additive optional key on a *raw* is
+outside that comparison entirely, and current readers already ignore unknown raw
+frontmatter. The precedent is ADR-0014, which introduced `capture_version: 2` as a
+**per-document** marker while `STORE_SCHEMA_VERSION` stayed `1`
+([`core/store.py:29`](../../src/neurobase/core/store.py)); `write_raw`'s contract
+already requires readers to tolerate its absence.
+
+  For accuracy about the guard itself, since an earlier draft of this ADR overstated it
+  (review finding `P2-DOCS-PLAN-ACCURACY-003`): `open_store` does **not** merely refuse
+  a newer schema. `_parse_schema` fails **closed** on unreadable or non-integer
+  metadata for every mode except `PURGE`, which opens regardless so a corrupt or newer
+  store stays deletable (D25); and a **`DOCTOR`** handle carries a newer integer instead
+  of raising, so the condition can report it. None of those paths are reached by adding
+  a document key — which is the point — but "refuses only a newer schema" was wrong as
+  written.
+
+  **On not waiting for ADR-0016.** ADR-0016 is accepted-but-unimplemented, and its
+  rationale is **independent of this one**: it exists for the hardening work's
+  trust boundary — per-project policy, a partition primitive, profiles, stable event
+  IDs, content hashes
+  ([`0016-store-schema-2-project-records-profiles.md:10-36`](0016-store-schema-2-project-records-profiles.md)).
+  Nothing in D45–D48 contradicts it or is blocked by it. What this ADR declines is
+  *routing `authority` through schema 2's record/source identity model*, which would
+  make that model's shape partly answerable to a premise — that authored digests are
+  worth having — which nothing has yet tested. **Migration path:** `authority` is an
+  optional raw-frontmatter key, so a schema-1→2 migration carries it forward unchanged
+  or maps it onto whatever source-identity field schema 2 defines; either way it is one
+  optional key, and no migration step depends on its value. If schema 2 later supersedes
+  it, that supersession is a one-line ADR annotation, not a data migration.
 
 **D47 — `authority` is a claim about provenance, not a grant of trust.** It MUST NOT
 raise (or lower) a document's weight in planning, ranking, recall, or proposal mining.
-Its guaranteed consumers are only the surfaces that would otherwise *misdescribe* what
+Its permitted consumers are only the surfaces that would otherwise *misdescribe* what
 they hold: the fold journal, `doctor`, and any UI that names the rung it is showing. If
 some later change wants authored bodies weighted differently, that is its own ADR with
-its own evidence — this one deliberately gives the field no behavioral power, so that
-adding the field cannot quietly become a policy change.
+its own evidence.
+
+  **This is enforced structurally, not by assertion** (review finding
+  `P2-TEST-GAP-004`; an earlier draft claimed adding the field "cannot quietly become a
+  policy change" while requiring no mechanism, which proves nothing once the journal,
+  `doctor` and UI consumers exist). Accepting D45 therefore carries these implementation
+  requirements, and they are acceptance criteria for the Backlog verb — not advice:
+
+  1. **Update the spec appendix's raw-schema section** with the optional key, its
+     default-when-absent, and this constraint, so the boundary is contract rather than
+     ADR prose (`AGENTS.md` treats appendix MUSTs as law).
+  2. **Preserve the existing planner seam.** `_raw_payload`
+     ([`curator/engine.py:123-124`](../../src/neurobase/curator/engine.py)) already
+     projects a raw to `{"raw": <filename>, "body": <body>}` — it passes **no**
+     frontmatter into the plan payload. `authority` MUST stay outside it. That seam is
+     the mechanism; naming it here makes removing it a visible change.
+  3. **Pin it with paired fixtures.** Two raws identical but for `authority` MUST
+     produce byte-identical plan payloads, identical selection, and identical
+     rank/recall/proposal-scoring inputs; the only permitted difference is
+     journal/`doctor`/UI reporting metadata. A test that fails when toggling only
+     `authority` changes any planning-side input is what makes D47 real.
 
 **D48 — the D13 redaction guarantee is unconditional on `authority`.** D13 is a
 whole-raw guarantee that explicitly covers scribe-written frontmatter (`cwd`, `branch`)
@@ -105,22 +157,38 @@ internals directly is a one-off harness, not a demonstration of a supported path
 ## Consequences
 
 - **The field is the cheap half. Ingestion is not, and this ADR does not build it.** A
-  raw's identity is its `captured_at`, **not** its `session_id`: `raw_filename` derives
-  the name from the `(captured_at, agent, session_id)` tuple at microsecond precision
-  ([`core/store.py:200-211`](../../src/neurobase/core/store.py)), and its own comment
-  scopes the session-keyed overwrite trick to *"a scribe reusing a **stable**
-  `captured_at`"*. The Claude scribe reuses nothing — it passes a fresh
-  `datetime.now(UTC)` on every capture
+  raw is addressed by the **whole** `(captured_at, agent, sid8(session_id))` tuple at
+  microsecond precision, not by `session_id` alone and not by `captured_at` alone
+  ([`raw_filename`, `core/store.py:200-211`](../../src/neurobase/core/store.py)) —
+  an earlier draft of this ADR wrote "keyed by `captured_at`, not `session_id`", which
+  is loose in a way that matters to an implementer (review finding
+  `P2-DOCS-PLAN-ACCURACY-002`). The accurate statement is narrower: **`session_id` alone
+  cannot address an existing raw**, because the timestamp component varies per capture.
+  `raw_filename`'s own comment scopes the session-keyed overwrite trick to *"a scribe
+  reusing a **stable** `captured_at`"*, and the Claude scribe reuses nothing — it passes
+  a fresh `datetime.now(UTC)` on every capture
   ([`adapters/claude/scribe.py:347`](../../src/neurobase/adapters/claude/scribe.py)).
   So a naive wrap-time write **adds** a second raw for the session rather than replacing
   its skim, and the fold would see the session twice. Live evidence, previously misread
   as harmless redundancy: the `transactiontracker` project holds **four separate raws
-  for one session** (`499ca1a4`) at four timestamps. Doing this correctly requires
-  discovering the session's existing unconsumed raw, reusing its exact `captured_at`,
-  ordering the write against `SessionEnd` capture, and taking the project write lock
-  (ADR-0023) — and **no current CLI or ingestion caller offers that operation.** That
-  verb is the build-plan Backlog item this ADR unblocks. `authority` is what makes its
-  output honest, not what makes it work.
+  for one session** (`499ca1a4`) at four timestamps. Doing this correctly requires a
+  **lookup contract this ADR does not define**, and which the Backlog verb must specify
+  before implementation:
+  - how the verb obtains and proves the **full** `session_id` *and* `agent` — the
+    filename carries only `sid8`, so the tuple cannot be reconstructed from a raw's name
+    alone;
+  - which candidate it replaces when the session has **zero, one, or several**
+    unconsumed raws (the four-raw case above is real, not hypothetical);
+  - how the later `SessionEnd` capture is prevented from reintroducing a duplicate after
+    the wrap-time write;
+  - ordering and mutual exclusion via the project write lock (ADR-0023);
+  - what happens when the only match is already consumed (see the next bullet).
+
+  **No current CLI or ingestion caller offers that operation.** That verb is the
+  build-plan Backlog item this ADR unblocks; `authority` is what makes its output
+  honest, not what makes it work. Acceptance tests should cover: same timestamp /
+  different session, repeated captures under one full `session_id`, an already-consumed
+  match, and the wrap-before/after-`SessionEnd` race.
 - **An already-consumed session cannot be retrofitted.** `write_raw` raises
   `RawConsumedError` once the curator has flipped `consumed: true`, and the documented
   remedy is a fresh `captured_at` — which, by the point above, means a *new* raw, not a
@@ -137,16 +205,20 @@ internals directly is a one-off harness, not a demonstration of a supported path
   any weighting — but it should be *visible* rather than inferred, on the same reasoning
   ADR-0026 used for the denylist warning: `doctor` is already the read-only reporting
   path, and a hook cannot warn because its stdout is protocol output.
-- **Deliberately not decided here.** (a) Whether authored digests are *better* — §10.3,
-  still open, and D47 is written so that answering it later stays a separate decision.
-  (b) Whether `/wrap` → vault and `neurobase wrap` → store derive from one act of
-  authorship or duplicate it — the note's decision 8 recommends "derive, don't
-  duplicate" (`neurobase wrap --summary -` fed by the summary `/wrap` already wrote),
-  unratified. (c) Where authored files live durably — the vault's
+- **Deliberately not decided here — and the Backlog entry says the same.** (a) Whether
+  authored digests are *better* (the note's §10.3), still open; D47 is written so that
+  answering it later stays a separate decision. (b) **The CLI interface and the
+  `/wrap` relationship.** Whether `/wrap` → vault and `neurobase wrap` → store derive
+  from one act of authorship or duplicate it is **unratified**; `neurobase wrap
+  --summary -` fed by the summary `/wrap` already wrote is the note's decision-8
+  *recommendation*, **not a settled contract**, and by `P2-DOCS-PLAN-ACCURACY-002` it is
+  in any case insufficient on its own — it carries no session or agent identity. The
+  build-plan Backlog entry states the same status; if the two ever disagree, **this ADR
+  is not the authority** — the interface needs its own ratified decision before
+  implementation. (c) Where authored files live durably — the vault's
   `projects/*/sessions/` is gitignored, so the five that exist today are single-copy.
-  (d) The continuous-curation knobs (`stale_hours`, `auto_max_raws`), which the source
-  note declines to specify on purpose after two drafts each promised a guarantee their
-  mechanism could not deliver.
+  (d) The continuous-curation knobs (`stale_hours`, `auto_max_raws`) — see
+  [`G12`](../known-gaps.md), which is deliberately fix-neutral.
 - **Process note.** This ADR is `Proposed`, not `Accepted`, and is not the routing of
   §11 in full — only the one slice that is decidable on evidence already in hand. The
   rest of §11 still needs walking piece by piece, which is the standing next action.

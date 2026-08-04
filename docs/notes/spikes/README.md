@@ -37,9 +37,21 @@ found `DISTILL_SYSTEM` v1 needs digest-size enforcement, an untrusted-data fence
 against transcript-borne role hijacking, and output-shape validation before the
 contract freezes.
 
+## One-off experiments (not numbered spikes)
+
+Investigations that were run like a spike — a stated question, a method, a recorded
+result — but that no plan defines and no ADR is waiting on. Dated, not numbered, so they
+claim no authority in the S-table above.
+
+| Date | What | Result |
+|---|---|---|
+| 2026-08-04 | [Authorial stance vs. compression framing](2026-08-04-authorial-stance.md) — reframing `DISTILL_SYSTEM` as a successor handover, everything else held constant. Harness: [`2026-08-04-stance-test.py`](2026-08-04-stance-test.py) | 13–22% shorter at identical 4/4 section coverage, n=3 pairs, model-verified. Quality not judged. |
+
 ## Naming
 
 `SN-short-slug.md` — e.g. `S1-codex-capture-wiring.md`, `S5-claude-p-json-reliability.md`.
+Dated one-offs use `YYYY-MM-DD-short-slug.md`, as
+[2026-07-08-s3-install-smoke.md](2026-07-08-s3-install-smoke.md) already does.
 
 See the ADRs for closed spike outcomes. S3 remains open until a true fresh
 macOS user account or clean container run validates the published-style

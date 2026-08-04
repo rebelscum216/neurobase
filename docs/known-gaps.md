@@ -1195,3 +1195,136 @@ worth doing.
   digest (`docs/notes/2026-08-01-memory-layering-ideas.md` §11.4), it self-budgets to
   fit and this path is not exercised at all — which is a reason to fix the cap rather
   than let the authoring rung hide it, since unwrapped sessions keep using distill.
+
+---
+
+### G12 — the auto tier's raw ceiling and its clock cannot both be honored, so a full hook-triggered pass can burn 15 minutes and commit nothing
+
+- **status:** open
+- **severity:** moderate — nothing is lost and the stop is clean and retryable, which is
+  a *better* failure mode than a silent downgrade. But a pass in this state makes **no
+  progress**, and it leaves an identical backlog for the next attempt, which is the same
+  size and overruns the same way. On a busy day that repeats: curation stalls while still
+  spending up to 15 minutes of brain latency per attempt.
+- **found:** 2026-08-04 by Claude
+  (`docs/notes/2026-08-01-memory-layering-ideas.md` §11.5), while measuring *why*
+  curation arrives as an end-of-day batch rather than draining continuously.
+
+**The inconsistency, in the shipped defaults.** `auto_max_raws: int = 40`
+(`core/config.py:54`) is sized against `auto_max_seconds: int = 900` (`:69`), and the
+comment directly above the clock states the basis while conceding its own gap, verbatim:
+
+```python
+# A healthy 40-raw pass is estimated at 4-10 min (per-call latency is NOT
+# measured — an open item). 15 min leaves margin without letting a detached
+# background curator run unbounded.
+auto_max_seconds: int = 900
+```
+
+Per-call latency is now measured: **1.8–2.3 min per capture** across 27 captures over
+two projects on 2026-08-03, worst single capture **3 m 32 s**. Each raw in this store
+costs exactly one distill call — the `auto_max_brain_calls` comment records that
+measured bodies (median 1,482 / p90 4,028 / max 13,926 chars) never chunk against a
+200k chunk size (`:55-57`), so the count converts directly to calls:
+
+| | per capture | 40 captures |
+|---|---|---|
+| measured low | 108 s | **72 min** |
+| measured high | 138 s | **92 min** |
+| the ceiling | — | **15 min** |
+
+A full-tier pass needs **4.8–6.1× its own clock**. Inverted: 900 s admits **~7
+captures**, and with a reserve for planning plus synthesis (~180 s), **~5–7**. The
+estimate the ceiling was sized against is not marginally optimistic — it is wrong by
+most of an order of magnitude, and the comment predicted exactly that by flagging the
+input as unmeasured.
+
+**Why this is a defect rather than tuning.** Two shipped defaults cannot both be
+honored: `auto_max_raws` admits work the clock cannot pay for. The pass that results
+does not degrade — it stops with nothing committed, which the next section shows is
+specific to the clock and not true of the other ceilings.
+
+**The failure mode differs from the distill-side ceilings, and an earlier draft of the
+source note merged the two into one wrong claim.**
+
+- **Distill-side ceilings (`max_brain_calls`, `max_distill_chunks`) skim-and-commit.**
+  `distill_docs` catches `BudgetExhausted`, does `out.extend(docs[index:])` and breaks
+  (`curator/distill.py:589-599`); because those ceilings hold back a planning reserve
+  (`distill_allowance = max_brain_calls - reserve_calls`, `curator/budget.py:133-135`),
+  the plan call can still spend it. A batch commits and the remainder folds from
+  deterministic skims — lower fidelity, but **progress**.
+- **The clock does not.** `debit` calls `_check_clock()` **first, before every ceiling
+  check** (`curator/budget.py:151`; the method is `:137-140`), so once the deadline
+  passes *every* later debit raises and the reserve is irrelevant. The first plan call
+  raises, `curator/engine.py:474-479` breaks with `plan_error` deliberately unset (a
+  bounded stop must not become `status: error`, which the CLI would turn into exit 1
+  and break the hooks-always-exit-zero guarantee), and the selected raws stay
+  **unconsumed**. Pinned by
+  `tests/test_curate_budget.py:503-545`
+  (`test_no_fold_when_the_budget_stops_the_pass_before_any_batch_commits`), which
+  asserts `plan_calls == 0`, `batches == 0`, `status != "error"`, and all three raws
+  still unconsumed.
+
+**Scope limit, stated precisely.** "Nothing commits" is the branch where the deadline
+expires *during distillation* — the branch the zero-plan-call test pins. If the deadline
+is instead first observed on a *later* plan or synthesis debit, batches already committed
+earlier in the pass **stay committed**: `engine.py:474-479` breaks out of the batch loop,
+not out of the pass. The stop is clean either way; it is simply not always
+all-or-nothing.
+
+**Three structural facts constrain any fix** (verified at `main@70be738`):
+
+- The budget is a **hard stop, not an admission controller.** `_check_clock` refuses the
+  next debit once the deadline has passed, but nothing prevents the pass from *starting*
+  a 3 m 32 s distill with 30 seconds left.
+- **Distillation runs over the whole selected list before planning begins.**
+  `distill_docs` is called on all of `select_raws`' output and its return becomes
+  `remaining`, so there is no per-item interleaving of distill and fold.
+- **A distill-side stop downgrades the remainder rather than deferring it.** The
+  undistilled suffix continues into planning carrying deterministic skims and is
+  consumed at skim fidelity. "Fold what fit, defer the rest" is therefore **not
+  reachable from configuration or budget accounting alone** — it needs a change to the
+  distill→engine handoff (return the undistilled suffix separately so the engine can
+  exclude it from `remaining`) or to selection.
+
+**This entry deliberately does not specify the fix.** Two successive drafts in the source
+note each proposed one and each promised an outcome its mechanism could not deliver —
+first a raw count that "always finishes", then a p90 admission check that "would convert"
+a zero-commit expiry into partial progress. Both were guarantee-shaped claims about
+*estimated* quantities. A latency-based admission check can only ever be **probabilistic
+risk reduction**: a tail-latency distill still overruns its estimate, after which the next
+planning debit fails exactly as above. **No fixed raw count can guarantee a wall-clock
+outcome across a 10 s – 3 m 32 s latency spread** — working backwards from 720 s, the
+~2 min median admits ~6 captures and the observed worst case admits 3, and those differ by
+2×. Treat a lowered `auto_max_raws` (4–6 on this machine's numbers) as an **unvalidated
+experiment** to be checked against real pass outcomes, not as a fix. What is not in doubt
+is that the auto tier's sizing should come from *measured* latency rather than the
+estimate its own comment flags as absent.
+
+**Raising `auto_max_seconds` is the wrong direction.** It would let a detached background
+curator run for over an hour — the thing the ceiling exists to prevent, and which the
+comment names.
+
+**One adjacent knob is unambiguous, and it is a different mechanism.** `stale_hours:
+int = 12` (`core/config.py:30`) is what guarantees the pile-up: hook-spawned
+`curate --if-stale` refuses to run until the oldest unconsumed raw is over 12 h old, so
+nothing drains during a working day and the pass that eventually fires is the largest and
+likeliest to overrun. Lowering it drains continuously and is not subject to the arithmetic
+above. It **reduces exposure** to this gap without closing it — a single day's burst can
+still exceed the clock.
+
+**Skim-fidelity folding is not itself the defect.** It is the deliberate D16 "distill
+never aborts a pass" design and it does drain the backlog. Whether *deferring* is
+preferable to *downgrading* is a product decision, not a gap. What is defective here is
+narrower: a pair of shipped ceilings that cannot both hold.
+
+**Interaction with the authoring rung.** A session that authors its own digest writes a
+**v1 raw**, which returns from `_distill_one` before any cache, render or brain call
+(`curator/distill.py:478-481`), so none of this arithmetic binds — there is no distill
+call to schedule, and `distill: "off"` is already supported per-store for a project where
+every session authors. That is a reason to size the auto tier honestly rather than let
+authoring mask the problem: unwrapped sessions keep using distill, and Codex sessions
+cannot author or distill at all (`render_transcript` returns `None` for any non-`claude`
+agent, `curator/distill.py:200-205`). See
+[ADR-0027](adr/0027-authored-raw-authority-field.md) and the build-plan
+[Backlog](neurobase-build-plan.md) entry.

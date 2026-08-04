@@ -1244,7 +1244,7 @@ write-up reports all three of its session renders exceeding the chunk threshold.
 | condition | returns | line |
 |---|---|---|
 | v1 raw (no `transcript_path`) | `no_pointer` | `distill.py:478-481` |
-| transcript deleted since capture (`G10`) | `transcript_gone` | `:484-486` |
+| transcript deleted since capture (`G10`) | `transcript_gone` | `:484-487` |
 | **digest cache hit** (fingerprint matches) | `cached` | `:489-493` |
 | no verified renderer for the agent (Codex) | `unsupported_agent` | `:495-499` |
 | render is empty | `empty_render` | `:500-501` |

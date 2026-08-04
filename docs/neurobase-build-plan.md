@@ -356,8 +356,9 @@ only ever be probabilistic; no fixed raw count guarantees a wall-clock outcome a
 a defect. Related: [`G12`](known-gaps.md) (the sizing comment's cost model is wrong,
 which is why any number here should come from measured latency rather than that
 comment). Note `distill = "off"` already exists as an escape hatch but is a **global**
-user-config key (`~/.config/neurobase/config.toml`, `core/config.py:163-180`) with no
-per-project or per-store override — turning it off disables distillation everywhere.
+user-config key (`~/.config/neurobase/config.toml` — declared at
+`core/config.py:35-37`, loaded at `:163-181`) with no per-project or per-store
+override — turning it off disables distillation everywhere.
 
 **Project doc schema — a consistent `docs/` shape Neurobase can actually read.**
 Today ADRs, working notes, review batons, and known-gaps are conventions of *this*

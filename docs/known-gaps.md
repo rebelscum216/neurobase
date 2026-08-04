@@ -1023,3 +1023,163 @@ the others.
   `docs/notes/2026-08-01-memory-layering-ideas.md` §5.1 — an agent-authored wrap
   summary is a strictly better source than the transcript *and* has no expiry, so
   the two fixes converge.
+
+---
+
+### G11 — the digest cap truncates the tail against a fixed section order, so the last sections are usually lost on dense sessions
+
+- **status:** open
+- **severity:** moderate — systematic, and it lands on the most valuable content. The
+  cap discards whichever headings come last, and `## Unresolved` (open threads,
+  known-broken items, deferred work) is always last in `DISTILL_SYSTEM`'s prescribed
+  order. So the denser the session, the likelier its open threads never reach the
+  store — a **strong ordering bias, not a universal deletion rule**: 2 of 17
+  truncated digests in the measured snapshot below still carry `## Unresolved`.
+  Unlike **G10**, no input is missing and nothing expired: the model produced the
+  content and the code threw it away.
+- **why not higher, and how it differs from G10.** G10's loss is permanent and
+  invisible; G11's is neither. The in-body `[digest truncated]` marker makes an
+  affected digest **directly identifiable** by grep, and while the transcript
+  survives the session can be re-distilled under a corrected bound, so the content
+  is recoverable rather than gone. What is missing is *structured* observability —
+  no counter, frontmatter field, or `doctor` check reports it — so the loss is
+  unreported by the system, not undetectable.
+- **found:** 2026-08-04 by Claude, while comparing agent-authored session summaries
+  against distilled ones (`docs/notes/2026-08-01-memory-layering-ideas.md` §11.3).
+  The defect was found *because* it corrupted that comparison — the authored arm
+  appeared to win on "what is uncertain" purely because its competitor's answer had
+  been cut off.
+
+**The mechanism.** `_bound()` (`curator/distill.py:229-236`) enforces
+`DIGEST_MAX_CHARS = 6_000` (`:38`) in code, by keeping a **prefix** and appending
+`DIGEST_TRUNC_MARKER` (`:41`):
+
+```python
+keep = DIGEST_MAX_CHARS - len(DIGEST_TRUNC_MARKER)
+return digest[:keep].rstrip() + DIGEST_TRUNC_MARKER
+```
+
+It is called last in `_distill_one` (`:356`, *"hard cap LAST so nothing pushes it
+back over (F1)"*), so it is the final word on what the store sees. The cap itself is
+deliberate and correct in intent — the docstring records that the model's own
+advisory cap was overrun by the merge step in S-cf5. **The defect is the interaction
+between a tail-first cut and a fixed section order**, not the existence of a cap.
+`DISTILL_SYSTEM` (`:62-87`, heading sequence at `:75-83`) and `MERGE_SYSTEM`
+(`:90-95`) both prescribe `## Decisions` → `## Discoveries & gotchas` →
+`## State changes` → `## Unresolved`, and both state the 6,000 cap as advisory
+guidance to the model. Nothing tells the model to budget across the four sections, so
+it writes exhaustively in order and the code removes whatever did not fit.
+
+**Evidence.** Snapshot of the live store (`~/neurobase`, projects `baysis-dev`,
+`transactiontracker`, `neurobase`) **as of 2026-08-04, when it held 26 digests**. The
+store grows as sessions are captured, so these counts are an as-of measurement, not a
+standing total — a re-count later the same day saw 32 digests, 21 truncated of which 4
+retained `## Unresolved`, and 11 unmarked all retaining it. The association is stable;
+the absolute numbers are not. At 26 digests:
+
+| | digests | have `## Unresolved` |
+|---|---|---|
+| carry `[digest truncated]` | 17 | **2** |
+| under the cap | 9 | **9** |
+
+Separation below the cap is total. Two further measurements show the cap is far too
+small rather than marginally small, and that raising it alone is not sufficient —
+the same three transcripts re-distilled 2026-08-03 with only `DIGEST_MAX_CHARS`
+changed (same model, prompt, chunking and redaction). These re-distills were written
+to a session scratchpad rather than the store, so they are **not independently
+reproducible from the repo or the store** — regenerate them to re-verify:
+
+| session | cap 6,000 | cap 9,000 | cap 20,000 |
+|---|---|---|---|
+| `f4d70ea9` | 3/4 headings | 4/4, still truncated | 4/4, **13,173 chars**, not truncated |
+| `d53ef8b6` | 3/4 headings | 3/4, still truncated | 4/4, **10,317 chars**, not truncated |
+| `9822fafc` | **2/4** headings | **2/4**, still truncated | 4/4, **16,065 chars**, not truncated |
+
+Natural output is **1.7–2.7×** the cap. At 9,000 every session was still truncated,
+and `9822fafc` gained **no** new section from 50% more room — it spent the extra
+budget on more early-section prose. That is the direct evidence that the model does
+not ration across sections, and therefore that a larger ceiling alone leaves the
+same failure mode at a higher threshold.
+
+**A concrete loss, for scale.** `d53ef8b6`'s uncapped `## Unresolved` records an
+unmerged PR (with a self-correction that the session had earlier mis-reported it as
+merged), a standing instruction not to apply a set of changes, an unrecorded
+credential provenance question, a worktree holding the only on-disk copy of a real
+`.env`, and an owed verification. At the 6,000 cap the stored digest contains none
+of it and ends mid-sentence inside `## State changes`.
+
+**Secondary consequence — the marker is a shape tell.** Because `[digest truncated]`
+appears only on capped digests and the missing heading is visible, any downstream
+comparison of digests against another summary source can identify the arms without
+reading their content. That invalidated the first pass of the §11 comparison and will
+invalidate any future blind evaluation that does not normalize it.
+
+**Fix direction.** Ordered cheapest first; the first two are independent and both
+worth doing.
+
+- **Make the truncation observable in the store, not just in the text.** A capped
+  digest currently signals its loss only by an in-body marker, so "how often are we
+  discarding the tail" needs a body grep. **Record it in the pass JOURNAL record, not
+  the pass summary** — an earlier draft of this bullet said "pass summary", which
+  would have been a contract change: spec §2.0's D16 names the summary's distill keys
+  as `distilled: n, fallback: m`, and `test_summary_key_set_is_exact_and_carries_no_fold`
+  pins the whole key set so drift fails loudly. The journal record is where per-raw
+  detail already lives (it is why `fold` is deliberately kept out of the summary), and
+  it answers the same question. Growing the printed summary should be a separate,
+  deliberate decision with its own spec update.
+  While there, decompose `fallback` by cause — it currently conflates *no transcript
+  pointer*, *the harness deleted the transcript* (**G10**), *this agent has no verified
+  renderer* (every Codex capture, permanently) and *it actually failed*, which makes
+  "is the pipeline healthy?" unanswerable from a pass record.
+- **Make `_bound()` section-aware — this is the fix; a prompt allowance is not.**
+  Parse the four headings and trim the *longest* section bodies toward the target
+  rather than deleting the last ones. A per-section allowance in
+  `DISTILL_SYSTEM`/`MERGE_SYSTEM` is **defense in depth only, not a sufficient
+  alternative**: this entry's own evidence is that model-side length instructions are
+  advisory and get violated (that is why F1 exists, and why the 9,000-cap run still
+  overran), so a prompt change cannot *guarantee* that every emitted section
+  survives.
+
+  A section-aware bound must satisfy **two separate sets of conditions**, and
+  conflating them is how a "fix" could ship that still loses `## Unresolved`.
+
+  **F1 conditions — the existing contract, preserved.** (a) The result always
+  reassembles to ≤ `DIGEST_MAX_CHARS`. (b) It still emits `DIGEST_TRUNC_MARKER` when
+  anything was trimmed. (c) It leaves the digest valid to `_is_valid_digest`, noting
+  that check runs *before* `_bound` (`:222-236`, `:351-356`), so `_bound` must never
+  invalidate an already-validated digest. (d) It falls back to the current prefix-cut
+  for malformed or unparseable shapes.
+
+  **G11 conditions — the semantic invariant, which F1 does NOT imply.** The four F1
+  conditions above are satisfiable by an implementation that deletes `## Unresolved`
+  outright, or reduces it to an empty heading, or keeps only `## Decisions` — because
+  `_is_valid_digest` accepts **any one** expected heading (`:222-226`). That is exactly
+  the loss this gap exists to fix, so the acceptance criteria must add: (e) **every
+  recognized section present in the pre-bound valid digest is still present after
+  bounding**, in the prescribed order; (f) each retained section keeps a defined
+  **non-empty content floor** rather than being reduced to a bare heading; and (g)
+  remaining space is distributed among section *bodies* only after (e) and (f) are
+  met. A section legitimately absent before `_bound` (the prompt permits omitting an
+  empty section) must still be allowed to stay absent — the invariant is preservation,
+  not fabrication.
+
+  **The test that distinguishes them:** a bounded output retaining one early heading
+  while dropping or emptying a later recognized section must be **rejected**, while a
+  digest that already omitted an empty section before `_bound` must still be
+  **accepted**. Any implementation passing only (a)-(d) reproduces G11 at a new
+  threshold.
+- **Any change to the 6,000 ceiling is a contract change, not tuning.** `6 000` is
+  fixed in three places: spec appendix §2.0 step 6 and its §8 defaults table
+  (`docs/neurobase-spec-appendix.md:443-448`, `:796`), and ADR-0014's **F1** decision
+  (`docs/adr/0014-transcript-distill-curation.md:146-150`), which states the reason —
+  the digest replaces the raw body in a **byte-budgeted payload**, so its size must be
+  bounded in code. `AGENTS.md` treats appendix MUSTs as law. So raising it requires a
+  spec update plus an ADR revision or a new decision, and the case must rest on a
+  measurement of the fold's real budget (`plan_payload_max_bytes` is `262_144`, and
+  measured raw bodies are median 1,482 / p90 4,028 chars per `CurateConfig`) rather
+  than on picking a bigger round number. Note a section-aware bound needs **no**
+  contract change, which is a further reason to prefer it.
+- **Note the interaction with an authored summary.** If a session authors its own
+  digest (`docs/notes/2026-08-01-memory-layering-ideas.md` §11.4), it self-budgets to
+  fit and this path is not exercised at all — which is a reason to fix the cap rather
+  than let the authoring rung hide it, since unwrapped sessions keep using distill.

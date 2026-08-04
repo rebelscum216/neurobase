@@ -105,7 +105,9 @@ def test_distill_replaces_body_with_digest(root: Path, tmp_path: Path) -> None:
     doc = _write_raw(root, "proj", "r1.md", body="thin skim", transcript_path=str(t))
     brain = DistillBrain()
     out, counts = distill.distill_docs(root, "proj", [doc], brain)
-    assert counts == {"distilled": 1, "fallback": 0}
+    assert counts["distilled"] == 1
+    assert counts["fallback"] == 0
+    assert counts["truncated"] == 0  # G11: a short digest is not trimmed
     assert brain.distill_calls == 1
     assert out[0].body == _GOOD_DIGEST
     # provenance-critical fields are preserved on the substituted copy
@@ -121,7 +123,8 @@ def test_off_mode_skips_entirely(root: Path, tmp_path: Path) -> None:
     doc = _write_raw(root, "proj", "r1.md", body="skim", transcript_path=str(t))
     brain = DistillBrain()
     out, counts = distill.distill_docs(root, "proj", [doc], brain, mode="off")
-    assert counts == {"distilled": 0, "fallback": 0}
+    assert counts["distilled"] == 0
+    assert counts["fallback"] == 0
     assert brain.distill_calls == 0
     assert out[0].body == "skim"
 
@@ -130,7 +133,9 @@ def test_v1_raw_without_transcript_path_falls_back(root: Path) -> None:
     doc = _write_raw(root, "proj", "r1.md", body="skim")  # no transcript_path
     brain = DistillBrain()
     out, counts = distill.distill_docs(root, "proj", [doc], brain)
-    assert counts == {"distilled": 0, "fallback": 1}
+    assert counts["distilled"] == 0
+    assert counts["fallback"] == 1
+    assert counts["fallback_no_pointer"] == 1  # the reason is now reported
     assert brain.distill_calls == 0
     assert out[0].body == "skim"
 
@@ -139,7 +144,9 @@ def test_missing_transcript_falls_back(root: Path) -> None:
     doc = _write_raw(root, "proj", "r1.md", body="skim", transcript_path="/nope/gone.jsonl")
     brain = DistillBrain()
     out, counts = distill.distill_docs(root, "proj", [doc], brain)
-    assert counts == {"distilled": 0, "fallback": 1}
+    assert counts["distilled"] == 0
+    assert counts["fallback"] == 1
+    assert counts["fallback_transcript_gone"] == 1  # the reason is now reported
     assert brain.distill_calls == 0
     assert out[0].body == "skim"
 
@@ -164,7 +171,9 @@ def test_unsupported_schema_store_falls_back_without_cache_access(
     )
     brain = DistillBrain()
     out, counts = distill.distill_docs(root, "proj", [doc], brain)
-    assert counts == {"distilled": 0, "fallback": 1}
+    assert counts["distilled"] == 0
+    assert counts["fallback"] == 1
+    assert counts["fallback_error"] == 1  # the reason is now reported
     assert brain.distill_calls == 0
     assert out[0].body == "skim"
     # The refusal happens before any cache access, so no digest sidecar is written.
@@ -176,7 +185,8 @@ def test_brain_error_falls_back(root: Path, tmp_path: Path) -> None:
     doc = _write_raw(root, "proj", "r1.md", body="skim", transcript_path=str(t))
     brain = DistillBrain(digest=BrainError("distill blew up"))
     out, counts = distill.distill_docs(root, "proj", [doc], brain)
-    assert counts == {"distilled": 0, "fallback": 1}
+    assert counts["distilled"] == 0
+    assert counts["fallback"] == 1
     assert out[0].body == "skim"
 
 
@@ -198,7 +208,11 @@ def test_brain_error_stops_distilling_remaining_raws(root: Path, tmp_path: Path)
     out, counts = distill.distill_docs(root, "proj", docs, brain)
 
     assert brain.distill_calls == 1
-    assert counts == {"distilled": 0, "fallback": 3}
+    assert counts["distilled"] == 0
+    assert counts["fallback"] == 3
+    # A systemic brain error trips the pass breaker, so raws after the first
+    # are never attempted — counted separately from ones that were tried.
+    assert counts["fallback_not_attempted"] == 3
     assert [doc.body for doc in out] == ["skim 0", "skim 1", "skim 2"]
 
 
@@ -209,7 +223,9 @@ def test_refusal_shaped_output_falls_back(root: Path, tmp_path: Path) -> None:
     doc = _write_raw(root, "proj", "r1.md", body="skim", transcript_path=str(t))
     brain = DistillBrain(digest="I'm going to stop — what do you want instead? 1/2/3")
     out, counts = distill.distill_docs(root, "proj", [doc], brain)
-    assert counts == {"distilled": 0, "fallback": 1}
+    assert counts["distilled"] == 0
+    assert counts["fallback"] == 1
+    assert counts["fallback_invalid_digest"] == 1  # the reason is now reported
     assert out[0].body == "skim"
 
 
@@ -220,7 +236,9 @@ def test_codex_transcript_falls_back_deferred_renderer(root: Path, tmp_path: Pat
     doc = _write_raw(root, "proj", "r1.md", body="skim", agent="codex", transcript_path=str(t))
     brain = DistillBrain()
     out, counts = distill.distill_docs(root, "proj", [doc], brain)
-    assert counts == {"distilled": 0, "fallback": 1}
+    assert counts["distilled"] == 0
+    assert counts["fallback"] == 1
+    assert counts["fallback_unsupported_agent"] == 1  # the reason is now reported
     assert brain.distill_calls == 0
     assert out[0].body == "skim"
 
@@ -236,6 +254,230 @@ def test_oversize_digest_is_hard_truncated(root: Path, tmp_path: Path) -> None:
     out, _ = distill.distill_docs(root, "proj", [doc], brain)
     assert len(out[0].body) <= distill.DIGEST_MAX_CHARS
     assert out[0].body.endswith(distill.DIGEST_TRUNC_MARKER)
+
+
+# --- G11: bounding trims section BODIES, never deletes sections -----------
+#
+# The pre-G11 `_bound` kept a prefix, so it always cut the tail. `DISTILL_SYSTEM`
+# prescribes a fixed heading order ending in `## Unresolved`, so that
+# deterministically deleted the open-threads section from every dense session
+# (measured 2026-08-04: 15 of 17 capped digests in the live store had no
+# `## Unresolved`, against 9 of 9 under the cap). These tests pin the invariant
+# that replaced it, and the first one is the regression guard: reverting to a
+# prefix cut fails it.
+
+_SECTIONS = ("## Decisions", "## Discoveries & gotchas", "## State changes", "## Unresolved")
+
+
+def _oversize_digest(*, tail: str = "- ship the migration before Friday.") -> str:
+    """Four sections, verbose early ones, a short but load-bearing last one.
+    Comfortably over the cap so bounding must do something."""
+    filler = "\n".join(f"- decision {i}: chose A over B because C." for i in range(120))
+    findings = "\n".join(f"- finding {i}: root cause was D, not E." for i in range(120))
+    return (
+        f"## Decisions\n{filler}\n\n"
+        f"## Discoveries & gotchas\n{findings}\n\n"
+        f"## State changes\n- edited auth.py; 12 tests passed.\n\n"
+        f"## Unresolved\n{tail}"
+    )
+
+
+def test_bounding_never_deletes_a_later_section() -> None:
+    """THE regression guard (review finding P2-DOCS-PLAN-ACCURACY-007).
+
+    A bounded digest that keeps an early heading while dropping a later one is
+    exactly the G11 defect, and it satisfies the numeric F1 contract *and*
+    `_is_valid_digest` — which accepts any ONE expected heading. So neither of
+    those checks can catch it; this test is what does.
+    """
+    digest = _oversize_digest()
+    assert len(digest) > distill.DIGEST_MAX_CHARS  # precondition
+
+    bounded, truncated = distill._bound(digest)
+
+    assert truncated is True
+    assert len(bounded) <= distill.DIGEST_MAX_CHARS  # (a)
+    for heading in _SECTIONS:  # (e) every section present on input survives
+        assert heading in bounded, f"{heading} was deleted by bounding"
+    # …and the last section keeps its actual content, not just its heading (f).
+    assert "ship the migration before Friday" in bounded
+    # The old prefix cut is what this replaced: prove it would have failed here.
+    assert "## Unresolved" not in distill._prefix_cut(digest)
+
+
+def test_bounding_preserves_section_order() -> None:
+    """(e) also covers ORDER: a reader (and the fold) sees the prescribed
+    sequence, so bounding must not reshuffle while redistributing space."""
+    bounded, _ = distill._bound(_oversize_digest())
+    positions = [bounded.index(h) for h in _SECTIONS]
+    assert positions == sorted(positions)
+
+
+def test_bounding_does_not_fabricate_an_absent_section() -> None:
+    """The counterpart to the guard above, and the reason it is stated as
+    *preservation* rather than "all four headings present": `DISTILL_SYSTEM`
+    explicitly permits omitting a section that has no content, so a digest that
+    legitimately arrived without `## Unresolved` must not gain one."""
+    filler = "\n".join(f"- decision {i}: chose A over B because C." for i in range(200))
+    digest = f"## Decisions\n{filler}\n\n## State changes\n- edited auth.py."
+    assert len(digest) > distill.DIGEST_MAX_CHARS
+
+    bounded, truncated = distill._bound(digest)
+
+    assert truncated is True
+    assert "## Unresolved" not in bounded
+    assert "## Decisions" in bounded and "## State changes" in bounded
+
+
+def test_trimming_falls_on_the_longest_sections_not_the_last() -> None:
+    """The mechanism behind (e): water-fill to a common level, so a short section
+    survives whole and only verbose ones lose text. Position must not matter."""
+    long_body = "\n".join(f"- decision {i}: a fairly wordy justification." for i in range(200))
+    short_tail = "- one open thread, stated briefly."
+    digest = f"## Decisions\n{long_body}\n\n## Unresolved\n{short_tail}"
+
+    bounded, _ = distill._bound(digest)
+
+    assert short_tail in bounded  # the short LAST section is untouched
+    assert distill._SECTION_TRIM_MARKER in bounded  # something was trimmed…
+    unresolved = bounded[bounded.index("## Unresolved") :]
+    assert distill._SECTION_TRIM_MARKER not in unresolved  # …and it wasn't this
+
+
+def test_marker_is_present_only_when_something_was_trimmed() -> None:
+    """(b). The marker is also how a reader (and `truncated`) knows, so a digest
+    that fits must not carry it — otherwise every digest looks lossy."""
+    small = "## Decisions\n- one short decision."
+    bounded, truncated = distill._bound(small)
+    assert bounded == small
+    assert truncated is False
+    assert distill.DIGEST_TRUNC_MARKER.strip() not in bounded
+
+    bounded, truncated = distill._bound(_oversize_digest())
+    assert truncated is True
+    assert bounded.endswith(distill.DIGEST_TRUNC_MARKER)
+
+
+def test_bounding_cannot_invalidate_an_already_valid_digest() -> None:
+    """(c). `_is_valid_digest` runs BEFORE `_bound` in `_distill_one`, so a digest
+    that passed the shape check must still pass it afterwards — otherwise
+    bounding could turn a usable digest into one the pass rejects."""
+    digest = _oversize_digest()
+    assert distill._is_valid_digest(digest)
+    bounded, _ = distill._bound(digest)
+    assert distill._is_valid_digest(bounded)
+
+
+def test_unparseable_shape_falls_back_to_the_prefix_cut() -> None:
+    """(d). No recognized headings means nothing to preserve, so the original
+    behaviour is correct — but the cap still binds."""
+    junk = "x" * (distill.DIGEST_MAX_CHARS + 2000)
+    bounded, truncated = distill._bound(junk)
+    assert truncated is True
+    assert len(bounded) <= distill.DIGEST_MAX_CHARS
+    assert bounded.endswith(distill.DIGEST_TRUNC_MARKER)
+
+
+def test_every_surviving_section_keeps_a_content_floor() -> None:
+    """(f). Reducing a section to a bare heading satisfies "the heading is still
+    there" while losing everything the section was for, so the floor is part of
+    the invariant rather than a nicety."""
+    bodies = "\n".join(f"- item {i}: some detail here." for i in range(150))
+    digest = "\n\n".join(f"{h}\n{bodies}" for h in _SECTIONS)
+
+    bounded, _ = distill._bound(digest)
+
+    for heading in _SECTIONS:
+        start = bounded.index(heading) + len(heading)
+        nxt = [bounded.index(h) for h in _SECTIONS if bounded.index(h) > start]
+        body = bounded[start : min(nxt)] if nxt else bounded[start:]
+        body = body.replace(distill._SECTION_TRIM_MARKER, "").replace(
+            distill.DIGEST_TRUNC_MARKER, ""
+        )
+        assert len(body.strip()) >= distill.DIGEST_SECTION_FLOOR_CHARS, f"{heading} floored out"
+
+
+def test_too_many_sections_for_the_cap_falls_back_rather_than_overrunning() -> None:
+    """When (e)+(f) cannot both hold, (a) wins — the cap is the contract and the
+    section invariant is the improvement. A merge can repeat headings, so this is
+    reachable rather than theoretical."""
+    # 60 sections need 60 × (floor + markers) well beyond the cap, and the digest
+    # itself must exceed the cap to reach the bounding path at all.
+    block = "- a block body long enough that sixty of them overrun the cap." * 3
+    digest = "\n\n".join(f"## Decisions\n{block}" for i in range(60))
+    assert len(digest) > distill.DIGEST_MAX_CHARS  # precondition
+
+    bounded, truncated = distill._bound(digest)
+
+    assert truncated is True
+    assert len(bounded) <= distill.DIGEST_MAX_CHARS
+    assert bounded.endswith(distill.DIGEST_TRUNC_MARKER)
+
+
+def test_chunk_drop_prefix_survives_bounding() -> None:
+    """`_distill_one` prepends `[distill: N middle chunk(s) dropped for size]`
+    when the INPUT was truncated. That is a different loss from this one and it
+    must not be the thing bounding discards, or a digest can silently lose the
+    only record that its source was incomplete."""
+    prefix = "[distill: 2 middle chunk(s) dropped for size]"
+    bounded, _ = distill._bound(f"{prefix}\n\n{_oversize_digest()}")
+    assert bounded.startswith(prefix)
+    assert "## Unresolved" in bounded
+
+
+def test_truncation_is_counted(root: Path, tmp_path: Path) -> None:
+    """G11 was invisible in aggregate: the only signal was an in-body marker, so
+    "how often are we discarding the tail" needed a body grep."""
+    t = _write_transcript(tmp_path / "t.jsonl", _claude_events())
+    doc = _write_raw(root, "proj", "r1.md", transcript_path=str(t))
+    brain = DistillBrain(digest=_oversize_digest())
+
+    out, counts = distill.distill_docs(root, "proj", [doc], brain)
+
+    assert counts["distilled"] == 1
+    assert counts["truncated"] == 1
+    assert "## Unresolved" in out[0].body
+
+
+def test_fallback_is_decomposed_by_cause(root: Path, tmp_path: Path) -> None:
+    """A single `fallback` count conflated four unrelated situations, which made
+    "is the pipeline healthy?" unanswerable: a raw with no transcript pointer, a
+    transcript the harness deleted (G10's silent loss), an agent with no verified
+    renderer (every Codex capture, permanently), and a real failure."""
+    t = _write_transcript(tmp_path / "t.jsonl", _claude_events())
+    docs = [
+        _write_raw(root, "proj", "r1.md"),  # v1: no pointer
+        _write_raw(root, "proj", "r2.md", transcript_path=str(tmp_path / "gone.jsonl")),
+        _write_raw(root, "proj", "r3.md", agent="codex", transcript_path=str(t)),
+        _write_raw(root, "proj", "r4.md", transcript_path=str(t)),  # distills
+    ]
+
+    _, counts = distill.distill_docs(root, "proj", docs, DistillBrain())
+
+    assert counts["distilled"] == 1
+    assert counts["fallback"] == 3  # the total still means what it meant
+    assert counts["fallback_no_pointer"] == 1
+    assert counts["fallback_transcript_gone"] == 1  # G10, now visible
+    assert counts["fallback_unsupported_agent"] == 1  # Codex, permanent not transient
+    assert counts["fallback_error"] == 0
+
+
+def test_detail_rides_the_journal_and_not_the_printed_summary(root: Path, tmp_path: Path) -> None:
+    """The summary's key set is pinned (spec §2.0 D16 names `distilled`/`fallback`;
+    `test_summary_key_set_is_exact_and_carries_no_fold` fails loudly on drift), so
+    the breakdown goes where per-raw detail already lives — the journal record,
+    the same split `fold` uses. Growing the printed summary would be a deliberate
+    contract change, not a side effect of adding observability."""
+    _write_raw(root, "proj", "r1.md")  # no pointer ⇒ a fallback with a reason
+    summary = engine.curate(root, "proj", DistillBrain())
+
+    assert not [k for k in summary if k.startswith("fallback_") or k == "truncated"]
+    assert summary["fallback"] == 1
+
+    log = store.memory_dir("proj", root) / engine.CURATOR_LOG
+    record = [json.loads(line) for line in log.read_text().splitlines()][-1]
+    assert record["distill_detail"]["fallback_no_pointer"] == 1
+    assert "distill_detail" not in summary
 
 
 # --- redaction (D17: per-value, before render) ---------------------------

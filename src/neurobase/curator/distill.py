@@ -24,7 +24,7 @@ import dataclasses
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from neurobase.brain.base import Brain, BrainError
 from neurobase.core import store
@@ -39,6 +39,14 @@ DIGEST_MAX_CHARS = 6_000
 DISTILL_RESULT_TRUNC = 2_000
 
 DIGEST_TRUNC_MARKER = "\n\n[digest truncated]"
+# G11: the smallest body a surviving section is allowed to keep. It only binds in
+# the pathological case (many sections against a small cap); with the four
+# prescribed headings and a 6 000 cap there is ~1 400 chars of body per section,
+# so ordinary digests never reach the floor.
+DIGEST_SECTION_FLOOR_CHARS = 200
+# Marks an individual section whose body was trimmed, so a reader can tell which
+# sections are partial rather than only that the digest as a whole is.
+_SECTION_TRIM_MARKER = "\n… [section trimmed]"
 _DIGESTS_DIRNAME = ".digests"
 _FINGERPRINT_KEY = "source_fingerprint"
 # Bump when the render, the redaction table, or the digest format changes in a
@@ -226,14 +234,134 @@ def _is_valid_digest(digest: str) -> bool:
     return any(h in lowered for h in _EXPECTED_HEADINGS)
 
 
-def _bound(digest: str) -> str:
-    """Hard-cap the digest length in code (F1) — the model's own cap is advisory
-    and the merge step overran it in S-cf5."""
-    digest = digest.strip()
-    if len(digest) <= DIGEST_MAX_CHARS:
-        return digest
+def _split_sections(digest: str) -> tuple[str, list[tuple[str, str]]] | None:
+    """Split a digest into ``(preamble, [(heading_line, body), ...])``.
+
+    Returns ``None`` when the shape is not parseable as recognized sections, so
+    the caller can fall back to the prefix cut (G11 condition (d)). ``preamble``
+    is whatever precedes the first recognized heading — normally empty, but it
+    carries the ``[distill: N middle chunk(s) dropped for size]`` prefix when
+    ``_distill_one`` added one, which must survive bounding.
+    """
+    lines = digest.split("\n")
+    # `_EXPECTED_HEADINGS` are heading PREFIXES, not whole lines — the prescribed
+    # heading is `## Discoveries & gotchas` while its marker is `## discoveries`.
+    # Matching for equality here failed to recognize that heading, leaving it
+    # inside the previous section's body where trimming could delete it: the exact
+    # G11 failure one level down. Pinned by
+    # `test_every_surviving_section_keeps_a_content_floor`.
+    starts: list[int] = [
+        i
+        for i, line in enumerate(lines)
+        if any(line.strip().lower().startswith(h) for h in _EXPECTED_HEADINGS)
+    ]
+    if not starts:
+        return None
+    preamble = "\n".join(lines[: starts[0]]).strip()
+    sections: list[tuple[str, str]] = []
+    for n, start in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        body = "\n".join(lines[start + 1 : end]).strip()
+        sections.append((lines[start].strip(), body))
+    return preamble, sections
+
+
+def _prefix_cut(digest: str) -> str:
+    """The original tail cut — kept as the fallback for unparseable shapes."""
     keep = DIGEST_MAX_CHARS - len(DIGEST_TRUNC_MARKER)
     return digest[:keep].rstrip() + DIGEST_TRUNC_MARKER
+
+
+def _section_levels(lengths: list[int], budget: int) -> list[int]:
+    """Water-fill ``budget`` across ``lengths``: find the largest common level
+    such that the total fits, so only the LONGEST sections are trimmed and short
+    ones survive whole. This is what makes the loss fall on verbose sections
+    instead of on whichever section happens to be last (G11)."""
+    order = sorted(range(len(lengths)), key=lambda i: lengths[i])
+    allowed = [0] * len(lengths)
+    remaining_budget = budget
+    remaining_count = len(lengths)
+    for i in order:
+        share = remaining_budget // remaining_count
+        take = min(lengths[i], share)
+        allowed[i] = take
+        remaining_budget -= take
+        remaining_count -= 1
+    return allowed
+
+
+def _bound(digest: str) -> tuple[str, bool]:
+    """Hard-cap the digest in code (F1) — the model's own cap is advisory and the
+    merge step overran it in S-cf5 — WITHOUT deleting whole sections (G11).
+
+    Returns ``(digest, truncated)``.
+
+    The pre-G11 implementation kept a prefix, so it always cut the tail. Because
+    ``DISTILL_SYSTEM`` prescribes a fixed heading order ending in
+    ``## Unresolved``, that deterministically deleted the open-threads section
+    from every dense session (measured: 15 of 17 capped digests). This version
+    trims section *bodies* instead, longest-first.
+
+    Guarantees, in the order they are enforced:
+
+    - **(a)** the result is never longer than ``DIGEST_MAX_CHARS``;
+    - **(b)** ``DIGEST_TRUNC_MARKER`` is present iff something was trimmed;
+    - **(c)** every heading that survives keeps its text, so a digest that was
+      valid to ``_is_valid_digest`` before bounding is still valid after — note
+      that check runs *before* this function, so it must not be invalidated here;
+    - **(d)** an unparseable shape falls back to the prefix cut;
+    - **(e)** every recognized section present on input is still present, in the
+      same order;
+    - **(f)** each surviving section keeps at least
+      ``DIGEST_SECTION_FLOOR_CHARS`` of body (or all of it, when shorter);
+    - **(g)** any budget left after (e) and (f) is distributed across bodies.
+
+    When (e)+(f) cannot both hold — too many sections for the cap — the prefix
+    cut is used, because (a) is the contract and (e) is the improvement.
+    """
+    digest = digest.strip()
+    if len(digest) <= DIGEST_MAX_CHARS:
+        return digest, False
+
+    parsed = _split_sections(digest)
+    if parsed is None:
+        return _prefix_cut(digest), True  # (d)
+    preamble, sections = parsed
+
+    # Fixed cost: preamble, every heading line, the blank line between blocks,
+    # and the marker. Bodies get whatever is left.
+    fixed = len(DIGEST_TRUNC_MARKER)
+    if preamble:
+        fixed += len(preamble) + 2
+    for heading, _ in sections:
+        fixed += len(heading) + 2  # heading + the newline before its body
+
+    floor = DIGEST_SECTION_FLOOR_CHARS + len(_SECTION_TRIM_MARKER)
+    if fixed + floor * len(sections) > DIGEST_MAX_CHARS:
+        return _prefix_cut(digest), True  # (f) unsatisfiable ⇒ (a) wins
+
+    lengths = [len(body) for _, body in sections]
+    allowed = _section_levels(lengths, DIGEST_MAX_CHARS - fixed)
+
+    blocks: list[str] = [preamble] if preamble else []
+    for (heading, body), limit in zip(sections, allowed, strict=True):
+        if len(body) <= limit:
+            kept = body
+        else:
+            room = max(limit - len(_SECTION_TRIM_MARKER), DIGEST_SECTION_FLOOR_CHARS)
+            cut = body[:room]
+            # Prefer a line boundary so a trimmed body does not end mid-bullet.
+            newline = cut.rfind("\n")
+            if newline >= DIGEST_SECTION_FLOOR_CHARS:
+                cut = cut[:newline]
+            kept = cut.rstrip() + _SECTION_TRIM_MARKER
+        blocks.append(f"{heading}\n{kept}" if kept else heading)
+
+    bounded = "\n\n".join(blocks).strip() + DIGEST_TRUNC_MARKER
+    if len(bounded) > DIGEST_MAX_CHARS:
+        # Defensive: (a) is the contract, so never return an over-cap digest.
+        return _prefix_cut(digest), True
+    return bounded, True
 
 
 # --- cache (content-addressed sidecar under raw/.digests/) -------------------
@@ -302,6 +430,30 @@ def _cache_write(cache_path: Path, fingerprint: str, digest: str) -> None:
 # --- the per-raw distill and the pass-level orchestration --------------------
 
 
+class _Outcome(NamedTuple):
+    """One raw's distill result. ``reason`` is why, so the pass summary can
+    separate a permanent condition (this agent has no renderer) from a loss
+    (G10's vanished transcript) from an actual failure."""
+
+    digest: str | None
+    reason: str
+    truncated: bool
+
+
+# Reasons a raw fell back to its skim, reported as `fallback_<reason>` counts.
+# `not_attempted` is added by distill_docs when a pass-level breaker fires, so a
+# raw the pass never even tried is never counted as one that failed.
+_FALLBACK_REASONS = (
+    "no_pointer",
+    "transcript_gone",
+    "unsupported_agent",
+    "empty_render",
+    "invalid_digest",
+    "error",
+    "not_attempted",
+)
+
+
 def _distill_one(
     doc: store.Document,
     brain: Brain,
@@ -311,8 +463,13 @@ def _distill_one(
     root: Path,
     project: str,
     write_cache: bool,
-) -> str | None:
-    """Return a digest body for one raw, or ``None`` to fall back to its skim.
+) -> _Outcome:
+    """Return the digest body for one raw, or a reason it fell back to its skim.
+
+    The reason is reported rather than collapsed to ``None`` so a pass summary can
+    distinguish "no transcript pointer", "the harness deleted the transcript"
+    (G10), "this agent has no verified renderer" and "it actually failed" — all of
+    which used to land in one undifferentiated ``fallback`` count.
 
     Document-local errors are caught here. ``BrainError`` reaches
     ``distill_docs`` so one systemic backend failure can stop later brain calls;
@@ -321,21 +478,27 @@ def _distill_one(
     agent = str(doc.get("agent", ""))
     transcript_raw = doc.get("transcript_path")
     if not isinstance(transcript_raw, str) or not transcript_raw:
-        return None  # v1 raw / no pointer ⇒ skim
+        return _Outcome(None, "no_pointer", False)  # v1 raw ⇒ skim
     transcript_path = Path(transcript_raw)
     try:
         if not transcript_path.is_file():
-            return None  # missing/moved transcript ⇒ skim (never an error)
+            # The transcript existed at capture time and does not now: this is
+            # G10's silent loss, and it is now counted separately.
+            return _Outcome(None, "transcript_gone", False)
 
         fingerprint = _source_fingerprint(doc.body, transcript_path, extra_patterns)
         cache_path = _digests_dir(root, project) / doc.file_path.name
         cached = _cache_read(cache_path, fingerprint)
         if cached is not None:
-            return cached
+            return _Outcome(cached, "cached", DIGEST_TRUNC_MARKER in cached)
 
         rendered = render_transcript(agent, transcript_path, extra_patterns)
-        if not rendered or not rendered.strip():
-            return None  # no verified renderer (Codex) / empty ⇒ skim
+        if rendered is None:
+            # No verified renderer for this agent (Codex — ADR-0013 S-cf3). This
+            # is permanent for that agent, not a transient failure.
+            return _Outcome(None, "unsupported_agent", False)
+        if not rendered.strip():
+            return _Outcome(None, "empty_render", False)
         rendered = redact(rendered, extra_patterns)  # whole-render, defense in depth
 
         chunks, dropped = _chunk(rendered, chunk_chars, MAX_DISTILL_CHUNKS)
@@ -349,15 +512,17 @@ def _distill_one(
             digest = brain.text(MERGE_SYSTEM, joined)
 
         if not _is_valid_digest(digest):
-            return None  # refusal / wrong shape ⇒ skim (D16/F3)
+            return _Outcome(None, "invalid_digest", False)  # refusal / shape (D16/F3)
         digest = redact(digest, extra_patterns)  # defense in depth over the digest
         if dropped:
             digest = f"[distill: {dropped} middle chunk(s) dropped for size]\n\n{digest}"
-        digest = _bound(digest)  # hard cap LAST so nothing pushes it back over (F1)
+        # Hard cap LAST so nothing pushes it back over (F1). Section-aware since
+        # G11: trims bodies longest-first instead of deleting the tail.
+        digest, truncated = _bound(digest)
 
         if write_cache:
             _cache_write(cache_path, fingerprint, digest)
-        return digest
+        return _Outcome(digest, "distilled", truncated)
     except budget.BudgetExhausted:
         # Codex F3: not a document-local failure — the pass budget stopped this
         # call. Must re-raise, same as BrainError below: `except Exception`
@@ -373,7 +538,7 @@ def _distill_one(
         # launch the same doomed agent CLI call once per remaining raw.
         raise
     except Exception:  # noqa: BLE001 — D16: document-local errors degrade to skim
-        return None
+        return _Outcome(None, "error", False)
 
 
 def distill_docs(
@@ -389,19 +554,30 @@ def distill_docs(
 ) -> tuple[list[store.Document], dict[str, int]]:
     """Distill each raw's transcript (spec §2.0), returning body-substituted
     Document copies (digest as body) for the raws that distilled, originals
-    otherwise, plus ``{"distilled": n, "fallback": m}``. ``mode == "off"`` skips
-    distill entirely and returns the docs untouched.
+    otherwise, plus counts.
+
+    Counts are ``{"distilled": n, "fallback": m, "truncated": t}`` plus one
+    ``fallback_<reason>`` key per reason in ``_FALLBACK_REASONS``. ``fallback``
+    remains the total, so existing readers keep working; the breakdown exists
+    because that single number conflated four unrelated situations — a raw with no
+    transcript pointer, a transcript the harness deleted (**G10**), an agent with
+    no verified renderer (every Codex capture, permanently), and a real failure —
+    which made "is the pipeline healthy?" unanswerable from a pass summary.
+    ``truncated`` counts digests the cap trimmed (**G11**).
+
+    ``mode == "off"`` skips distill entirely and returns the docs untouched.
 
     Document copies keep ``file_path`` and frontmatter, so provenance
     (``from_raw``) and ``mark_consumed`` still target the real raw file."""
+    counts = {"distilled": 0, "fallback": 0, "truncated": 0}
+    counts.update({f"fallback_{reason}": 0 for reason in _FALLBACK_REASONS})
     if mode == "off":
-        return list(docs), {"distilled": 0, "fallback": 0}
+        return list(docs), counts
 
     out: list[store.Document] = []
-    distilled = 0
     for index, doc in enumerate(docs):
         try:
-            digest = _distill_one(
+            outcome = _distill_one(
                 doc,
                 brain,
                 chunk_chars=chunk_chars,
@@ -419,16 +595,22 @@ def distill_docs(
             # reserve a chunk-heavy backlog would spend the whole budget here,
             # consume nothing, and replay the same prefix on every later pass.
             out.extend(docs[index:])
+            counts["fallback_not_attempted"] += len(docs) - index
             break
         except BrainError:
             # Every remaining raw falls back to its deterministic skim. The
             # curator may still attempt its plan call, which reports the backend
             # failure through the existing unconsumed-on-error path.
             out.extend(docs[index:])
+            counts["fallback_not_attempted"] += len(docs) - index
             break
-        if digest is None:
+        if outcome.digest is None:
             out.append(doc)
+            counts[f"fallback_{outcome.reason}"] += 1
         else:
-            out.append(dataclasses.replace(doc, body=digest))
-            distilled += 1
-    return out, {"distilled": distilled, "fallback": len(docs) - distilled}
+            out.append(dataclasses.replace(doc, body=outcome.digest))
+            counts["distilled"] += 1
+            if outcome.truncated:
+                counts["truncated"] += 1
+    counts["fallback"] = len(docs) - counts["distilled"]
+    return out, counts

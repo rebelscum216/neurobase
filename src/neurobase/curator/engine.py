@@ -304,16 +304,24 @@ def _log_pass(
     summary: dict[str, Any],
     *,
     fold: dict[str, Any] | None = None,
+    distill_detail: dict[str, int] | None = None,
 ) -> None:
     """Append one pass record to the journal. ``fold`` (ADR-0022 B2), when
     given, rides alongside the summary keys — it is deliberately NOT a summary
     key, because the CLI prints the summary as JSON and the fold carries raw
-    session ids (loopback-only sensitivity, spec §2)."""
+    session ids (loopback-only sensitivity, spec §2).
+
+    ``distill_detail`` rides the record for the same reason: it decomposes
+    ``fallback`` by cause (G10's vanished transcript vs an agent with no verified
+    renderer vs a real failure) and counts G11 truncations, which the pinned
+    summary key set must not grow to hold."""
     mem = handle.memory_dir(project)
     mem.mkdir(parents=True, exist_ok=True)
     record = {**summary, "at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}
     if fold is not None:
         record["fold"] = fold
+    if distill_detail:
+        record["distill_detail"] = distill_detail
     with (mem / CURATOR_LOG).open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -395,7 +403,7 @@ def _curate_unlocked(
     # Step 1 (spec §2.0): distill each raw's transcript into a richer body for
     # this pass, degrading to the skim on any failure (D16 — never aborts). The
     # cache is derived state; a dry run reads it but never writes it.
-    raw_docs, distill_counts = distill_mod.distill_docs(
+    raw_docs, distill_all_counts = distill_mod.distill_docs(
         handle.root,
         project,
         raw_docs,
@@ -405,6 +413,17 @@ def _curate_unlocked(
         extra_patterns=redact_patterns,
         write_cache=not dry_run,
     )
+    # The summary's key set is pinned (spec D16 names `distilled`/`fallback`, and
+    # `test_summary_key_set_is_exact_and_carries_no_fold` fails loudly on drift),
+    # so the per-reason breakdown and the G11 truncation count ride the JOURNAL
+    # record instead — the same split `fold` already uses. Adding them to the
+    # printed summary would be a deliberate contract change, not a side effect of
+    # improving observability.
+    distill_counts = {
+        "distilled": distill_all_counts["distilled"],
+        "fallback": distill_all_counts["fallback"],
+    }
+    distill_detail = {k: v for k, v in distill_all_counts.items() if k not in distill_counts}
 
     remaining = list(raw_docs)
     plans: list[dict[str, Any]] = []
@@ -528,7 +547,7 @@ def _curate_unlocked(
                 **distill_counts,
                 "error": plan_error,
             }
-            _log_pass(handle, project, summary)
+            _log_pass(handle, project, summary, distill_detail=distill_detail)
             return summary
         dry_summary: dict[str, Any] = {
             "status": "dry-run",
@@ -556,7 +575,7 @@ def _curate_unlocked(
             **distill_counts,
             "error": plan_error,
         }
-        _log_pass(handle, project, summary)
+        _log_pass(handle, project, summary, distill_detail=distill_detail)
         return summary
 
     # Reconcile the fold's removal lists against pass-end reality (D22). The
@@ -687,7 +706,13 @@ def _curate_unlocked(
         "superseded": fold_superseded,
         "tombstoned": fold_tombstoned,
     }
-    _log_pass(handle, project, summary, fold=fold if batch_count else None)
+    _log_pass(
+        handle,
+        project,
+        summary,
+        fold=fold if batch_count else None,
+        distill_detail=distill_detail,
+    )
     return summary
 
 

@@ -489,7 +489,11 @@ def test_distill_budget_exhaustion_stops_the_loop_immediately(root: Path, tmp_pa
 
     out, counts = distill_mod.distill_docs(root, "proj", docs, budgeted, write_cache=False)
 
-    assert counts == {"distilled": 1, "fallback": 2}
+    assert counts["distilled"] == 1
+    assert counts["fallback"] == 2
+    # Both remaining raws were never attempted (the budget stopped the loop), so
+    # they are attributed to `not_attempted` rather than looking like failures.
+    assert counts["fallback_not_attempted"] == 2
     assert len(out) == 3
     # 1 (PassBudget.__post_init__) + 1 (raw 1's successful debit) + 1 (raw 2's
     # failing debit). Raw 3 must never be reached: no 4th clock read.

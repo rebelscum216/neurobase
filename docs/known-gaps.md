@@ -1028,7 +1028,19 @@ the others.
 
 ### G11 — the digest cap truncates the tail against a fixed section order, so the last sections are usually lost on dense sessions
 
-- **status:** open
+- **status:** fixed (2026-08-04, PR #15 — squash `618f7e9`) — `_bound()` now trims
+  section **bodies** longest-first (water-fill to a common level) instead of keeping a
+  prefix, so the loss falls on verbose sections rather than on whichever section happens
+  to be last. Every recognized section present on input survives, in order, with a
+  non-empty content floor; individually trimmed bodies are marked; an unparseable shape
+  still falls back to the prefix cut, and when too many sections make that invariant
+  unsatisfiable the cap wins (F1 is the contract, the section invariant is the
+  improvement). **`DIGEST_MAX_CHARS` is unchanged at 6 000** — it is contract in spec
+  §2.0 step 6, the §8 defaults table, and ADR-0014 F1, and the fix does not need it
+  raised. Shipped with it: `fallback` is decomposed by cause in the pass **journal
+  record** (not the summary, whose key set D16 and
+  `test_summary_key_set_is_exact_and_carries_no_fold` pin), which also gives **G10**'s
+  silent transcript loss its first real counter, plus a `truncated` count for this gap.
 - **severity:** moderate — systematic, and it lands on the most valuable content. The
   cap discards whichever headings come last, and `## Unresolved` (open threads,
   known-broken items, deferred work) is always last in `DISTILL_SYSTEM`'s prescribed

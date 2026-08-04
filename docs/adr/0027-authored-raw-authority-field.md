@@ -85,11 +85,17 @@ treat the distinction as significant.
 
 **D46 — this lands on store schema 1. It does not bump `STORE_SCHEMA_VERSION`, and it
 does not wait for schema 2.** The reason is that **D11 governs the store's identity, not
-its documents' keys**: the schema comparison lives in `open_store` and only there
-([`core/store_handle.py:366-425`](../../src/neurobase/core/store_handle.py)), and what
-it compares is the integer in `store.toml`. An additive optional key on a *raw* is
-outside that comparison entirely, and current readers already ignore unknown raw
-frontmatter. The precedent is ADR-0014, which introduced `capture_version: 2` as a
+its documents' keys**: what it compares is the integer in `store.toml`, and the
+supported chokepoint for that comparison is `open_store`
+([`core/store_handle.py:366-425`](../../src/neurobase/core/store_handle.py)). (It is the
+supported guard, not the only code containing a comparison — the lower-level
+`ensure_store_metadata` retains its own defensive check
+([`core/store.py:105-125`](../../src/neurobase/core/store.py)), which `ensure_tree`
+delegates through. An earlier draft of this ADR borrowed `open_store`'s docstring phrase
+"lives here and only here" and so overstated it — review finding
+`P2-DOCS-PLAN-ACCURACY-003`.) Either way an additive optional key on a *raw* is outside
+both comparisons entirely, and current readers already ignore unknown raw frontmatter.
+The precedent is ADR-0014, which introduced `capture_version: 2` as a
 **per-document** marker while `STORE_SCHEMA_VERSION` stayed `1`
 ([`core/store.py:29`](../../src/neurobase/core/store.py)); `write_raw`'s contract
 already requires readers to tolerate its absence.
@@ -109,13 +115,16 @@ already requires readers to tolerate its absence.
   IDs, content hashes
   ([`0016-store-schema-2-project-records-profiles.md:10-36`](0016-store-schema-2-project-records-profiles.md)).
   Nothing in D45–D48 contradicts it or is blocked by it. What this ADR declines is
-  *routing `authority` through schema 2's record/source identity model*, which would
-  make that model's shape partly answerable to a premise — that authored digests are
-  worth having — which nothing has yet tested. **Migration path:** `authority` is an
-  optional raw-frontmatter key, so a schema-1→2 migration carries it forward unchanged
-  or maps it onto whatever source-identity field schema 2 defines; either way it is one
-  optional key, and no migration step depends on its value. If schema 2 later supersedes
-  it, that supersession is a one-line ADR annotation, not a data migration.
+  *deferring the field until schema 2 exists*, which would make schema 2's shape partly
+  answerable to a premise — that authored digests are worth having — which nothing has
+  yet tested. **Migration rule, stated only as far as it is supported:** `authority` is
+  an optional raw-frontmatter key, so a schema-1→2 migration **carries it forward
+  unchanged**; no migration step depends on its value. Nothing further is claimed —
+  ADR-0016 defines project records, profiles, ULID event IDs and content hashes, but
+  **no raw source-identity field**, so an earlier draft's suggestion that schema 2 might
+  "map `authority` onto" one invented a model that ADR-0016 does not contain (review
+  finding `P2-DOCS-PLAN-ACCURACY-003`). If a future ADR defines a replacement, that ADR
+  owns the mapping and whether it needs a data migration.
 
 **D47 — `authority` is a claim about provenance, not a grant of trust.** It MUST NOT
 raise (or lower) a document's weight in planning, ranking, recall, or proposal mining.
@@ -217,8 +226,11 @@ internals directly is a one-off harness, not a demonstration of a supported path
   is not the authority** — the interface needs its own ratified decision before
   implementation. (c) Where authored files live durably — the vault's
   `projects/*/sessions/` is gitignored, so the five that exist today are single-copy.
-  (d) The continuous-curation knobs (`stale_hours`, `auto_max_raws`) — see
-  [`G12`](../known-gaps.md), which is deliberately fix-neutral.
+  (d) The continuous-curation knobs (`stale_hours`, `auto_max_raws`) and how the auto
+  tier should be sized — that is the "Size the auto curate tier from measured latency"
+  item in the [build-plan Backlog](../neurobase-build-plan.md), which deliberately ranks
+  no remedy. ([`G12`](../known-gaps.md) is the narrower, separate defect that the
+  sizing *comment* encodes a false cost model.)
 - **Process note.** This ADR is `Proposed`, not `Accepted`, and is not the routing of
   §11 in full — only the one slice that is decidable on evidence already in hand. The
   rest of §11 still needs walking piece by piece, which is the standing next action.

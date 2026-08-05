@@ -1011,6 +1011,36 @@ def _counter(value: object) -> int | None:
     return value if type(value) is int else None
 
 
+#: What ``BrainUsage.as_dict()`` writes, and the types each field carries. It writes
+#: **all** of them on every pass — a fresh instance still produces the full object —
+#: so a record missing one is truncated, not merely sparse. Extra keys are tolerated:
+#: the dataclass may grow, and an older doctor must not call a newer record corrupt.
+_USAGE_COUNTER_FIELDS = (
+    "calls",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def _usage_block_is_wellformed(usage: dict) -> bool:
+    """Does this match the shape the producer actually writes?
+
+    Round 3, P2-CORRECTNESS-004: checking only "non-empty dict with an int
+    ``calls`` and a dict ``models``" let a truncated two-key object reach a
+    healthy verdict, even though ``as_dict()`` always writes seven fields.
+    """
+    for field in _USAGE_COUNTER_FIELDS:
+        count = _counter(usage.get(field))
+        if count is None or count < 0:
+            return False
+    cost = usage.get("cost_usd")
+    if type(cost) not in (int, float):
+        return False
+    return isinstance(usage.get("models"), dict)
+
+
 def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]], list[str]]:
     """``(served every call, served only some, counts a call total cannot explain)``.
 
@@ -1025,12 +1055,18 @@ def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]]
     licenses is nothing beyond itself**: see ``_model_mixture_check``, which
     reports such counts without claiming a cause. This function only sorts.
 
-    A count that counter cannot produce — above the call total, or ``<= 0`` when
-    ``record`` only ever increments — is reported separately as a malformed
-    record rather than folded into either healthy bucket. **Every model lands in
-    exactly one of the three buckets**, deliberately: an earlier shape let a
-    zero or negative count match no branch at all, so a model in a corrupt
-    record vanished from the report instead of being flagged.
+    The third bucket is counts the call total does not explain — above ``calls``,
+    or ``<= 0``. **It is NOT "counts ``record`` could not produce", and an earlier
+    revision of this docstring said so wrongly** (round 3): ``record`` keys the
+    map by ``str(model)``, so one envelope carrying both ``1`` and ``"1"``
+    increments the same entry twice and can push a count past ``calls``. A
+    well-formed JSON envelope cannot do it — JSON object keys are unique strings —
+    but the map is not proof of that, so the bucket is named for what was
+    observed, not for what is reachable.
+
+    **Every model lands in exactly one of the three buckets**, deliberately: an
+    earlier shape let a zero or negative count match no branch at all, so a model
+    in a corrupt record vanished from the report instead of being flagged.
     """
     if not isinstance(usage, dict):
         return frozenset(), [], []
@@ -1147,83 +1183,85 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
         ]
 
     usage = entry.get("brain_usage")
-    if not isinstance(usage, dict) or not usage:
+    if not isinstance(usage, dict) or not _usage_block_is_wellformed(usage):
         return [
             _check(
                 "model mixture",
                 "warn",
-                f"{project!r}: the pass at {at} journaled a malformed usage block "
-                f"({usage!r}) — model mixture unknown",
-                "`BrainUsage.as_dict()` always writes a populated object, and a "
-                "genuinely uninstrumented pass omits the key entirely, so this is "
-                "neither. The log is append-only, so the record stays; a later "
-                "instrumented pass supersedes what this line reports.",
+                f"{project!r}: the usage block on the pass at {at} does not match the "
+                f"shape `BrainUsage.as_dict()` writes ({usage!r}) — model counts unread",
+                "That block is neither a producer record nor an absent one — a "
+                "genuinely uninstrumented pass omits the key entirely — so its "
+                "counts are not read. The log is append-only, so the record stays; "
+                "a later instrumented pass supersedes what this line reports.",
             )
         ]
+    calls = usage["calls"]
+    models = usage["models"]
 
-    calls = _counter(usage.get("calls"))
-    if calls is None or calls <= 0:
+    # `calls == 0` is producer-valid, not corruption: `BrainUsage` starts at zero
+    # and `ClaudeCLIBrain` records only AFTER its success checks, so a pass whose
+    # every brain call failed journals a complete block reading zero. Round 3
+    # (P2-CORRECTNESS-004) caught this warning as a false positive on a real record.
+    if calls == 0:
+        if models:
+            return [
+                _check(
+                    "model mixture",
+                    "warn",
+                    f"{project!r}: the pass at {at} counted no calls yet recorded "
+                    f"{len(models)} model id(s) — model counts unread",
+                    "Per-model counts are incremented only alongside a counted "
+                    "call, so this block is internally inconsistent and its counts "
+                    "are not read.",
+                )
+            ]
         return [
             _check(
                 "model mixture",
-                "warn",
-                f"{project!r}: the pass at {at} journaled an unusable call total "
-                f"({usage.get('calls')!r}) — model mixture unknown",
-                "Counts come from a counter that only ever increments, so this "
-                "record's usage block cannot be trusted. The log is append-only, "
-                "so the record stays; a later instrumented pass supersedes what "
-                "this line reports.",
-            )
-        ]
-
-    models = usage.get("models")
-    if not isinstance(models, dict):
-        return [
-            _check(
-                "model mixture",
-                "warn",
-                f"{project!r}: the pass at {at} journaled a malformed model map "
-                f"({models!r}) — model mixture unknown",
-                "`BrainUsage` always carries a dict of per-model call counts, so "
-                "this record's accounting cannot be trusted. The log is "
-                "append-only, so the record stays; a later instrumented pass "
-                "supersedes what this line reports.",
+                "ok",
+                f"{project!r}: the pass at {at} counted no successful brain calls "
+                "(nothing to attribute — check `curate health` for why)",
             )
         ]
 
     consistent, partial, impossible = _model_mixture(usage)
 
+    # Every headline below states what the RECORD says, not what it implies about
+    # service or coverage. Round 3, P2-CORRECTNESS-001: "did not all cover the
+    # pass" and "served throughout" are inferences the counts do not carry — a
+    # model may serve a call and go unreported, and `str()` key collisions can
+    # inflate a count to `calls` without every call being observed.
     if impossible:
         return [
             _check(
                 "model mixture",
                 "warn",
-                f"{project!r}: malformed model counts on the pass at {at} "
-                f"({', '.join(impossible)} vs {calls} call(s)) — mixture unknown",
-                "A model cannot serve more calls than the pass made, or fewer than "
-                "one. Treat that record's usage block as unreliable. The log is "
+                f"{project!r}: the pass at {at} recorded per-model counts its call "
+                f"total of {calls} does not explain — {', '.join(impossible)}",
+                "A count above the call total or below one does not correspond to "
+                "any reading of this record, so its counts are not read. The log is "
                 "append-only, so the record stays; a later instrumented pass "
                 "supersedes what this line reports.",
             )
         ]
 
     if partial:
-        served = ", ".join(f"{model} on {count}/{calls}" for model, count in partial)
+        counted = ", ".join(f"{model} on {count}" for model, count in partial)
         return [
             _check(
                 "model mixture",
                 "warn",
-                f"{project!r}: models did not all cover the pass at {at} — {served} "
-                f"call(s) of {calls}",
-                "Nothing is broken and no action is required. **The journal cannot "
-                "say why**, and this line does not guess: a successful call may "
-                "report no model at all, counting toward the call total but toward "
-                "no model, so incomplete reporting and a genuine mid-pass change "
-                "look identical here. Counts also aggregate every brain call in the "
-                "pass — distillation, planning, synthesis, retries — and are not "
-                "attributed per stage, so they say nothing about which model "
-                "produced any particular artifact. Treat that pass's brain outputs "
-                "as unattributed rather than as evidence of either explanation.",
+                f"{project!r}: the pass at {at} counted {calls} call(s) but recorded "
+                f"some models on fewer — {counted}",
+                "Nothing is broken and no action is required, and **this line draws "
+                "no conclusion from those counts**. A successful call may report no "
+                "model at all, counting toward the call total but toward no model, "
+                "so an unreported call and a mid-pass change in models are recorded "
+                "identically here; the journal does not carry which occurred. The "
+                "counts also aggregate every brain call in the pass — distillation, "
+                "planning, synthesis, retries — with no per-stage attribution, so "
+                "they do not say which model produced any particular artifact.",
             )
         ]
     if not consistent:
@@ -1231,15 +1269,15 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
             _check(
                 "model mixture",
                 "ok",
-                f"{project!r}: backend reported no model ids for the pass at {at}",
+                f"{project!r}: the pass at {at} recorded no model ids across its {calls} call(s)",
             )
         ]
     return [
         _check(
             "model mixture",
             "ok",
-            f"{project!r}: most recent substantive pass ({at}) served throughout by "
-            f"{', '.join(sorted(consistent))}",
+            f"{project!r}: the pass at {at} recorded every model on all {calls} "
+            f"call(s) — {', '.join(sorted(consistent))}",
         )
     ]
 

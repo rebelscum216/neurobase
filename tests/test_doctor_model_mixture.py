@@ -95,6 +95,22 @@ def _journal(root: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
+def _usage_block(**overrides: Any) -> dict[str, Any]:
+    """A complete `BrainUsage.as_dict()` block, so a test that means to probe ONE
+    field is not silently rejected by the schema guard for missing the others."""
+    block: dict[str, Any] = {
+        "calls": 1,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cost_usd": 0.0,
+        "models": {MAIN: 1},
+    }
+    block.update(overrides)
+    return block
+
+
 def _mixture(root: Path, repo: Path) -> diagnostics.Check:
     checks = diagnostics._model_mixture_check(root, repo)
     assert len(checks) == 1, f"expected exactly one check, got {checks}"
@@ -121,17 +137,21 @@ def test_two_models_on_every_call_is_healthy_not_a_warning(project: tuple[Path, 
     assert MAIN in check.detail and AUX in check.detail
 
 
-#: Words that assert an explanation the journal cannot supply. Round 1 shipped
-#: "fallback"/"capacity"; round 2 caught the subtler ones — a *change* the record
-#: does not prove, missing *coverage* it equally does not prove, and a claim about
-#: *digests* when the counts aggregate every stage of the pass.
-UNSUPPORTED_CLAIMS = ("fallback", "capacity", "changed", "does not cover", "digest")
-
-
-def _assert_claims_nothing_it_cannot_prove(check: diagnostics.Check) -> None:
-    text = f"{check.detail} {check.remedy or ''}".lower()
-    for word in UNSUPPORTED_CLAIMS:
-        assert word not in text, f"{word!r} asserts an explanation the journal cannot supply"
+#: The EXACT remedy the under-counted branch must emit. Asserted whole, not by
+#: keyword: round 3 showed a keyword filter is not a guard — the old list banned
+#: "does not cover" while a test positively required the equivalent "did not all
+#: cover", and a rephrasing like "the provider swapped models mid-pass" would have
+#: passed every entry in it. Pinning the whole string means any reworded claim has
+#: to be re-approved here, in the open, by someone editing this constant.
+UNDERCOUNTED_REMEDY = (
+    "Nothing is broken and no action is required, and **this line draws no "
+    "conclusion from those counts**. A successful call may report no model at all, "
+    "counting toward the call total but toward no model, so an unreported call and "
+    "a mid-pass change in models are recorded identically here; the journal does "
+    "not carry which occurred. The counts also aggregate every brain call in the "
+    "pass — distillation, planning, synthesis, retries — with no per-stage "
+    "attribution, so they do not say which model produced any particular artifact."
+)
 
 
 @pytest.mark.parametrize(
@@ -141,41 +161,116 @@ def _assert_claims_nothing_it_cannot_prove(check: diagnostics.Check) -> None:
         # change — but no model reaches `calls`, so nothing in the record says so.
         ([[MAIN], [AUX]], "a genuine switch"),
         # One model throughout; the second envelope simply reported no modelUsage.
-        # Identical in the journal to the row above.
-        ([[MAIN], None], "incomplete telemetry"),
-        # A covering model plus a partial one. Round 2 showed even this cannot
-        # prove a change: `record` stringifies model keys, so two distinct keys can
-        # collide and reach `count == calls` without full envelope coverage.
-        ([[MAIN, AUX], [MAIN]], "a partial beside a covering model"),
+        ([[MAIN], None], "an unreported call"),
+        # A covering model beside a partial one.
+        ([[MAIN, AUX], [MAIN]], "a partial beside a fully counted model"),
     ],
 )
-def test_every_uncovered_shape_is_reported_the_SAME_way_and_explains_nothing(
+def test_every_undercounted_shape_gets_the_SAME_line_and_draws_no_conclusion(
     project: tuple[Path, Path], per_call: list[list[str] | None], shape: str
 ) -> None:
-    """Round 2, P2-CORRECTNESS-001 + P2-OBSERVABILITY-005 — and the reason the
-    proof mechanism was deleted rather than narrowed.
+    """Round 2/3, P2-CORRECTNESS-001 — and the reason the proof mechanism was
+    deleted rather than narrowed.
 
-    These three shapes have genuinely different causes and are **indistinguishable
-    in the journal**. Any check that reports them differently is claiming
-    something the record does not carry, so all three must produce one neutral
-    line: the counts, and no explanation.
+    These shapes have genuinely different causes. **None of them proves its
+    cause from the record**, so reporting them differently — or describing any of
+    them as coverage or service — claims something the journal does not carry.
+    The detail is asserted in full, so a future rewording cannot quietly
+    reintroduce an inference.
     """
     root, repo = project
     _write_raw(root, "r1.md")
     engine.curate(root, "repo", _Brain(per_call))
 
-    usage = _journal(root)[-1]["brain_usage"]
+    entry = _journal(root)[-1]
+    usage, at = entry["brain_usage"], entry["at"]
     calls = usage["calls"]
     assert any(0 < n < calls for n in usage["models"].values()), (
-        f"{shape}: the uncovered shape must actually be produced, or this proves nothing"
+        f"{shape}: the under-counted shape must actually be produced, or this proves nothing"
+    )
+    counted = ", ".join(
+        f"{m} on {n}" for m, n in sorted((m, n) for m, n in usage["models"].items() if n < calls)
     )
 
     check = _mixture(root, repo)
     assert check.status == "warn"
-    assert "did not all cover the pass" in check.detail
-    assert f"of {calls}" in check.detail
-    assert check.remedy is not None and "cannot say why" in check.remedy.lower()
-    _assert_claims_nothing_it_cannot_prove(check)
+    assert check.detail == (
+        f"'repo': the pass at {at} counted {calls} call(s) but recorded some models "
+        f"on fewer — {counted}"
+    )
+    assert check.remedy == UNDERCOUNTED_REMEDY
+
+
+class _CollidingKeyBrain(_Brain):
+    """Reports raw `modelUsage` keys that collide under `str()` — `1` and `"1"`.
+
+    `BrainUsage.record` keys by `str(model)`, so ONE envelope increments the same
+    entry twice. A real JSON envelope cannot do this (object keys are unique
+    strings), but the journal carries no proof of that, which is why no branch may
+    infer coverage or service from a count reaching the call total.
+    """
+
+    def _record(self) -> None:
+        index = min(self._calls, len(self._per_call) - 1)
+        models = self._per_call[index]
+        self._calls += 1
+        envelope: dict[str, Any] = {"usage": {"input_tokens": 1, "output_tokens": 1}}
+        if models is not None:
+            # ONLY the colliding pair, so the collided entry is the sole model and
+            # the fully-counted branch is the one under test.
+            envelope["modelUsage"] = {1: {"inputTokens": 1}, "1": {"inputTokens": 1}}
+        self.usage.record(envelope)
+
+
+def test_a_key_collision_reaching_the_call_total_claims_no_coverage(
+    project: tuple[Path, Path],
+) -> None:
+    """Round 3, P2-CORRECTNESS-001. A collision can make `count == calls` while
+    only one envelope reported anything, so the fully-counted branch must state
+    what was RECORDED, never that a model served or covered every call."""
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _CollidingKeyBrain([[MAIN], None]))
+
+    usage = _journal(root)[-1]["brain_usage"]
+    assert usage["models"].get("1") == usage["calls"], (
+        "the collision must actually reach the call total, or this proves nothing"
+    )
+
+    check = _mixture(root, repo)
+    for claim in ("served", "cover", "throughout"):
+        assert claim not in check.detail.lower(), (
+            f"{claim!r} infers service from a count a collision manufactured"
+        )
+    assert "recorded every model on all" in check.detail
+
+
+def test_a_count_above_the_call_total_is_not_called_impossible(
+    project: tuple[Path, Path],
+) -> None:
+    """Round 3. One envelope with colliding keys yields `count > calls`, so the
+    old wording ("a model cannot serve more calls than the pass made") described
+    as unreachable something the producer demonstrably produces. The line must
+    report the observation, not assert what the counter can do."""
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _CollidingKeyBrain([[MAIN], None]))
+
+    _append_log_line(
+        root,
+        json.dumps(
+            {
+                "status": "ok",
+                "at": "2026-08-05T16:00:00Z",
+                "brain_usage": _usage_block(calls=1, models={MAIN: 2}),
+            }
+        ),
+    )
+
+    check = _mixture(root, repo)
+    assert check.status == "warn"
+    assert "does not explain" in check.detail
+    assert "cannot" not in check.detail.lower(), "do not assert what the producer cannot do"
 
 
 def test_the_remedy_does_not_pin_the_mixture_on_digests(project: tuple[Path, Path]) -> None:
@@ -197,7 +292,7 @@ def test_the_remedy_does_not_pin_the_mixture_on_digests(project: tuple[Path, Pat
     check = _mixture(root, repo)
     assert check.remedy is not None
     assert "digest" not in check.remedy.lower()
-    assert "aggregate" in check.remedy.lower() and "per stage" in check.remedy.lower()
+    assert "aggregate" in check.remedy.lower() and "per-stage" in check.remedy.lower()
 
 
 def test_a_backend_reporting_no_model_ids_is_not_a_warning(project: tuple[Path, Path]) -> None:
@@ -404,8 +499,8 @@ def test_a_JSON_BOOLEAN_count_can_never_read_as_healthy(
     project: tuple[Path, Path], value: bool
 ) -> None:
     """Round 1, P2-CORRECTNESS-004. `bool` subclasses `int`, so `isinstance(True,
-    int)` is True and `True == 1` — which let `{"calls": 1, "models": {m: true}}`
-    through as a clean pass. A corrupt record must never launder into an `ok`."""
+    int)` is True and `True == 1` — which let a boolean per-model count through as
+    a clean pass. A corrupt record must never launder into an `ok`."""
     root, repo = project
     _write_raw(root, "r1.md")
     engine.curate(root, "repo", _Brain([[MAIN]]))
@@ -416,22 +511,22 @@ def test_a_JSON_BOOLEAN_count_can_never_read_as_healthy(
             {
                 "status": "ok",
                 "at": "2026-08-05T15:00:00Z",
-                "brain_usage": {"calls": 1, "models": {MAIN: value}},
+                "brain_usage": _usage_block(calls=1, models={MAIN: value}),
             }
         ),
     )
 
     check = _mixture(root, repo)
     assert check.status == "warn"
-    assert "malformed model counts" in check.detail
+    assert "does not explain" in check.detail
 
 
 @pytest.mark.parametrize("value", [True, False])
-def test_a_JSON_BOOLEAN_call_total_is_unusable_not_a_pass_to_skip(
+def test_a_JSON_BOOLEAN_call_total_is_reported_not_skipped(
     project: tuple[Path, Path], value: bool
 ) -> None:
-    """A boolean `calls` must be reported as unusable — not silently skipped in
-    favour of an older record, which would resurrect the stale-anchor bug."""
+    """A boolean `calls` must be reported — not silently skipped in favour of an
+    older record, which would resurrect the stale-anchor bug."""
     root, repo = project
     _write_raw(root, "r1.md")
     engine.curate(root, "repo", _Brain([[MAIN, AUX], [MAIN]]))
@@ -442,15 +537,113 @@ def test_a_JSON_BOOLEAN_call_total_is_unusable_not_a_pass_to_skip(
             {
                 "status": "ok",
                 "at": "2026-08-05T15:00:00Z",
-                "brain_usage": {"calls": value, "models": {MAIN: 1}},
+                "brain_usage": _usage_block(calls=value, models={MAIN: 1}),
             }
         ),
     )
 
     check = _mixture(root, repo)
     assert check.status == "warn"
-    assert "unusable call total" in check.detail
-    assert "the model set changed" not in check.detail, "the older pass must not be reported"
+    assert "does not match the shape" in check.detail
+    assert "2026-08-05T15:00:00Z" in check.detail, "the newest record must be the one reported"
+
+
+def test_a_complete_ZERO_CALL_block_is_valid_not_corrupt(project: tuple[Path, Path]) -> None:
+    """Round 3, P2-CORRECTNESS-004 — a false warning on a producer-valid record.
+
+    `BrainUsage` starts at zero and `ClaudeCLIBrain` records only AFTER its
+    success checks, so a pass whose every brain call failed journals a complete
+    seven-key block reading `calls: 0`. Doctor called that "unusable … cannot be
+    trusted"; it is simply a pass with nothing to attribute.
+    """
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _Brain([[MAIN]]))
+
+    fresh = BrainUsage().as_dict()
+    assert fresh["calls"] == 0 and len(fresh) == 7, "the producer's own zero-call shape"
+    _append_log_line(
+        root,
+        json.dumps({"status": "error", "at": "2026-08-05T17:00:00Z", "brain_usage": fresh}),
+    )
+
+    check = _mixture(root, repo)
+    assert check.status == "ok"
+    assert "no successful brain calls" in check.detail
+    for slur in ("malformed", "unusable", "cannot be trusted", "does not match"):
+        assert slur not in check.detail.lower(), f"{slur!r} defames a producer-valid record"
+
+
+def test_counts_without_calls_are_internally_inconsistent(project: tuple[Path, Path]) -> None:
+    """The other side of the zero-call case: per-model counts are incremented only
+    alongside a counted call, so models-without-calls is not a valid record."""
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _Brain([[MAIN]]))
+
+    _append_log_line(
+        root,
+        json.dumps(
+            {
+                "status": "ok",
+                "at": "2026-08-05T17:30:00Z",
+                "brain_usage": _usage_block(calls=0, models={MAIN: 1}),
+            }
+        ),
+    )
+
+    check = _mixture(root, repo)
+    assert check.status == "warn"
+    assert "counted no calls yet recorded" in check.detail
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["input_tokens", "output_tokens", "cache_read_input_tokens", "cost_usd", "models"],
+)
+def test_a_TRUNCATED_usage_block_never_reaches_a_healthy_verdict(
+    project: tuple[Path, Path], missing: str
+) -> None:
+    """Round 3, P2-CORRECTNESS-004. `as_dict()` writes all seven fields on every
+    pass, so a record missing one is truncated — but validating only `calls` and
+    `models` let it reach `ok`."""
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _Brain([[MAIN]]))
+
+    block = _usage_block()
+    del block[missing]
+    _append_log_line(
+        root,
+        json.dumps({"status": "ok", "at": "2026-08-05T18:00:00Z", "brain_usage": block}),
+    )
+
+    check = _mixture(root, repo)
+    assert check.status == "warn"
+    assert "does not match the shape" in check.detail
+
+
+def test_an_UNKNOWN_extra_usage_field_is_tolerated(project: tuple[Path, Path]) -> None:
+    """Strictness must not become brittleness: the dataclass may grow, and an
+    older doctor must not call a newer producer's record corrupt."""
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _Brain([[MAIN]]))
+
+    _append_log_line(
+        root,
+        json.dumps(
+            {
+                "status": "ok",
+                "at": "2026-08-05T18:30:00Z",
+                "brain_usage": _usage_block(reasoning_tokens=99),
+            }
+        ),
+    )
+
+    check = _mixture(root, repo)
+    assert check.status == "ok"
+    assert "recorded every model on all" in check.detail
 
 
 @pytest.mark.parametrize(
@@ -476,7 +669,7 @@ def test_a_malformed_usage_CONTAINER_is_never_healthy(
 
     check = _mixture(root, repo)
     assert check.status == "warn"
-    assert "malformed usage block" in check.detail
+    assert "does not match the shape" in check.detail
 
 
 @pytest.mark.parametrize("models", [True, "main", ["main"], 3, None])
@@ -503,7 +696,7 @@ def test_a_malformed_MODELS_container_is_never_healthy(
 
     check = _mixture(root, repo)
     assert check.status == "warn"
-    assert "malformed model map" in check.detail
+    assert "does not match the shape" in check.detail
 
 
 def test_an_ABSENT_usage_key_stays_healthy(project: tuple[Path, Path]) -> None:

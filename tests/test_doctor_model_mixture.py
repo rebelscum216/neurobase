@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from neurobase.brain.base import BrainUsage
+from neurobase.brain.base import BrainError, BrainUsage
 from neurobase.cli import diagnostics
 from neurobase.core import projects, store
 from neurobase.curator import engine
@@ -121,55 +121,83 @@ def test_two_models_on_every_call_is_healthy_not_a_warning(project: tuple[Path, 
     assert MAIN in check.detail and AUX in check.detail
 
 
-def test_a_PROVEN_model_change_warns(project: tuple[Path, Path]) -> None:
-    """Call 1 gets both models, call 2 only the main one. `MAIN` covers every
-    call, which proves every envelope reported telemetry — so `AUX` covering only
-    half is a real change, not a gap in the reporting."""
+#: Words that assert an explanation the journal cannot supply. Round 1 shipped
+#: "fallback"/"capacity"; round 2 caught the subtler ones — a *change* the record
+#: does not prove, missing *coverage* it equally does not prove, and a claim about
+#: *digests* when the counts aggregate every stage of the pass.
+UNSUPPORTED_CLAIMS = ("fallback", "capacity", "changed", "does not cover", "digest")
+
+
+def _assert_claims_nothing_it_cannot_prove(check: diagnostics.Check) -> None:
+    text = f"{check.detail} {check.remedy or ''}".lower()
+    for word in UNSUPPORTED_CLAIMS:
+        assert word not in text, f"{word!r} asserts an explanation the journal cannot supply"
+
+
+@pytest.mark.parametrize(
+    ("per_call", "shape"),
+    [
+        # Fully observed A-then-B: every envelope reported, the set really did
+        # change — but no model reaches `calls`, so nothing in the record says so.
+        ([[MAIN], [AUX]], "a genuine switch"),
+        # One model throughout; the second envelope simply reported no modelUsage.
+        # Identical in the journal to the row above.
+        ([[MAIN], None], "incomplete telemetry"),
+        # A covering model plus a partial one. Round 2 showed even this cannot
+        # prove a change: `record` stringifies model keys, so two distinct keys can
+        # collide and reach `count == calls` without full envelope coverage.
+        ([[MAIN, AUX], [MAIN]], "a partial beside a covering model"),
+    ],
+)
+def test_every_uncovered_shape_is_reported_the_SAME_way_and_explains_nothing(
+    project: tuple[Path, Path], per_call: list[list[str] | None], shape: str
+) -> None:
+    """Round 2, P2-CORRECTNESS-001 + P2-OBSERVABILITY-005 — and the reason the
+    proof mechanism was deleted rather than narrowed.
+
+    These three shapes have genuinely different causes and are **indistinguishable
+    in the journal**. Any check that reports them differently is claiming
+    something the record does not carry, so all three must produce one neutral
+    line: the counts, and no explanation.
+    """
     root, repo = project
     _write_raw(root, "r1.md")
-    engine.curate(root, "repo", _Brain([[MAIN, AUX], [MAIN]]))
+    engine.curate(root, "repo", _Brain(per_call))
 
     usage = _journal(root)[-1]["brain_usage"]
     calls = usage["calls"]
-    assert usage["models"][MAIN] == calls, "coverage must be proven or this tests the wrong case"
-    assert 0 < usage["models"][AUX] < calls
+    assert any(0 < n < calls for n in usage["models"].values()), (
+        f"{shape}: the uncovered shape must actually be produced, or this proves nothing"
+    )
 
     check = _mixture(root, repo)
     assert check.status == "warn"
-    assert "the model set changed" in check.detail
-    assert f"{AUX} on 1/{calls}" in check.detail
-    assert check.remedy is not None and "no action is required" in check.remedy
-    assert "fallback" not in check.remedy and "capacity" not in check.remedy, (
-        "the journal records which models served how many calls, never why"
-    )
+    assert "did not all cover the pass" in check.detail
+    assert f"of {calls}" in check.detail
+    assert check.remedy is not None and "cannot say why" in check.remedy.lower()
+    _assert_claims_nothing_it_cannot_prove(check)
 
 
-def test_incomplete_telemetry_is_NOT_reported_as_a_model_change(
-    project: tuple[Path, Path],
-) -> None:
-    """Round 1, P2-CORRECTNESS-001. `record` counts a call whenever the envelope
-    succeeded but counts a model only when that envelope carried `modelUsage`, so
-    ONE model with a silent envelope is indistinguishable in the journal from a
-    genuine mid-pass change. Claiming a change here is the healthy-pass false
-    warning the whole rule exists to prevent."""
+def test_the_remedy_does_not_pin_the_mixture_on_digests(project: tuple[Path, Path]) -> None:
+    """Round 2, P2-OBSERVABILITY-005. `models` aggregates every brain envelope in
+    the pass and is not attributed per stage. In this very fixture distillation
+    falls back deterministically, so the two model observations come from planning
+    and synthesis and **no digest is brain-produced at all** — yet the round-1
+    remedy told the reader that pass's digests came from different model sets."""
     root, repo = project
     _write_raw(root, "r1.md")
-    # One model throughout; the second envelope simply reports no modelUsage.
-    engine.curate(root, "repo", _Brain([[MAIN], None]))
+    brain = _Brain([[MAIN, AUX], [MAIN]])
+    engine.curate(root, "repo", brain)
 
-    usage = _journal(root)[-1]["brain_usage"]
-    calls = usage["calls"]
-    assert 0 < usage["models"][MAIN] < calls, "the ambiguous shape must actually be produced"
+    assert _journal(root)[-1]["brain_usage"]["calls"] == 2, (
+        "exactly plan + synthesis; a third call would mean distill used the brain "
+        "and the no-digest premise of this test would be false"
+    )
 
     check = _mixture(root, repo)
-    assert "the model set changed" not in check.detail, (
-        "no model covers every call, so a change is not proven"
-    )
-    assert "does not cover" in check.detail
     assert check.remedy is not None
-    assert "NOT proof" in check.remedy
-    for cause in ("fallback", "capacity"):
-        assert cause not in (check.remedy or ""), "a cause the record cannot establish"
+    assert "digest" not in check.remedy.lower()
+    assert "aggregate" in check.remedy.lower() and "per stage" in check.remedy.lower()
 
 
 def test_a_backend_reporting_no_model_ids_is_not_a_warning(project: tuple[Path, Path]) -> None:
@@ -288,6 +316,41 @@ def test_it_emits_nothing_where_curate_health_already_speaks(tmp_path: Path, sce
     assert diagnostics._model_mixture_check(root, repo) == []
 
 
+class _FailingPlanBrain(_Brain):
+    """Records usage on the planning call, then fails the plan — the shape a
+    failed `--dry-run` preview journals (`status: error`, `dry_run: true`, with
+    whatever usage accumulated before the failure)."""
+
+    def plan_json(self, system: str, user: str) -> dict:
+        self._record()
+        raise BrainError("plan boom")
+
+
+def test_a_failed_DRY_RUN_never_displaces_the_real_pass(project: tuple[Path, Path]) -> None:
+    """Round 2, P2-CORRECTNESS-002. A failed preview journals `status: "error"`,
+    which is not a neutral status — but it carries `dry_run: true`, the flag the
+    engine added specifically "so a health consumer does not read a failed
+    *preview* as a failed pass" (`curator/engine.py:551-560`). A status-only
+    anchor let a read-only preview replace the diagnosis for the real pass."""
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _Brain([[MAIN, AUX], [MAIN]]))
+    before = _mixture(root, repo)
+    assert before.status == "warn"
+
+    _write_raw(root, "r2.md", when="2026-08-05T13:30:00Z")
+    engine.curate(root, "repo", _FailingPlanBrain([[MAIN]]), dry_run=True)
+
+    preview = _journal(root)[-1]
+    assert preview["status"] == "error" and preview["dry_run"] is True
+    assert preview.get("brain_usage", {}).get("calls"), (
+        "the preview must have spent a call, or it cannot displace anything"
+    )
+
+    after = _mixture(root, repo)
+    assert after == before, "a preview changes nothing on disk and must change no verdict"
+
+
 def _append_log_line(root: Path, line: str) -> None:
     """Append a raw line to the curator log, exactly as a corrupt/foreign writer
     would leave it — complete with the trailing newline, so it is NOT excusable
@@ -388,6 +451,72 @@ def test_a_JSON_BOOLEAN_call_total_is_unusable_not_a_pass_to_skip(
     assert check.status == "warn"
     assert "unusable call total" in check.detail
     assert "the model set changed" not in check.detail, "the older pass must not be reported"
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [True, False, "usage", ["calls"], {}, 0, None],
+)
+def test_a_malformed_usage_CONTAINER_is_never_healthy(
+    project: tuple[Path, Path], usage: object
+) -> None:
+    """Round 2, P2-CORRECTNESS-004. Validating the counters was not enough: a
+    scalar, list, null or empty dict at the `brain_usage` level took the "recorded
+    no model telemetry" branch and read as healthy. `BrainUsage.as_dict()` always
+    writes a populated object, and a genuinely uninstrumented pass omits the key
+    entirely — so a present-but-malformed value is corruption, not absence."""
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _Brain([[MAIN]]))
+
+    _append_log_line(
+        root,
+        json.dumps({"status": "ok", "at": "2026-08-05T15:00:00Z", "brain_usage": usage}),
+    )
+
+    check = _mixture(root, repo)
+    assert check.status == "warn"
+    assert "malformed usage block" in check.detail
+
+
+@pytest.mark.parametrize("models", [True, "main", ["main"], 3, None])
+def test_a_malformed_MODELS_container_is_never_healthy(
+    project: tuple[Path, Path], models: object
+) -> None:
+    """The same laundering one level down: `{"calls": 2, "models": true}` gave the
+    classifier empty buckets and reported "backend reported no model ids" — an
+    `ok`. Only a real dict may reach any healthy conclusion."""
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _Brain([[MAIN]]))
+
+    _append_log_line(
+        root,
+        json.dumps(
+            {
+                "status": "ok",
+                "at": "2026-08-05T15:00:00Z",
+                "brain_usage": {"calls": 2, "models": models},
+            }
+        ),
+    )
+
+    check = _mixture(root, repo)
+    assert check.status == "warn"
+    assert "malformed model map" in check.detail
+
+
+def test_an_ABSENT_usage_key_stays_healthy(project: tuple[Path, Path]) -> None:
+    """The other half of P2-CORRECTNESS-004: tightening the container check must
+    NOT turn the legitimate uninstrumented-backend case into a warning."""
+    root, repo = project
+    _write_raw(root, "r1.md")
+    engine.curate(root, "repo", _UninstrumentedBrain())
+
+    assert "brain_usage" not in _journal(root)[-1]
+    check = _mixture(root, repo)
+    assert check.status == "ok"
+    assert "no model telemetry" in check.detail
 
 
 def test_the_check_is_wired_into_collect_checks(project: tuple[Path, Path]) -> None:

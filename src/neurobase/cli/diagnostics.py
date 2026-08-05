@@ -1021,9 +1021,9 @@ def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]]
     asserted one model per arm and would have cried wolf on all of them
     (``docs/notes/spikes/2026-08-04-stance-test.py``, ``model_verdict``).
 
-    A model with ``0 < count < calls`` served only part of the pass. **On its own
-    that does not prove the model set changed** — see ``_partials_are_proven``;
-    this function only sorts the counts, and the caller decides what they license.
+    A model with ``0 < count < calls`` served only part of the pass. **What that
+    licenses is nothing beyond itself**: see ``_model_mixture_check``, which
+    reports such counts without claiming a cause. This function only sorts.
 
     A count that counter cannot produce — above the call total, or ``<= 0`` when
     ``record`` only ever increments — is reported separately as a malformed
@@ -1055,27 +1055,6 @@ def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]]
     return frozenset(consistent), sorted(partial), sorted(impossible)
 
 
-def _partials_are_proven(consistent: frozenset[str]) -> bool:
-    """Does a partial count prove the model set *changed*, or only that telemetry
-    is incomplete? The journal cannot always distinguish the two.
-
-    ``BrainUsage.record`` increments ``calls`` for every successful envelope but
-    increments a model only when that envelope carries a dict ``modelUsage`` —
-    missing telemetry is explicitly tolerated there. So two calls from **one**
-    model where only one envelope reported ``modelUsage`` also yield
-    ``count == 1 < calls == 2``, identical in the journal to a genuine mid-pass
-    change (round 1, P2-CORRECTNESS-001).
-
-    What *does* discriminate: ``count(m) <= (envelopes that reported telemetry)
-    <= calls`` for every model. So if **some** model reached ``count == calls``,
-    every envelope must have reported telemetry — coverage is complete, and any
-    remaining partial is then a real change. With no such model, coverage is
-    unknown and the two shapes are indistinguishable, so the check must say so
-    rather than assert a change (let alone a cause) the record cannot support.
-    """
-    return bool(consistent)
-
-
 def _newest_substantive_pass(entries: list[dict]) -> dict | None:
     """The newest pass that meant to do work, whether or not it left telemetry.
 
@@ -1088,13 +1067,21 @@ def _newest_substantive_pass(entries: list[dict]) -> dict | None:
     one — precisely wrong after a backend switch, when the stale warning is about
     a brain no longer in use.
 
-    Neutral outcomes are skipped, and only those: ``noop`` and ``skipped-locked``
-    attempt nothing, and ``dry-run`` changes nothing on disk. Everything else —
-    including ``resynth``, ``error`` and ``partial`` — is a pass whose model
-    evidence (or lack of it) supersedes anything older.
+    Skipped: the neutral statuses (``noop``, ``skipped-locked``, ``dry-run``) and
+    **anything carrying ``dry_run: true``**. The second rule is not redundant —
+    a *failed* preview journals ``status: "error"`` with ``dry_run: true`` and
+    whatever usage it accumulated before the plan failed
+    (``curator/engine.py:551-560``), and that shape exists precisely so "a health
+    consumer does not read a failed *preview* as a failed pass". Matching
+    ``_refreshed_the_node`` here keeps doctor's two lines applying one definition
+    of "a pass" to the same record; a status-only test let a read-only preview
+    replace the diagnosis for the real latest pass (round 2, P2-CORRECTNESS-002).
+
+    Everything else — including ``resynth``, ``error`` and ``partial`` — is a
+    pass whose model evidence (or lack of it) supersedes anything older.
     """
     for entry in reversed(entries):
-        if entry.get("status") in _CURATE_NEUTRAL:
+        if entry.get("status") in _CURATE_NEUTRAL or entry.get("dry_run") is True:
             continue
         return entry
     return None
@@ -1144,16 +1131,33 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
         return []
 
     at = entry.get("at")
-    usage = entry.get("brain_usage")
-    consistent, partial, impossible = _model_mixture(usage)
 
-    if not isinstance(usage, dict) or not usage:
+    # An ABSENT key is legitimate — the codex and API brains never report usage,
+    # and `--resynth` journals none. A key that is PRESENT but not a usage block
+    # is corruption, and conflating the two let `brain_usage: true` (or a string,
+    # list, or empty dict) read as a healthy pass (round 2, P2-CORRECTNESS-004).
+    if "brain_usage" not in entry:
         return [
             _check(
                 "model mixture",
                 "ok",
                 f"{project!r}: the pass at {at} recorded no model telemetry "
                 "(the codex and API brains report none, and `--resynth` never does)",
+            )
+        ]
+
+    usage = entry.get("brain_usage")
+    if not isinstance(usage, dict) or not usage:
+        return [
+            _check(
+                "model mixture",
+                "warn",
+                f"{project!r}: the pass at {at} journaled a malformed usage block "
+                f"({usage!r}) — model mixture unknown",
+                "`BrainUsage.as_dict()` always writes a populated object, and a "
+                "genuinely uninstrumented pass omits the key entirely, so this is "
+                "neither. The log is append-only, so the record stays; a later "
+                "instrumented pass supersedes what this line reports.",
             )
         ]
 
@@ -1172,6 +1176,23 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
             )
         ]
 
+    models = usage.get("models")
+    if not isinstance(models, dict):
+        return [
+            _check(
+                "model mixture",
+                "warn",
+                f"{project!r}: the pass at {at} journaled a malformed model map "
+                f"({models!r}) — model mixture unknown",
+                "`BrainUsage` always carries a dict of per-model call counts, so "
+                "this record's accounting cannot be trusted. The log is "
+                "append-only, so the record stays; a later instrumented pass "
+                "supersedes what this line reports.",
+            )
+        ]
+
+    consistent, partial, impossible = _model_mixture(usage)
+
     if impossible:
         return [
             _check(
@@ -1186,37 +1207,23 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
             )
         ]
 
-    if partial and _partials_are_proven(consistent):
-        served = ", ".join(f"{model} on {count}/{calls}" for model, count in partial)
-        return [
-            _check(
-                "model mixture",
-                "warn",
-                f"{project!r}: the model set changed during the pass at {at} — "
-                f"{served} call(s), while {', '.join(sorted(consistent))} served all "
-                f"{calls}",
-                "Nothing is broken and no action is required. The pass's digests "
-                "were not all produced by the same model set, so they are not "
-                "comparable to each other when judging output quality — do not read "
-                "a wording change across them as a change in the source material. "
-                "The journal records which models served how many calls, not why "
-                "the set changed.",
-            )
-        ]
     if partial:
         served = ", ".join(f"{model} on {count}/{calls}" for model, count in partial)
         return [
             _check(
                 "model mixture",
                 "warn",
-                f"{project!r}: model telemetry does not cover the pass at {at} — "
-                f"{served} call(s), and no model served all {calls}",
-                "This is NOT proof the model changed: a successful call may report "
-                "no model at all, which counts toward the call total but toward no "
-                "model. With no model covering every call, an incomplete report and "
-                "a genuine mid-pass change look identical in the journal, so treat "
-                "that pass's digests as unattributed rather than as evidence of "
-                "either.",
+                f"{project!r}: models did not all cover the pass at {at} — {served} "
+                f"call(s) of {calls}",
+                "Nothing is broken and no action is required. **The journal cannot "
+                "say why**, and this line does not guess: a successful call may "
+                "report no model at all, counting toward the call total but toward "
+                "no model, so incomplete reporting and a genuine mid-pass change "
+                "look identical here. Counts also aggregate every brain call in the "
+                "pass — distillation, planning, synthesis, retries — and are not "
+                "attributed per stage, so they say nothing about which model "
+                "produced any particular artifact. Treat that pass's brain outputs "
+                "as unattributed rather than as evidence of either explanation.",
             )
         ]
     if not consistent:

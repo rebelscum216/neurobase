@@ -999,6 +999,18 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
     return _check("curate health", "ok", f"{project!r}: last refresh {last_refresh.get('at')}")
 
 
+def _counter(value: object) -> int | None:
+    """``value`` as a counter ``BrainUsage.record`` could have produced, else ``None``.
+
+    ``type(value) is int``, **not** ``isinstance``: ``bool`` subclasses ``int``, so
+    JSON ``true`` would otherwise be accepted as a count of one and ``false`` as
+    zero. That let ``{"calls": 1, "models": {"main": true}}`` read as a healthy
+    pass — a corrupt record laundered into an ``ok`` verdict, which is the exact
+    outcome the malformed bucket exists to prevent (round 1, P2-CORRECTNESS-004).
+    """
+    return value if type(value) is int else None
+
+
 def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]], list[str]]:
     """``(served every call, served only some, counts a call total cannot explain)``.
 
@@ -1009,11 +1021,9 @@ def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]]
     asserted one model per arm and would have cried wolf on all of them
     (``docs/notes/spikes/2026-08-04-stance-test.py``, ``model_verdict``).
 
-    The real signal is a per-model count that does not cover the pass: a model
-    with ``0 < count < calls`` served only part of it, which means the mixture
-    changed partway through. ``BrainUsage.record`` increments each model once per
-    envelope (``brain/base.py``), so a model present on every call has
-    ``count == calls`` by construction.
+    A model with ``0 < count < calls`` served only part of the pass. **On its own
+    that does not prove the model set changed** — see ``_partials_are_proven``;
+    this function only sorts the counts, and the caller decides what they license.
 
     A count that counter cannot produce — above the call total, or ``<= 0`` when
     ``record`` only ever increments — is reported separately as a malformed
@@ -1024,17 +1034,17 @@ def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]]
     """
     if not isinstance(usage, dict):
         return frozenset(), [], []
-    raw_calls = usage.get("calls")
-    calls = raw_calls if isinstance(raw_calls, int) else 0
+    calls = _counter(usage.get("calls"))
     models = usage.get("models")
-    if calls <= 0 or not isinstance(models, dict):
+    if calls is None or calls <= 0 or not isinstance(models, dict):
         return frozenset(), [], []
     consistent: set[str] = set()
     partial: list[tuple[str, int]] = []
     impossible: list[str] = []
-    for model, count in models.items():
+    for model, raw in models.items():
         name = str(model)
-        if not isinstance(count, int):
+        count = _counter(raw)
+        if count is None:
             impossible.append(name)
         elif count == calls:
             consistent.add(name)
@@ -1045,22 +1055,53 @@ def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]]
     return frozenset(consistent), sorted(partial), sorted(impossible)
 
 
-def _last_pass_that_spent_calls(entries: list[dict]) -> dict | None:
-    """The newest journal record that actually made a brain call.
+def _partials_are_proven(consistent: frozenset[str]) -> bool:
+    """Does a partial count prove the model set *changed*, or only that telemetry
+    is incomplete? The journal cannot always distinguish the two.
 
-    Not simply the newest record: a `noop` or `skipped-locked` pass spends
-    nothing and carries no usage, so anchoring on the last entry would report
-    "nothing to check" on a store whose last *real* pass mixed models.
+    ``BrainUsage.record`` increments ``calls`` for every successful envelope but
+    increments a model only when that envelope carries a dict ``modelUsage`` —
+    missing telemetry is explicitly tolerated there. So two calls from **one**
+    model where only one envelope reported ``modelUsage`` also yield
+    ``count == 1 < calls == 2``, identical in the journal to a genuine mid-pass
+    change (round 1, P2-CORRECTNESS-001).
+
+    What *does* discriminate: ``count(m) <= (envelopes that reported telemetry)
+    <= calls`` for every model. So if **some** model reached ``count == calls``,
+    every envelope must have reported telemetry — coverage is complete, and any
+    remaining partial is then a real change. With no such model, coverage is
+    unknown and the two shapes are indistinguishable, so the check must say so
+    rather than assert a change (let alone a cause) the record cannot support.
+    """
+    return bool(consistent)
+
+
+def _newest_substantive_pass(entries: list[dict]) -> dict | None:
+    """The newest pass that meant to do work, whether or not it left telemetry.
+
+    **Not "the newest pass carrying usage".** That was the round-1 bug
+    (P2-CORRECTNESS-002): absent ``brain_usage`` does not mean "spent no calls".
+    The codex and API brains expose no ``BrainUsage`` at all, and the ``resynth``
+    branch journals no usage even though ``_synthesize`` spends a real budgeted
+    call (``curator/engine.py:388``). Scanning past those for an older
+    instrumented record made doctor present a pass from days ago as the current
+    one — precisely wrong after a backend switch, when the stale warning is about
+    a brain no longer in use.
+
+    Neutral outcomes are skipped, and only those: ``noop`` and ``skipped-locked``
+    attempt nothing, and ``dry-run`` changes nothing on disk. Everything else —
+    including ``resynth``, ``error`` and ``partial`` — is a pass whose model
+    evidence (or lack of it) supersedes anything older.
     """
     for entry in reversed(entries):
-        usage = entry.get("brain_usage")
-        if isinstance(usage, dict) and isinstance(usage.get("calls"), int) and usage["calls"] > 0:
-            return entry
+        if entry.get("status") in _CURATE_NEUTRAL:
+            continue
+        return entry
     return None
 
 
 def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
-    """Was the last brain-spending pass served by one consistent set of models?
+    """Was the most recent substantive pass served by one consistent set of models?
 
     PR #17 journals ``brain_usage.models`` — per-model call counts — but nothing
     ever read them, so a pass whose model mixture changed halfway through looked
@@ -1068,9 +1109,13 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
     health, so this is the read side of a fact the engine was already writing:
     no new contract, no new file, nothing written.
 
-    Returns **no check at all** for every state ``curate health`` already
-    diagnoses (no store, no project, unusable log, no passes yet). Reporting
-    "health unknown" twice in one doctor run says nothing the first line did not.
+    Emits **no check at all** when the history cannot be vouched for or there is
+    nothing to vouch for: an unusable log (unreadable, unparseable, empty, or
+    **damaged**), a history carrying outcomes this build cannot classify, no
+    store, no project, or no substantive pass yet. All of those are states
+    ``curate health`` already reports on, and a second, more confident-sounding
+    line beside its "health unknown" is worse than silence (round 1,
+    P2-OBSERVABILITY-003).
     """
     try:
         handle = open_store(root, StoreMode.DOCTOR)
@@ -1086,17 +1131,46 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
         return []
 
     entries, state = _read_curator_log(handle.memory_dir(project) / store.CURATOR_LOG)
-    if state in (LogState.UNREADABLE, LogState.UNPARSEABLE, LogState.EMPTY) or not entries:
+    if state is not LogState.OK or not entries:
+        return []
+    # `saw_unknown` is curate health's own verdict on whether this history can be
+    # classified at all; reusing it keeps the two lines from disagreeing about
+    # the same records.
+    if _classify_curate_history(entries)[3]:
         return []
 
-    entry = _last_pass_that_spent_calls(entries)
+    entry = _newest_substantive_pass(entries)
     if entry is None:
         return []
 
     at = entry.get("at")
     usage = entry.get("brain_usage")
-    calls = usage["calls"] if isinstance(usage, dict) and isinstance(usage.get("calls"), int) else 0
     consistent, partial, impossible = _model_mixture(usage)
+
+    if not isinstance(usage, dict) or not usage:
+        return [
+            _check(
+                "model mixture",
+                "ok",
+                f"{project!r}: the pass at {at} recorded no model telemetry "
+                "(the codex and API brains report none, and `--resynth` never does)",
+            )
+        ]
+
+    calls = _counter(usage.get("calls"))
+    if calls is None or calls <= 0:
+        return [
+            _check(
+                "model mixture",
+                "warn",
+                f"{project!r}: the pass at {at} journaled an unusable call total "
+                f"({usage.get('calls')!r}) — model mixture unknown",
+                "Counts come from a counter that only ever increments, so this "
+                "record's usage block cannot be trusted. The log is append-only, "
+                "so the record stays; a later instrumented pass supersedes what "
+                "this line reports.",
+            )
+        ]
 
     if impossible:
         return [
@@ -1105,8 +1179,28 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
                 "warn",
                 f"{project!r}: malformed model counts on the pass at {at} "
                 f"({', '.join(impossible)} vs {calls} call(s)) — mixture unknown",
-                "A model cannot serve more calls than the pass made. Treat that "
-                "record's usage block as unreliable; the next pass rewrites it.",
+                "A model cannot serve more calls than the pass made, or fewer than "
+                "one. Treat that record's usage block as unreliable. The log is "
+                "append-only, so the record stays; a later instrumented pass "
+                "supersedes what this line reports.",
+            )
+        ]
+
+    if partial and _partials_are_proven(consistent):
+        served = ", ".join(f"{model} on {count}/{calls}" for model, count in partial)
+        return [
+            _check(
+                "model mixture",
+                "warn",
+                f"{project!r}: the model set changed during the pass at {at} — "
+                f"{served} call(s), while {', '.join(sorted(consistent))} served all "
+                f"{calls}",
+                "Nothing is broken and no action is required. The pass's digests "
+                "were not all produced by the same model set, so they are not "
+                "comparable to each other when judging output quality — do not read "
+                "a wording change across them as a change in the source material. "
+                "The journal records which models served how many calls, not why "
+                "the set changed.",
             )
         ]
     if partial:
@@ -1115,12 +1209,14 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
             _check(
                 "model mixture",
                 "warn",
-                f"{project!r}: models changed mid-pass at {at} — {served} call(s)",
-                "Nothing is broken and no action is required: the provider served "
-                "part of that pass with a different model (fallback or capacity). "
-                "Its digests are not comparable to each other when judging output "
-                "quality, so do not read a wording change across them as a change "
-                "in the source material.",
+                f"{project!r}: model telemetry does not cover the pass at {at} — "
+                f"{served} call(s), and no model served all {calls}",
+                "This is NOT proof the model changed: a successful call may report "
+                "no model at all, which counts toward the call total but toward no "
+                "model. With no model covering every call, an incomplete report and "
+                "a genuine mid-pass change look identical in the journal, so treat "
+                "that pass's digests as unattributed rather than as evidence of "
+                "either.",
             )
         ]
     if not consistent:
@@ -1135,7 +1231,7 @@ def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
         _check(
             "model mixture",
             "ok",
-            f"{project!r}: last brain-spending pass ({at}) served throughout by "
+            f"{project!r}: most recent substantive pass ({at}) served throughout by "
             f"{', '.join(sorted(consistent))}",
         )
     ]

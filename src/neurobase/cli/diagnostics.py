@@ -999,6 +999,148 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
     return _check("curate health", "ok", f"{project!r}: last refresh {last_refresh.get('at')}")
 
 
+def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]], list[str]]:
+    """``(served every call, served only some, counts a call total cannot explain)``.
+
+    **More than one model is NOT the signal, and a check that assumes otherwise
+    fires on every healthy pass.** One ``claude -p`` call reports two model ids —
+    the main model plus a ``claude-haiku-4-5`` auxiliary — so ``len(models) > 1``
+    is the normal case, not a fault. The first version of this rejection logic
+    asserted one model per arm and would have cried wolf on all of them
+    (``docs/notes/spikes/2026-08-04-stance-test.py``, ``model_verdict``).
+
+    The real signal is a per-model count that does not cover the pass: a model
+    with ``0 < count < calls`` served only part of it, which means the mixture
+    changed partway through. ``BrainUsage.record`` increments each model once per
+    envelope (``brain/base.py``), so a model present on every call has
+    ``count == calls`` by construction.
+
+    A count that counter cannot produce — above the call total, or ``<= 0`` when
+    ``record`` only ever increments — is reported separately as a malformed
+    record rather than folded into either healthy bucket. **Every model lands in
+    exactly one of the three buckets**, deliberately: an earlier shape let a
+    zero or negative count match no branch at all, so a model in a corrupt
+    record vanished from the report instead of being flagged.
+    """
+    if not isinstance(usage, dict):
+        return frozenset(), [], []
+    raw_calls = usage.get("calls")
+    calls = raw_calls if isinstance(raw_calls, int) else 0
+    models = usage.get("models")
+    if calls <= 0 or not isinstance(models, dict):
+        return frozenset(), [], []
+    consistent: set[str] = set()
+    partial: list[tuple[str, int]] = []
+    impossible: list[str] = []
+    for model, count in models.items():
+        name = str(model)
+        if not isinstance(count, int):
+            impossible.append(name)
+        elif count == calls:
+            consistent.add(name)
+        elif 0 < count < calls:
+            partial.append((name, count))
+        else:  # count > calls, or <= 0 — neither is reachable from `record`
+            impossible.append(name)
+    return frozenset(consistent), sorted(partial), sorted(impossible)
+
+
+def _last_pass_that_spent_calls(entries: list[dict]) -> dict | None:
+    """The newest journal record that actually made a brain call.
+
+    Not simply the newest record: a `noop` or `skipped-locked` pass spends
+    nothing and carries no usage, so anchoring on the last entry would report
+    "nothing to check" on a store whose last *real* pass mixed models.
+    """
+    for entry in reversed(entries):
+        usage = entry.get("brain_usage")
+        if isinstance(usage, dict) and isinstance(usage.get("calls"), int) and usage["calls"] > 0:
+            return entry
+    return None
+
+
+def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
+    """Was the last brain-spending pass served by one consistent set of models?
+
+    PR #17 journals ``brain_usage.models`` — per-model call counts — but nothing
+    ever read them, so a pass whose model mixture changed halfway through looked
+    identical to a clean one. Doctor already reads this journal for curate
+    health, so this is the read side of a fact the engine was already writing:
+    no new contract, no new file, nothing written.
+
+    Returns **no check at all** for every state ``curate health`` already
+    diagnoses (no store, no project, unusable log, no passes yet). Reporting
+    "health unknown" twice in one doctor run says nothing the first line did not.
+    """
+    try:
+        handle = open_store(root, StoreMode.DOCTOR)
+    except store.UnsupportedSchemaError:
+        return []
+    if handle.schema is None:
+        return []
+    try:
+        project = handle.resolve_project(cwd)
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    if project is None:
+        return []
+
+    entries, state = _read_curator_log(handle.memory_dir(project) / store.CURATOR_LOG)
+    if state in (LogState.UNREADABLE, LogState.UNPARSEABLE, LogState.EMPTY) or not entries:
+        return []
+
+    entry = _last_pass_that_spent_calls(entries)
+    if entry is None:
+        return []
+
+    at = entry.get("at")
+    usage = entry.get("brain_usage")
+    calls = usage["calls"] if isinstance(usage, dict) and isinstance(usage.get("calls"), int) else 0
+    consistent, partial, impossible = _model_mixture(usage)
+
+    if impossible:
+        return [
+            _check(
+                "model mixture",
+                "warn",
+                f"{project!r}: malformed model counts on the pass at {at} "
+                f"({', '.join(impossible)} vs {calls} call(s)) — mixture unknown",
+                "A model cannot serve more calls than the pass made. Treat that "
+                "record's usage block as unreliable; the next pass rewrites it.",
+            )
+        ]
+    if partial:
+        served = ", ".join(f"{model} on {count}/{calls}" for model, count in partial)
+        return [
+            _check(
+                "model mixture",
+                "warn",
+                f"{project!r}: models changed mid-pass at {at} — {served} call(s)",
+                "Nothing is broken and no action is required: the provider served "
+                "part of that pass with a different model (fallback or capacity). "
+                "Its digests are not comparable to each other when judging output "
+                "quality, so do not read a wording change across them as a change "
+                "in the source material.",
+            )
+        ]
+    if not consistent:
+        return [
+            _check(
+                "model mixture",
+                "ok",
+                f"{project!r}: backend reported no model ids for the pass at {at}",
+            )
+        ]
+    return [
+        _check(
+            "model mixture",
+            "ok",
+            f"{project!r}: last brain-spending pass ({at}) served throughout by "
+            f"{', '.join(sorted(consistent))}",
+        )
+    ]
+
+
 def _denylist_scope_check(config: Config) -> Check:
     """Report `[enable].denylist` entries that do not gate the repo containing them.
 
@@ -1071,6 +1213,7 @@ def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
         _shim_check(which),
         *_store_checks(root, cwd),
         _curate_health_check(root, cwd),
+        *_model_mixture_check(root, cwd),
         _brain_check(config),
         _agent_check("claude", which),
         _agent_check("codex", which),

@@ -999,6 +999,289 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
     return _check("curate health", "ok", f"{project!r}: last refresh {last_refresh.get('at')}")
 
 
+def _counter(value: object) -> int | None:
+    """``value`` as a counter ``BrainUsage.record`` could have produced, else ``None``.
+
+    ``type(value) is int``, **not** ``isinstance``: ``bool`` subclasses ``int``, so
+    JSON ``true`` would otherwise be accepted as a count of one and ``false`` as
+    zero. That let ``{"calls": 1, "models": {"main": true}}`` read as a healthy
+    pass — a corrupt record laundered into an ``ok`` verdict, which is the exact
+    outcome the malformed bucket exists to prevent (round 1, P2-CORRECTNESS-004).
+    """
+    return value if type(value) is int else None
+
+
+#: What ``BrainUsage.as_dict()`` writes, and the types each field carries. It writes
+#: **all** of them on every pass — a fresh instance still produces the full object —
+#: so a record missing one is truncated, not merely sparse. Extra keys are tolerated:
+#: the dataclass may grow, and an older doctor must not call a newer record corrupt.
+_USAGE_COUNTER_FIELDS = (
+    "calls",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def _usage_block_is_wellformed(usage: dict) -> bool:
+    """Does this match the shape the producer actually writes?
+
+    Round 3, P2-CORRECTNESS-004: checking only "non-empty dict with an int
+    ``calls`` and a dict ``models``" let a truncated two-key object reach a
+    healthy verdict, even though ``as_dict()`` always writes seven fields.
+    """
+    for field in _USAGE_COUNTER_FIELDS:
+        count = _counter(usage.get(field))
+        if count is None or count < 0:
+            return False
+    cost = usage.get("cost_usd")
+    if type(cost) not in (int, float):
+        return False
+    return isinstance(usage.get("models"), dict)
+
+
+def _model_mixture(usage: object) -> tuple[frozenset[str], list[tuple[str, int]], list[str]]:
+    """``(served every call, served only some, counts a call total cannot explain)``.
+
+    **More than one model is NOT the signal, and a check that assumes otherwise
+    fires on every healthy pass.** One ``claude -p`` call reports two model ids —
+    the main model plus a ``claude-haiku-4-5`` auxiliary — so ``len(models) > 1``
+    is the normal case, not a fault. The first version of this rejection logic
+    asserted one model per arm and would have cried wolf on all of them
+    (``docs/notes/spikes/2026-08-04-stance-test.py``, ``model_verdict``).
+
+    A model with ``0 < count < calls`` served only part of the pass. **What that
+    licenses is nothing beyond itself**: see ``_model_mixture_check``, which
+    reports such counts without claiming a cause. This function only sorts.
+
+    The third bucket is counts the call total does not explain — above ``calls``,
+    or ``<= 0``. **It is NOT "counts ``record`` could not produce", and an earlier
+    revision of this docstring said so wrongly** (round 3): ``record`` keys the
+    map by ``str(model)``, so one envelope carrying both ``1`` and ``"1"``
+    increments the same entry twice and can push a count past ``calls``. A
+    well-formed JSON envelope cannot do it — JSON object keys are unique strings —
+    but the map is not proof of that, so the bucket is named for what was
+    observed, not for what is reachable.
+
+    **Every model lands in exactly one of the three buckets**, deliberately: an
+    earlier shape let a zero or negative count match no branch at all, so a model
+    in a corrupt record vanished from the report instead of being flagged.
+    """
+    if not isinstance(usage, dict):
+        return frozenset(), [], []
+    calls = _counter(usage.get("calls"))
+    models = usage.get("models")
+    if calls is None or calls <= 0 or not isinstance(models, dict):
+        return frozenset(), [], []
+    consistent: set[str] = set()
+    partial: list[tuple[str, int]] = []
+    impossible: list[str] = []
+    for model, raw in models.items():
+        name = str(model)
+        count = _counter(raw)
+        if count is None:
+            impossible.append(name)
+        elif count == calls:
+            consistent.add(name)
+        elif 0 < count < calls:
+            partial.append((name, count))
+        else:  # count > calls, or <= 0 — neither is reachable from `record`
+            impossible.append(name)
+    return frozenset(consistent), sorted(partial), sorted(impossible)
+
+
+def _newest_substantive_pass(entries: list[dict]) -> dict | None:
+    """The newest pass that meant to do work, whether or not it left telemetry.
+
+    **Not "the newest pass carrying usage".** That was the round-1 bug
+    (P2-CORRECTNESS-002): absent ``brain_usage`` does not mean "spent no calls".
+    The codex and API brains expose no ``BrainUsage`` at all, and the ``resynth``
+    branch journals no usage even though ``_synthesize`` spends a real budgeted
+    call (``curator/engine.py:388``). Scanning past those for an older
+    instrumented record made doctor present a pass from days ago as the current
+    one — precisely wrong after a backend switch, when the stale warning is about
+    a brain no longer in use.
+
+    Skipped: the neutral statuses (``noop``, ``skipped-locked``, ``dry-run``) and
+    **anything carrying ``dry_run: true``**. The second rule is not redundant —
+    a *failed* preview journals ``status: "error"`` with ``dry_run: true`` and
+    whatever usage it accumulated before the plan failed
+    (``curator/engine.py:551-560``), and that shape exists precisely so "a health
+    consumer does not read a failed *preview* as a failed pass". Matching
+    ``_refreshed_the_node`` here keeps doctor's two lines applying one definition
+    of "a pass" to the same record; a status-only test let a read-only preview
+    replace the diagnosis for the real latest pass (round 2, P2-CORRECTNESS-002).
+
+    Everything else — including ``resynth``, ``error`` and ``partial`` — is a
+    pass whose model evidence (or lack of it) supersedes anything older.
+    """
+    for entry in reversed(entries):
+        if entry.get("status") in _CURATE_NEUTRAL or entry.get("dry_run") is True:
+            continue
+        return entry
+    return None
+
+
+def _model_mixture_check(root: Path, cwd: Path) -> list[Check]:
+    """Was the most recent substantive pass served by one consistent set of models?
+
+    PR #17 journals ``brain_usage.models`` — per-model call counts — but nothing
+    ever read them, so a pass whose model mixture changed halfway through looked
+    identical to a clean one. Doctor already reads this journal for curate
+    health, so this is the read side of a fact the engine was already writing:
+    no new contract, no new file, nothing written.
+
+    Emits **no check at all** when the history cannot be vouched for or there is
+    nothing to vouch for: an unusable log (unreadable, unparseable, empty, or
+    **damaged**), a history carrying outcomes this build cannot classify, no
+    store, no project, or no substantive pass yet. All of those are states
+    ``curate health`` already reports on, and a second, more confident-sounding
+    line beside its "health unknown" is worse than silence (round 1,
+    P2-OBSERVABILITY-003).
+    """
+    try:
+        handle = open_store(root, StoreMode.DOCTOR)
+    except store.UnsupportedSchemaError:
+        return []
+    if handle.schema is None:
+        return []
+    try:
+        project = handle.resolve_project(cwd)
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    if project is None:
+        return []
+
+    entries, state = _read_curator_log(handle.memory_dir(project) / store.CURATOR_LOG)
+    if state is not LogState.OK or not entries:
+        return []
+    # `saw_unknown` is curate health's own verdict on whether this history can be
+    # classified at all; reusing it keeps the two lines from disagreeing about
+    # the same records.
+    if _classify_curate_history(entries)[3]:
+        return []
+
+    entry = _newest_substantive_pass(entries)
+    if entry is None:
+        return []
+
+    at = entry.get("at")
+
+    # An ABSENT key is legitimate — the codex and API brains never report usage,
+    # and `--resynth` journals none. A key that is PRESENT but not a usage block
+    # is corruption, and conflating the two let `brain_usage: true` (or a string,
+    # list, or empty dict) read as a healthy pass (round 2, P2-CORRECTNESS-004).
+    if "brain_usage" not in entry:
+        return [
+            _check(
+                "model mixture",
+                "ok",
+                f"{project!r}: the pass at {at} recorded no model telemetry "
+                "(the codex and API brains report none, and `--resynth` never does)",
+            )
+        ]
+
+    usage = entry.get("brain_usage")
+    if not isinstance(usage, dict) or not _usage_block_is_wellformed(usage):
+        return [
+            _check(
+                "model mixture",
+                "warn",
+                f"{project!r}: the usage block on the pass at {at} does not match the "
+                f"shape `BrainUsage.as_dict()` writes ({usage!r}) — model counts unread",
+                "That block is neither a producer record nor an absent one — a "
+                "genuinely uninstrumented pass omits the key entirely — so its "
+                "counts are not read. The log is append-only, so the record stays; "
+                "a later instrumented pass supersedes what this line reports.",
+            )
+        ]
+    calls = usage["calls"]
+    models = usage["models"]
+
+    # `calls == 0` is producer-valid, not corruption: `BrainUsage` starts at zero
+    # and `ClaudeCLIBrain` records only AFTER its success checks, so a pass whose
+    # every brain call failed journals a complete block reading zero. Round 3
+    # (P2-CORRECTNESS-004) caught this warning as a false positive on a real record.
+    if calls == 0:
+        if models:
+            return [
+                _check(
+                    "model mixture",
+                    "warn",
+                    f"{project!r}: the pass at {at} counted no calls yet recorded "
+                    f"{len(models)} model id(s) — model counts unread",
+                    "Per-model counts are incremented only alongside a counted "
+                    "call, so this block is internally inconsistent and its counts "
+                    "are not read.",
+                )
+            ]
+        return [
+            _check(
+                "model mixture",
+                "ok",
+                f"{project!r}: the pass at {at} counted no successful brain calls "
+                "(nothing to attribute — check `curate health` for why)",
+            )
+        ]
+
+    consistent, partial, impossible = _model_mixture(usage)
+
+    # Every headline below states what the RECORD says, not what it implies about
+    # service or coverage. Round 3, P2-CORRECTNESS-001: "did not all cover the
+    # pass" and "served throughout" are inferences the counts do not carry — a
+    # model may serve a call and go unreported, and `str()` key collisions can
+    # inflate a count to `calls` without every call being observed.
+    if impossible:
+        return [
+            _check(
+                "model mixture",
+                "warn",
+                f"{project!r}: the pass at {at} recorded per-model counts its call "
+                f"total of {calls} does not explain — {', '.join(impossible)}",
+                "A count above the call total or below one does not correspond to "
+                "any reading of this record, so its counts are not read. The log is "
+                "append-only, so the record stays; a later instrumented pass "
+                "supersedes what this line reports.",
+            )
+        ]
+
+    if partial:
+        counted = ", ".join(f"{model} on {count}" for model, count in partial)
+        return [
+            _check(
+                "model mixture",
+                "warn",
+                f"{project!r}: the pass at {at} counted {calls} call(s) but recorded "
+                f"some models on fewer — {counted}",
+                "Nothing is broken and no action is required, and **this line draws "
+                "no conclusion from those counts**. A successful call may report no "
+                "model at all, counting toward the call total but toward no model, "
+                "so an unreported call and a mid-pass change in models are recorded "
+                "identically here; the journal does not carry which occurred. The "
+                "counts also aggregate every brain call in the pass — distillation, "
+                "planning, synthesis, retries — with no per-stage attribution, so "
+                "they do not say which model produced any particular artifact.",
+            )
+        ]
+    if not consistent:
+        return [
+            _check(
+                "model mixture",
+                "ok",
+                f"{project!r}: the pass at {at} recorded no model ids across its {calls} call(s)",
+            )
+        ]
+    return [
+        _check(
+            "model mixture",
+            "ok",
+            f"{project!r}: the pass at {at} recorded every model on all {calls} "
+            f"call(s) — {', '.join(sorted(consistent))}",
+        )
+    ]
+
+
 def _denylist_scope_check(config: Config) -> Check:
     """Report `[enable].denylist` entries that do not gate the repo containing them.
 
@@ -1071,6 +1354,7 @@ def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
         _shim_check(which),
         *_store_checks(root, cwd),
         _curate_health_check(root, cwd),
+        *_model_mixture_check(root, cwd),
         _brain_check(config),
         _agent_check("claude", which),
         _agent_check("codex", which),

@@ -1195,3 +1195,77 @@ worth doing.
   digest (`docs/notes/2026-08-01-memory-layering-ideas.md` §11.4), it self-budgets to
   fit and this path is not exercised at all — which is a reason to fix the cap rather
   than let the authoring rung hide it, since unwrapped sessions keep using distill.
+
+---
+
+### G12 — the `auto_max_brain_calls` comment sizes the auto tier from raw-body length, but distillation chunks the rendered transcript
+
+- **status:** open
+- **severity:** low-moderate — this is a **comment**, so no behavior is wrong today and
+  nothing is lost. It is filed because the comment is the *stated sizing rationale* for a
+  shipped default: it tells the next person tuning the auto tier that raw count converts
+  1:1 into brain calls, which is false in both directions. A tuning decision reasoned
+  from it starts from a wrong model of what the pass costs. Whether `50` is itself the
+  wrong number is **not** claimed here — that is sizing work, and it lives in the
+  build-plan [Backlog](neurobase-build-plan.md).
+- **found:** 2026-08-04 by Claude, while projecting auto-tier cost from measured
+  per-capture latency; surfaced by Codex review finding `P2-DOCS-PLAN-ACCURACY-001` on
+  `docs/route-memory-layering-s11`, which caught an earlier version of this entry
+  repeating the comment's inference as fact.
+
+**The comment.** `core/config.py:55-57`, above `auto_max_brain_calls: int = 50`:
+
+```python
+# 40 distill + <=4 plan batches + 1 synthesis = 45, plus headroom. Measured
+# bodies are median 1482 / p90 4028 / max 13926 chars against a 200k chunk
+# size, so no raw in this store chunks and each costs exactly one call.
+```
+
+**Why the inference does not hold.** `_distill_one` never chunks the raw body. It
+resolves the raw's `transcript_path`, renders that **external transcript**, and passes
+the *render* to `_chunk`:
+
+```python
+rendered = render_transcript(agent, transcript_path, extra_patterns)   # :495
+...
+chunks, dropped = _chunk(rendered, chunk_chars, MAX_DISTILL_CHUNKS)     # :504
+```
+
+Raw-body sizes are therefore the wrong measurement for this conclusion — the raw body is
+the deterministic skim, and the quantity that decides chunk count is the rendered
+transcript, which is routinely far larger. ADR-0014 records the counter-example
+directly: a single 0.62 MB session is **"2 distill + 1 merge = 3 calls"**
+(`docs/adr/0014-transcript-distill-curation.md:178-181`). The committed stance-test
+write-up reports all three of its session renders exceeding the chunk threshold.
+
+**"Each costs exactly one call" is also false downward.** Five paths through
+`_distill_one` spend **zero** brain calls before any chunking:
+
+| condition | returns | line |
+|---|---|---|
+| v1 raw (no `transcript_path`) | `no_pointer` | `distill.py:478-481` |
+| transcript deleted since capture (`G10`) | `transcript_gone` | `:484-487` |
+| **digest cache hit** (fingerprint matches) | `cached` | `:489-493` |
+| no verified renderer for the agent (Codex) | `unsupported_agent` | `:495-499` |
+| render is empty | `empty_render` | `:500-501` |
+
+**The accurate cost model.** A distill brain call is spent only for a raw that is **v2**,
+with a **resolvable** transcript, a **supported** renderer, a **non-empty** render, and a
+**cache miss** — and such a raw then costs **one call per chunk of its rendered
+transcript, plus one merge call when there is more than one chunk**. Any selection of
+40 raws is a mixture of that population and the five zero-call paths above, so no fixed
+raw count converts to a call count without knowing the mixture. Note the cache-hit row
+in particular: it makes per-pass cost **path-dependent**, since a pass that distills and
+then stops still leaves its digests written (`write_cache=not dry_run`,
+`curator/engine.py:422`; `_cache_write` at `curator/distill.py:523-524`), so a later
+pass over the same raws is cheaper. `tests/test_distill.py:728-736`
+(`test_cache_hit_avoids_second_distill`) pins exactly that.
+
+**Scope — what this entry does not claim.** It does not claim `auto_max_brain_calls = 50`
+is too low or too high, does not claim any pass currently fails because of it, and does
+not propose a replacement number or sizing rule. The behavioral question — that the auto
+tier can admit more work than its clock can distill *and* fold in one pass — is a sizing
+and admission-control problem, not a shipped inconsistency, and is filed in the
+build-plan [Backlog](neurobase-build-plan.md) instead. The fix here is to correct the
+comment to describe the real cost model, or to delete the inference and cite the sizing
+work.

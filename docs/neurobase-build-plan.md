@@ -287,6 +287,79 @@ Cursor — AGENTS.md route makes read-side cheap) · `recall <topic>` explicit p
 · Obsidian starter vault config · basic-memory importer · PEP 541 claim on
 `neurobase` · multi-machine story (git-sync the store; docs only, no service).
 
+**Authored session digests — an authored-body ingestion path, justified on curation cost
+alone.** Retroactive transcript distill is *structurally* cache-hostile, not merely
+slow. Measured 2026-08-04 over 22 calls / 6 generations: **959,550 cache-creation tokens
+at a 0.44% cache hit rate**, because distill chunks a rendered transcript that later
+passes do not re-read, so across clean session-distill calls the prompt cache is
+normally written without being read back. Per-capture distill latency measured
+**1.8–2.3 min** (worst 3 m 32 s) — the same measurement behind the auto-tier sizing item
+below; see there for what statistic that band represents. The relief is not
+a better schedule: a body written as a **v1 raw** (no `transcript_path`) skips distill
+entirely — `_distill_one` returns before any cache, render or brain call
+(`curator/distill.py:478-481`) and the curator folds the body as written (`:607-609`) —
+so a wrapped session adds no distill cost, and is never exposed to `G10`.
+**The real work is identity, ordering, locking, redaction and provenance**, and it is
+not thin: a raw is addressed by the whole `(captured_at, agent, sid8(session_id))` tuple
+(`core/store.py:200-211`) — `session_id` alone cannot address one — and the scribe
+stamps a fresh timestamp every capture (`adapters/claude/scribe.py:347`), so a naive
+wrap-time write *adds* a second raw and the fold sees the session twice; live evidence
+is four raws for one session in `transactiontracker`. Needs
+[ADR-0027](adr/0027-authored-raw-authority-field.md)'s `authority` field (with D47's
+`_raw_payload` exclusion and its paired fixtures) to stay honest about what it wrote,
+the project write lock (ADR-0023) to order against `SessionEnd` capture, and its own D13
+pass because `write_raw` writes the supplied body as-is.
+⚠️ **The interface is NOT decided.** `neurobase wrap --summary -` fed by the summary
+`/wrap` already writes ("derive, don't duplicate") is **one candidate**, and on its own
+it is insufficient — it carries no session or agent identity. Ratifying the CLI contract
+and the `/wrap` relationship is a **separate decision owed before implementation**;
+ADR-0027's "Deliberately not decided here" records the same status. Sequence that
+decision first, then the verb.
+*Justified independently of whether authored summaries read better* — that question is
+still open and the cost argument does not depend on it. Codex sessions stay skims either
+way (no verified renderer).
+
+**Size the auto curate tier from measured latency, and decide what a pass does when it
+cannot fold what it selected.** The hook-triggered tier can admit more work than its
+clock can distill *and* fold in one pass. `auto_max_raws = 40` is **volume-derived** —
+`core/config.py:49-53` sizes it from the 2026-07-20 backlog (a normal day is
+single-to-low-double digits; the runaway was ~10×) — while `auto_max_seconds = 900` is
+sized from a *latency* estimate the same file flags as unmeasured: *"A healthy 40-raw
+pass is estimated at 4-10 min (per-call latency is NOT measured — an open item)."*
+Measured 2026-08-03: **1.8–2.3 min per capture** across 27 captures in two projects,
+with individual captures observed from roughly **10 s to 3 m 32 s**. ⚠️ *The source does
+not define which statistic the 1.8–2.3 band is (mean, median, or per-project central
+tendency), and it describes a cache-miss workload — so treat it as an order-of-magnitude
+input, not a precise one.* Taken as given, 900 s admits roughly 6.5–8.3 captures
+(`900/138`–`900/108`), or ~5–7 holding back ~180 s for planning and synthesis — against
+a ceiling sized for 40.
+**What actually happens when it overruns, stated carefully.** The clock is checked
+before every debit (`curator/budget.py:151`) and the reserve cannot rescue it, so if the
+deadline passes during distillation the first plan debit raises, `engine.py:474-479`
+breaks, and the selected raws stay **unconsumed** — a clean, retryable, bounded stop, not
+an error. It is **not** a livelock: successful distills write their digests before that
+point (`write_cache=not dry_run`, `engine.py:422`; `_cache_write`,
+`distill.py:523-524`), so the next pass gets cache hits and can reach planning
+(`tests/test_distill.py:728-736`). The cost is a **delayed first fold and a pass that
+spends its clock without committing**, with the backlog warming across attempts.
+**Constraints on any fix** (verified at `70be738`): the budget is a hard stop, not an
+admission controller — nothing stops the pass from *starting* a 3 m 32 s distill with
+30 s left; `distill_docs` runs over the whole selected list before planning begins, so
+there is no per-item interleaving; and a distill-side stop *downgrades* the remainder
+rather than deferring it (`out.extend(docs[index:])` sends undistilled raws into
+planning at skim fidelity, which is the deliberate D16 "distill never aborts a pass"
+design). So "fold what fit, defer the rest" is **not reachable from configuration
+alone** — it needs a change to the distill→engine handoff so the undistilled suffix is
+returned separately and excluded from `remaining`. A latency-based admission check can
+only ever be probabilistic; no fixed raw count guarantees a wall-clock outcome across a
+10 s – 3 m 32 s spread. Whether deferring beats downgrading is a **product decision**, not
+a defect. Related: [`G12`](known-gaps.md) (the sizing comment's cost model is wrong,
+which is why any number here should come from measured latency rather than that
+comment). Note `distill = "off"` already exists as an escape hatch but is a **global**
+user-config key (`~/.config/neurobase/config.toml` — declared at
+`core/config.py:35-37`, loaded at `:163-181`) with no per-project or per-store
+override — turning it off disables distillation everywhere.
+
 **Project doc schema — a consistent `docs/` shape Neurobase can actually read.**
 Today ADRs, working notes, review batons, and known-gaps are conventions of *this*
 repo only — the app has **zero** concept of them (its vocabulary is `skill`/`rule`

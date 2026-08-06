@@ -13,7 +13,9 @@ import json
 import shutil
 import sys
 import tomllib
+import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -27,10 +29,11 @@ from neurobase.adapters.codex import recall as codex_recall
 from neurobase.adapters.codex import scribe as codex_scribe
 from neurobase.brain import resolve_brain
 from neurobase.cli import diagnostics
-from neurobase.core import backups, locks, projects, store
+from neurobase.core import backups, lock, locks, projects, store
 from neurobase.core import capabilities as capability_profile
 from neurobase.core.config import load_config
 from neurobase.core.process_guard import is_internal_call
+from neurobase.core.redact import redact
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 from neurobase.curator import budget as curate_budget
 from neurobase.curator import curate as run_curate
@@ -333,6 +336,95 @@ def curate(
         )
         if summary.get("status") == "error":
             raise typer.Exit(code=1)
+
+
+@app.command()
+def wrap(
+    summary: str = typer.Option(
+        ..., "--summary", help="The authored session digest. `-` reads it from stdin."
+    ),
+    session_id: str | None = typer.Option(
+        None,
+        "--session-id",
+        help="The session this digest describes. Omitted ⇒ a fresh id, echoed back.",
+    ),
+    agent: str = typer.Option("claude", "--agent", help="Which agent authored it."),
+    branch: str = typer.Option("", "--branch", help="Informational; redacted like the scribe's."),
+    root: str | None = typer.Option(None, "--root", help="Override the store root."),
+    cwd: str | None = typer.Option(None, "--cwd", hidden=True, help="Override cwd (testing)."),
+) -> None:
+    """Store an agent-authored session digest as a raw (ADR-0027, decision 8: derive).
+
+    The digest is written as a **v1 raw** — no ``transcript_path`` — which is the
+    whole point of the shape: ``_distill_one`` returns before any cache, render or
+    brain call for a v1 raw, and ``distill_docs`` appends it unchanged, so the fold
+    plans over this body directly. No distill call, nothing that can expire.
+
+    **Derive, don't duplicate.** This verb does not author anything. It takes text
+    its caller has already written — ``/wrap`` pipes the same summary it just put in
+    the vault packet — so one act of authorship reaches two destinations and the two
+    cannot drift. A bare ``neurobase wrap`` with nothing on stdin is a usage error,
+    not an invitation to generate a digest.
+
+    **Known residual (memory-layering note §11.4).** A raw is addressed by the whole
+    ``(captured_at, agent, sid8(session_id))`` tuple at microsecond precision, and the
+    scribe stamps a fresh ``captured_at`` on every capture — so this ADDS a raw for the
+    session rather than replacing the ``SessionEnd`` skim, and the fold may see the
+    session twice. Replacing it needs identity discovery and ordering against that
+    capture, which is not built.
+    """
+    text = sys.stdin.read() if summary == "-" else summary
+    if not text.strip():
+        typer.secho(
+            "`neurobase wrap` needs a digest: pass --summary <text>, or --summary - with "
+            "text on stdin. It stores what its caller authored; it never writes an empty "
+            "raw and never authors one itself.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    config = load_config()
+    resolved_root = store.resolve_root(root)
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    handle = _open_store_or_exit(resolved_root, StoreMode.WRITE)
+    project_slug = handle.resolve_project(resolved_cwd)
+    if project_slug is None:
+        typer.echo("Not an enabled project (no registered root matches this directory).")
+        raise typer.Exit(code=1)
+
+    # ADR-0027 D48: the D13 guarantee is unconditional on `authority`. `write_raw`
+    # writes the supplied body as-is and has no redaction pass of its own, so this
+    # caller runs one — over the body AND over the informational frontmatter it
+    # supplies, exactly as the scribe does. `session_id` is deliberately NOT scrubbed:
+    # it keys the filename, it is agent-generated, and D13 excludes it by name.
+    extra_patterns = config.redact.extra_patterns
+    body = redact(text.strip(), extra_patterns)
+    sid = session_id or uuid.uuid4().hex
+    handle.ensure_tree(project_slug)
+    written = lock.write_raw_guarded(
+        handle,
+        project_slug,
+        agent=agent,
+        session_id=sid,
+        cwd=redact(str(resolved_cwd), extra_patterns),
+        branch=redact(branch, extra_patterns),
+        captured_at=datetime.now(UTC),
+        body=body,
+        authority="agent-authored",
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "raw": written.name,
+                "project": project_slug,
+                "session_id": sid,
+                "authority": "agent-authored",
+                "chars": len(body),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 @app.command()

@@ -313,6 +313,7 @@ def write_raw(
     captured_at: datetime,
     body: str,
     transcript_path: str | None = None,
+    authority: str | None = None,
     unique: bool = False,
 ) -> Path:
     """Write (or session-keyed-overwrite) a raw capture (spec §1/§5).
@@ -361,6 +362,16 @@ def write_raw(
     if transcript_path is not None:
         frontmatter["transcript_path"] = transcript_path
         frontmatter["capture_version"] = 2
+    # ADR-0027 D45: optional, and its ABSENCE means `captured` — so the ordinary
+    # scribe path writes nothing here and every existing raw stays valid unchanged.
+    # D46: additive per-document key on schema 1, the ADR-0014 `capture_version`
+    # precedent; it is not part of the store-identity integer D11 compares.
+    # D47: a claim about provenance, never a grant of trust — it MUST NOT reach the
+    # plan payload (`_raw_payload` passes only `{raw, body}`), ranking, recall, or
+    # proposal mining. Its only permitted readers are the fold journal, `doctor`,
+    # and a UI naming the rung it shows.
+    if authority is not None:
+        frontmatter["authority"] = authority
     write_doc(path, frontmatter, body)
     return path
 

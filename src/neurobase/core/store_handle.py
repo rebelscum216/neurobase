@@ -177,6 +177,7 @@ class StoreHandle:
         captured_at: datetime,
         body: str,
         transcript_path: str | None = None,
+        authority: str | None = None,
         unique: bool = False,
     ) -> Path:
         return store.write_raw(
@@ -189,6 +190,7 @@ class StoreHandle:
             captured_at=captured_at,
             body=body,
             transcript_path=transcript_path,
+            authority=authority,
             unique=unique,
         )
 

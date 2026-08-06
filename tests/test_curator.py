@@ -1105,3 +1105,100 @@ def test_dry_run_noop_leaves_doctor_never_curated_state_intact(root: Path) -> No
     for _ in range(3):
         engine.curate(root, "proj", FakeBrain(), dry_run=True)
     assert not (store.memory_dir("proj", root) / engine.CURATOR_LOG).exists()
+
+
+# --- ADR-0027 D47: `authority` is provenance, never a grant of trust -------
+
+
+def _write_raw_with_authority(
+    root: Path, project: str, name: str, *, authority: str | None, body: str = "authored body"
+) -> Path:
+    """Two raws that differ in EXACTLY one frontmatter key. Written through the
+    real writer, so a change to how `authority` is persisted is picked up here
+    rather than silently diverging from a hand-built fixture."""
+    store.ensure_tree(project, root)
+    return store.write_raw(
+        root,
+        project,
+        agent="claude",
+        session_id="s1",
+        cwd="/x",
+        branch="main",
+        captured_at=datetime(2026, 7, 7, 12, 0, tzinfo=UTC),
+        body=body,
+        authority=authority,
+        unique=True,
+    )
+
+
+def test_authority_absent_and_agent_authored_produce_identical_plan_payloads() -> None:
+    """D47 requirement 3, the core of it: two raws identical but for `authority`
+    MUST produce byte-identical plan payloads. The seam that makes this true is
+    `_raw_payload`, which projects a raw to `{raw, body}` and passes NO
+    frontmatter — this test is what turns removing that seam into a visible
+    change rather than a silent one."""
+    import tempfile
+
+    payloads = []
+    for authority in (None, "agent-authored"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "store"
+            path = _write_raw_with_authority(root, "proj", "r.md", authority=authority)
+            doc = store.read_doc(path)
+            payloads.append(engine._raw_payload(doc))
+
+    assert payloads[0] == payloads[1]
+    assert "authority" not in json.dumps(payloads[1])
+
+
+def test_authority_does_not_reach_the_serialized_plan_user_payload() -> None:
+    """The same guarantee one layer up, at the string actually sent to the brain —
+    `_raw_payload` could be correct while the payload assembler added frontmatter
+    of its own. Checking only the projection would not have caught that."""
+    import tempfile
+
+    rendered = []
+    for authority in (None, "agent-authored"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "store"
+            path = _write_raw_with_authority(root, "proj", "r.md", authority=authority)
+            doc = store.read_doc(path)
+            rendered.append(engine._plan_user_payload([], [engine._raw_payload(doc)]))
+
+    assert rendered[0] == rendered[1]
+    assert "agent-authored" not in rendered[1]
+
+
+def test_authority_does_not_change_selection_or_ordering(root: Path) -> None:
+    """D47's 'identical selection' half. An authored raw and a captured one written
+    at the same instant must be selected and ordered identically — `authority` must
+    not become a tiebreak, a filter, or a weight."""
+    store.ensure_tree("proj", root)
+    a = _write_raw_with_authority(root, "proj", "a.md", authority=None, body="body one")
+    b = _write_raw_with_authority(root, "proj", "b.md", authority="agent-authored", body="body two")
+
+    docs = store.list_raw(root, "proj", unconsumed_only=True)
+
+    assert [d.file_path.name for d in docs] == sorted([a.name, b.name])
+    assert len(docs) == 2
+
+
+def test_a_v1_authored_raw_takes_no_brain_call_to_distill(root: Path) -> None:
+    """The cost mechanism the whole shape rests on: an authored raw carries no
+    `transcript_path`, so it is a v1 raw and `_distill_one` returns before any
+    cache, render or brain call. This is what makes `wrap` cheaper than distill —
+    pinned here so a change to that early return shows up as a failing test."""
+    store.ensure_tree("proj", root)
+    _write_raw_with_authority(root, "proj", "a.md", authority="agent-authored", body="authored")
+    brain = FakeBrain()
+
+    summary = engine.curate(root, "proj", brain)
+
+    assert summary["status"] == "ok"
+    assert summary["distilled"] == 0
+    # `distilled == 0` alone would be weaker than it looks — a v2 raw whose transcript
+    # vanished also distils nothing. The REASON code is what pins the no-brain early
+    # return at `distill.py:321-324`, and it rides the journal's `distill_detail`
+    # rather than the summary's deliberately pinned key set.
+    (record,) = _read_log(root, "proj")
+    assert record["distill_detail"]["fallback_no_pointer"] == 1

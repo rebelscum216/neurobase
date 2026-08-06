@@ -1274,7 +1274,13 @@ work.
 
 ### G13 — `curate --dry-run` journals a pass on the noop branch, so a preview writes to the store and consumes its "never curated" state
 
-- **status:** open
+- **status:** **fixed** — `curator/engine.py` now guards the noop `_log_pass` with
+  `if not dry_run:`, exactly as the decided fix below describes. Pinned by
+  `tests/test_curator.py::test_dry_run_on_empty_backlog_writes_no_log_record` and
+  `::test_dry_run_noop_leaves_doctor_never_curated_state_intact`, with
+  `::test_real_noop_pass_still_journals` holding the other half (a real no-op still
+  logs). All three were mutation-checked: forcing the log back on fails the two
+  preview tests and leaves the real-pass test green.
 - **severity:** low-moderate — no curated fact, tombstone, raw, or node is touched, and no
   lock is held past the call. The write is one JSONL line. What makes it a defect rather
   than a curiosity is that the line is **indistinguishable from a real no-op pass** and

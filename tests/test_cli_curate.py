@@ -144,3 +144,50 @@ def test_status_shows_fact_count_trend_after_curate(enabled: tuple[Path, Path]) 
 def test_curate_brain_typing_contract() -> None:
     # The fake satisfies the Brain protocol used by the engine.
     assert isinstance(_FakeBrain(), Brain)
+
+
+# --- G15: --dry-run and --resynth are contradictory ------------------------
+
+
+def test_dry_run_with_resynth_is_rejected(enabled: tuple[Path, Path]) -> None:
+    """G15. `if resynth:` calls `_synthesize` — which writes the node — before the
+    first read of `dry_run`, so the combination regenerated the node, called the
+    brain, and reported neither, under a flag whose help says "change nothing"."""
+    root, repo = enabled
+    result = runner.invoke(
+        app, ["curate", "--dry-run", "--resynth", "--root", str(root), "--cwd", str(repo)]
+    )
+    assert result.exit_code == 1
+    assert "cannot be combined" in result.output
+
+
+def test_dry_run_with_resynth_writes_no_node(enabled: tuple[Path, Path]) -> None:
+    """The defect itself, pinned by artifact rather than by message: the node is
+    what a 4,661-byte file appearing on disk actually meant."""
+    root, repo = enabled
+    nodes = store.memory_dir("myrepo", root) / "nodes"
+    before = sorted(p.name for p in nodes.iterdir()) if nodes.exists() else []
+    runner.invoke(
+        app, ["curate", "--dry-run", "--resynth", "--root", str(root), "--cwd", str(repo)]
+    )
+    after = sorted(p.name for p in nodes.iterdir()) if nodes.exists() else []
+    assert after == before == []
+
+
+def test_resynth_alone_still_regenerates_the_node(enabled: tuple[Path, Path]) -> None:
+    """The guard must reject the COMBINATION, not --resynth. Without this, a fix
+    that simply disabled --resynth would pass the two tests above."""
+    root, repo = enabled
+    result = runner.invoke(app, ["curate", "--resynth", "--root", str(root), "--cwd", str(repo)])
+    assert result.exit_code == 0
+    nodes = store.memory_dir("myrepo", root) / "nodes"
+    assert [p.name for p in nodes.iterdir()] != []
+
+
+def test_dry_run_alone_is_still_accepted(enabled: tuple[Path, Path]) -> None:
+    """…and symmetrically, --dry-run alone must keep working."""
+    root, repo = enabled
+    _write_raw(root)
+    result = runner.invoke(app, ["curate", "--dry-run", "--root", str(root), "--cwd", str(repo)])
+    assert result.exit_code == 0
+    assert "cannot be combined" not in result.output

@@ -1071,3 +1071,37 @@ def test_brain_usage_rides_the_journal_and_never_the_summary(root: Path) -> None
     usage = record["brain_usage"]
     assert usage["input_tokens"] == 40
     assert usage["models"] == {"claude-opus-5[1m]": 1}
+
+
+# --- G13: a dry run must not journal the noop branch -----------------------
+
+
+def test_dry_run_on_empty_backlog_writes_no_log_record(root: Path) -> None:
+    """G13. The noop return precedes every other `dry_run` read, so before the
+    guard a PREVIEW appended an unmarked `noop` record — indistinguishable from a
+    real pass, and enough to retire doctor's "no curate passes recorded yet" state
+    permanently. A dry run journals only its failures, and marks them."""
+    store.ensure_tree("proj", root)
+    summary = engine.curate(root, "proj", FakeBrain(), dry_run=True)
+    assert summary["status"] == "noop"
+    assert not (store.memory_dir("proj", root) / engine.CURATOR_LOG).exists()
+
+
+def test_real_noop_pass_still_journals(root: Path) -> None:
+    """The other half of G13's fix: only the PREVIEW stops writing. A real no-op
+    pass is the cadence evidence that a hook fired and found nothing to fold."""
+    store.ensure_tree("proj", root)
+    engine.curate(root, "proj", FakeBrain())
+    (record,) = _read_log(root, "proj")
+    assert record["status"] == "noop"
+    assert record.get("dry_run") is not True
+
+
+def test_dry_run_noop_leaves_doctor_never_curated_state_intact(root: Path) -> None:
+    """The consequence that made G13 worth fixing, pinned directly: the log must
+    stay ABSENT, because `no curate passes recorded yet` is reported only while it
+    is missing or empty — a state a preview must not be able to consume."""
+    store.ensure_tree("proj", root)
+    for _ in range(3):
+        engine.curate(root, "proj", FakeBrain(), dry_run=True)
+    assert not (store.memory_dir("proj", root) / engine.CURATOR_LOG).exists()

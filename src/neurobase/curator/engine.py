@@ -398,7 +398,15 @@ def _curate_unlocked(
     if not raw_docs:
         active = len(handle.list_curated(project))
         summary = {"status": "noop", "raw": 0, "active_facts": active}
-        _log_pass(handle, project, summary)
+        # G13: this return precedes every other `dry_run` read, so before the guard a
+        # PREVIEW journalled an unmarked `noop` record — indistinguishable from a real
+        # pass, and enough to retire doctor's "no curate passes recorded yet" state
+        # permanently (`cli/diagnostics.py`). A dry run journals only its failures, and
+        # marks them (`:566`/`:559`); a successful preview writes nothing (`:584`). This
+        # branch now follows that convention. A real noop still logs: it is the cadence
+        # evidence that a pass ran and found nothing.
+        if not dry_run:
+            _log_pass(handle, project, summary)
         return summary
 
     # Every brain call from here on goes through the wrapper bound above, so no

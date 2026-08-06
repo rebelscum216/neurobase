@@ -1388,3 +1388,57 @@ path its first trigger reachable from an ordinary store — and `enable` should 
 **Related.** The same conflation appears at a third surface: `recommend show <slug>` prints
 `proposal '<slug>' not found or malformed`, collapsing two distinct states into one
 message. Worth fixing in the same pass as a prose habit rather than three separate defects.
+
+---
+
+### G15 — `curate --dry-run --resynth` regenerates and writes the status node, and says nothing about it
+
+- **status:** open
+- **severity:** moderate-high — this is the sharpest form of the `--dry-run` problem
+  filed as [G13](#g13). Where G13 writes a journal line, this writes a **derived
+  artifact**: the status node is regenerated and committed to disk, the brain is called
+  and billed, and a `{"status": "resynth", "node_refreshed": true}` record is appended —
+  all under a flag whose help string reads `"Print the plan the curator would apply;
+  change nothing."` (`cli/__init__.py:228`). The command prints `{}` and exits 0, so
+  **nothing in its output discloses the write.**
+- **found:** 2026-08-06 by Claude, while adding a `--dry-run` reachability column to a
+  branch table whose eight rows were already correct. The rows had never been wrong; what
+  was missing was which of them a dry run can reach.
+
+**Reproduction**, on a scratch store with curated facts and no node:
+
+```
+$ neurobase curate --dry-run --resynth --root <scratch>
+{}
+$ ls <scratch>/projects/<slug>/memory/nodes/
+<slug>-status.md          # 4661 bytes, generated_at 2026-08-06T14:51:00Z — did not exist before
+```
+
+**Why.** `curator/engine.py:371` enters the resynth path and calls `_synthesize`, which
+writes the node, and the **first read of `dry_run` is at `:422`** — fifty lines later. The
+flag is never consulted on this path. There is no CLI-level guard rejecting the
+combination either (`cli/__init__.py:226-252`): `--dry-run` and `--resynth` are
+independent options, and `--if-stale` is the only one whose interaction with `--resynth`
+is handled (`:251`).
+
+**Reachability, which is the general lesson.** Of the eight branches in `curate` /
+`_curate_unlocked`, **four are reachable under `--dry-run`** — lock contended (`:780`, the
+return sits in the wrapper before `_curate_unlocked`), `noop` (`:401`, before the `:422`
+read), and the two branches actually labelled "dry run" (`:566`, `:584`) — plus **rows 2
+and 3 whenever `--resynth` is passed**. Only the last two are commonly described as the
+dry-run branches, which is how both this defect and G13 stayed invisible to review.
+
+**Shape of a fix.** Either reject `--dry-run --resynth` at the CLI with a clear message
+(they are contradictory: one previews, the other regenerates unconditionally), or move the
+`dry_run` check above the resynth branch so a dry resynth reports what it *would*
+regenerate. The first is smaller and matches the flag's stated contract; the second is
+more useful if a "preview the resynth" mode is wanted, and would need the node write
+suppressed rather than the branch skipped.
+
+**Consequence for the `/nb-*` command wrappers (outside this repo, recorded here because
+it is the reason this matters operationally).** The `/nb-dev` wrapper allowlists
+`curate --dry-run` on the strength of it being non-mutating. Its grant is a **prefix**
+rule — `Bash(uv run --directory * neurobase curate --dry-run:*)` — so it *matches*
+`curate --dry-run --resynth`. The wrapper's prose refusal of `--resynth` is therefore the
+only control standing between an unreviewed worktree build and a node write; it is
+load-bearing, not defensive.

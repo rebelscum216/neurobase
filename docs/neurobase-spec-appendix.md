@@ -1060,12 +1060,15 @@ Some raw-`root` constructions **remain** outside the accessor guard's coverage, 
 kinds — none is an unguarded write to **schema-versioned store content** (`memory/`,
 `registry.toml`):
 
-- **`doctor`'s three corrupt-`store.toml` reads** (allow-listed) —
+- **`doctor`'s four corrupt-`store.toml` reads** (allow-listed) —
   `projects.resolve_project(root, cwd)` (project resolution is a `registry.toml`
   concern, independent of the store-schema guard, and must survive when no handle can
   open), `projects.registry_is_contained(root)` (the health question above: a corrupt
   `store.toml` must not *mask* a hostile registry, and this branch has no handle to
-  ask), and `store.store_toml_path(root)` (the report label, built before `open_store`).
+  ask), `projects.registry_parse_error(root)` (G14 — telling a *corrupt* registry from an
+  *absent* one, which read-side callers never need because `load_registry` hands them
+  empty either way), and `store.store_toml_path(root)` (the report label, built before
+  `open_store`).
   All three live only in `cli/diagnostics.py` and are allow-listed in the guard by
   (file, name).
 - **the recommender's proposal/ledger path-builders** (command-guarded) —

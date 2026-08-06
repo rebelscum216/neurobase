@@ -629,3 +629,71 @@ def test_denylist_scope_does_not_claim_a_nested_repo_entry_gates_nothing(tmp_pat
     # ...but must NOT claim the entry covers nothing, which the matcher disproves.
     assert "NOTHING" not in check.detail
     assert "at or beneath" in check.detail
+
+
+# --- G14: corrupt must not read as absent ---------------------------------
+
+
+def _corrupt_registry(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "registry.toml").write_text("[projects.demo\nroots = 'unclosed\n", encoding="utf-8")
+
+
+def test_doctor_reports_a_corrupt_registry_as_an_error_not_as_not_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G14. `load_registry` is fail-soft by contract (§10), so corrupt and absent
+    both reach the resolver as an empty mapping. Doctor is the surface that must
+    tell them apart — reporting corrupt as "not enabled" sent the operator to
+    `neurobase enable`, which fails closed against the very same file."""
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+    _corrupt_registry(root)
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert not isinstance(result.exception, Exception)  # reported, never crashed
+    assert "present but unusable" in result.output
+    assert "is not enabled" not in result.output
+
+
+def test_doctor_exits_nonzero_on_a_corrupt_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The status must be `error`, not `warn` — this is also the first trigger for
+    doctor's nonzero exit reachable from an ordinary store rather than from
+    malformed agent config."""
+    _patch_tools(monkeypatch)
+    _corrupt_registry(tmp_path / "store")
+
+    assert runner.invoke(app, ["doctor"]).exit_code == 1
+
+
+def test_doctor_still_says_not_enabled_when_the_registry_is_merely_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control. Without it, a "fix" that reported every store as corrupt would
+    pass both tests above — absent must keep its own, different diagnosis."""
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+    root.mkdir()
+    store.ensure_tree("demo", root)
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert "present but unusable" not in result.output
+    assert "is not enabled" in result.output
+
+
+def test_doctor_does_not_recommend_enable_for_a_corrupt_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operational half of the defect: the remedy must not be the command that
+    refuses to run against this file."""
+    _patch_tools(monkeypatch)
+    _corrupt_registry(tmp_path / "store")
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert "Repair or remove" in result.output
+    assert "Run `neurobase enable` in this repo." not in result.output

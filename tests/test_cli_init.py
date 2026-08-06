@@ -425,3 +425,56 @@ def test_init_codex_malformed_config_no_clobber(env: Path, tmp_path: Path) -> No
     result = runner.invoke(app, ["init", "--agent", "codex", "--cwd", str(repo), "--yes"])
     assert result.exit_code == 1
     assert cfg.read_text() == "[unterminated\n"
+
+
+# --- G14: enable must refuse a corrupt registry cleanly, not crash ---------
+
+
+def test_enable_refuses_a_corrupt_registry_without_a_traceback(tmp_path: Path) -> None:
+    """G14's operational half. `register_project` reads strictly and raises rather
+    than rewrite a registry it could not fully parse — correct, and it stays. What
+    was wrong is that the CLI let that escape as a traceback, so doctor's own
+    remedy crashed."""
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "registry.toml").write_text("[projects.demo\nroots = 'unclosed\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(app, ["enable", "--root", str(root), "--cwd", str(repo)])
+
+    assert result.exit_code == 1
+    assert not isinstance(result.exception, Exception)  # refused, not raised
+    assert "cannot be read as a registry" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_enable_leaves_a_corrupt_registry_byte_identical(tmp_path: Path) -> None:
+    """The fail-closed guarantee the refusal exists to preserve: rewriting from an
+    empty mapping would drop every other project's roots."""
+    root = tmp_path / "store"
+    root.mkdir()
+    registry = root / "registry.toml"
+    corrupt = "[projects.demo\nroots = 'unclosed\n"
+    registry.write_text(corrupt, encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    runner.invoke(app, ["enable", "--root", str(root), "--cwd", str(repo)])
+
+    assert registry.read_text(encoding="utf-8") == corrupt
+
+
+def test_enable_still_registers_against_a_healthy_registry(tmp_path: Path) -> None:
+    """The control: the refusal must be triggered by the corruption, not by having
+    a registry at all."""
+    root = tmp_path / "store"
+    repo_a, repo_b = tmp_path / "a", tmp_path / "b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    runner.invoke(app, ["enable", "--root", str(root), "--cwd", str(repo_a)])
+
+    result = runner.invoke(app, ["enable", "--root", str(root), "--cwd", str(repo_b)])
+
+    assert result.exit_code == 0
+    assert "Enabled project" in result.output

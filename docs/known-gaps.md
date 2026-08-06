@@ -1352,7 +1352,17 @@ The branch is reached mainly by a manual dry run against an empty backlog.
 
 ### G14 — a corrupt `registry.toml` is reported as "not enabled", and the remedy `doctor` prints crashes
 
-- **status:** open
+- **status:** **fixed** — both halves. `projects.registry_parse_error` is the new
+  accessor (deliberately *reports* rather than raises, and reuses the strict shape
+  check so it agrees with what `register_project` will refuse); `_project_check` now
+  returns an `error` naming the reason, with a remedy that no longer sends the operator
+  to a command that cannot help. `enable` catches `TOMLDecodeError`,
+  `RegistryShapeError` and `RegistryNotContainedError` and refuses cleanly instead of
+  raising. The dead `except (OSError, TOMLDecodeError)` around resolution is **deleted**
+  rather than kept: a branch that cannot fire is not a safety net. Pinned by four tests
+  in `tests/test_cli_doctor.py` and three in `tests/test_cli_init.py`, with controls on
+  both sides (absent still reports "not enabled"; a healthy registry still registers).
+  The §10 fail-soft read posture is unchanged — `load_registry` still returns `{}`.
 - **severity:** moderate — **no data is at risk**: the corrupt file is left byte-identical,
   because `_read_registry` fails closed exactly as `core/projects.py:143-161` intends. The
   defect is diagnosis. Every surface misdescribes a broken registry as an absent one, and
@@ -1399,7 +1409,14 @@ message. Worth fixing in the same pass as a prose habit rather than three separa
 
 ### G15 — `curate --dry-run --resynth` regenerates and writes the status node, and says nothing about it
 
-- **status:** open
+- **status:** **fixed** — rejected at the CLI, which is the layer that owns the flags:
+  the two options are contradictory (`--resynth` regenerates unconditionally), so there
+  is no coherent preview to render and threading `dry_run` into that branch would only
+  produce a preview with nothing to show. Pinned by four tests in
+  `tests/test_cli_curate.py`, two of them controls — `--resynth` alone must still
+  regenerate the node, `--dry-run` alone must still run — so a "fix" that merely broke
+  either flag cannot pass. The artifact test failed under mutation with the real
+  symptom, a `<slug>-status.md` appearing on disk.
 - **severity:** moderate-high — this is the sharpest form of the `--dry-run` problem
   filed as [G13](#g13). Where G13 writes a journal line, this writes a **derived
   artifact**: the status node is regenerated and committed to disk, the brain is called

@@ -101,6 +101,35 @@ def registry_is_contained(root: Path) -> bool:
     return target == resolved_root or target.is_relative_to(resolved_root)
 
 
+def registry_parse_error(root: Path) -> str | None:
+    """``None`` when ``registry.toml`` is absent or usable; otherwise a short
+    reason why it cannot be read as a registry (G14).
+
+    Read-side callers do not need this — :func:`load_registry` hands them an empty
+    mapping either way, which is the §10 fail-soft posture and stays. It exists so
+    the **doctor** can tell *corrupt* from *absent*, which arrive at every reader
+    as the same empty result and mean very different things: absent invites
+    ``neurobase enable``, while corrupt makes that command fail closed. That is the
+    argument :func:`registry_is_contained` already makes for *uncontained* vs
+    *absent*; a broken file is the third case it did not cover.
+
+    Deliberately reports rather than raises, and reuses the **strict** shape check
+    so it agrees with what ``register_project`` will actually refuse — a registry
+    this returns ``None`` for is one the rewrite path can read."""
+    path = _registry_path(root)
+    if not path.exists():
+        return None
+    try:
+        _shape(_load_toml(root), strict=True)
+    except OSError as exc:
+        return f"unreadable: {exc}"
+    except tomllib.TOMLDecodeError as exc:
+        return f"not valid TOML: {exc}"
+    except RegistryShapeError as exc:
+        return f"valid TOML, but not a registry: {exc}"
+    return None
+
+
 def _load_toml(root: Path) -> dict[str, Any]:
     """The file read + TOML parse. Missing file ⇒ ``{}``; unreadable ⇒ ``OSError``;
     unparseable ⇒ ``tomllib.TOMLDecodeError``."""

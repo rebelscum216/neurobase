@@ -191,3 +191,109 @@ def test_dry_run_alone_is_still_accepted(enabled: tuple[Path, Path]) -> None:
     result = runner.invoke(app, ["curate", "--dry-run", "--root", str(root), "--cwd", str(repo)])
     assert result.exit_code == 0
     assert "cannot be combined" not in result.output
+
+
+# --- `neurobase wrap` — decision 8, "derive don't duplicate" ---------------
+
+
+def _wrap(root: Path, repo: Path, text: str, *args: str):
+    return runner.invoke(
+        app,
+        ["wrap", "--summary", "-", "--root", str(root), "--cwd", str(repo), *args],
+        input=text,
+    )
+
+
+def test_wrap_writes_a_v1_raw_marked_agent_authored(enabled: tuple[Path, Path]) -> None:
+    """The whole shape in one assertion set: NO `transcript_path` (so the fold
+    takes no distill call) and `authority: agent-authored` (so the journal, doctor
+    and any UI can name the rung without guessing)."""
+    root, repo = enabled
+
+    result = _wrap(root, repo, "## Decisions\n\nPicked A.", "--session-id", "s1")
+
+    assert result.exit_code == 0
+    raws = list((store.memory_dir("myrepo", root) / "raw").glob("*.md"))
+    assert len(raws) == 1
+    doc = store.read_doc(raws[0])
+    assert doc["authority"] == "agent-authored"
+    assert "transcript_path" not in doc.frontmatter
+    assert "capture_version" not in doc.frontmatter
+    assert "Picked A." in doc.body
+
+
+def test_wrap_redacts_the_body_and_the_frontmatter_it_supplies(enabled: tuple[Path, Path]) -> None:
+    """ADR-0027 D48: the D13 guarantee is unconditional on `authority`.
+    `write_raw` writes the body as-is, so the caller must scrub — nothing about a
+    body being agent-authored makes it safe."""
+    root, repo = enabled
+
+    _wrap(root, repo, "key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA end", "--session-id", "s1")
+
+    doc = store.read_doc(next((store.memory_dir("myrepo", root) / "raw").glob("*.md")))
+    assert "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA" not in doc.body
+    assert "REDACTED" in doc.body
+
+
+def test_wrap_refuses_an_empty_digest(enabled: tuple[Path, Path]) -> None:
+    """It stores what its caller authored; it never authors one itself, so an
+    empty stdin is a usage error rather than an invitation to generate text."""
+    root, repo = enabled
+
+    result = _wrap(root, repo, "   \n  \n")
+
+    assert result.exit_code == 1
+    assert not list((store.memory_dir("myrepo", root) / "raw").glob("*.md"))
+
+
+def test_wrap_refuses_an_unenabled_project(tmp_path: Path) -> None:
+    """A store the repo is not registered in must not silently collect digests."""
+    root = tmp_path / "store"
+    repo = tmp_path / "elsewhere"
+    repo.mkdir()
+
+    result = runner.invoke(
+        app,
+        ["wrap", "--summary", "-", "--root", str(root), "--cwd", str(repo)],
+        input="## Decisions\n\nPicked A.",
+    )
+
+    assert result.exit_code == 1
+    assert "Not an enabled project" in result.output
+
+
+def test_wrap_echoes_a_generated_session_id_when_none_is_given(
+    enabled: tuple[Path, Path],
+) -> None:
+    """Omitting `--session-id` must not produce a silent junk identity — the id
+    used is reported, so the caller can correlate it with the session's captures."""
+    root, repo = enabled
+
+    result = _wrap(root, repo, "## Decisions\n\nPicked A.")
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["session_id"]
+
+
+def test_wrap_body_reaches_the_fold_unchanged(
+    enabled: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The consumption half of §11.4, end to end: a wrapped body is what the curator
+    plans over — no distill, no transcript read. Pinned at the brain boundary,
+    because the CLI's dry-run prints the returned PLAN, not the payload sent."""
+    root, repo = enabled
+    seen: list[str] = []
+
+    class _RecordingBrain(_FakeBrain):
+        def plan_json(self, system: str, user: str) -> dict:
+            seen.append(user)
+            return {"upserts": [], "tombstones": []}
+
+    monkeypatch.setattr(cli, "resolve_brain", lambda config: (_RecordingBrain(), None))
+    _wrap(root, repo, "## Decisions\n\nChose the derive option.", "--session-id", "s1")
+
+    result = runner.invoke(app, ["curate", "--root", str(root), "--cwd", str(repo)])
+
+    assert result.exit_code == 0
+    assert seen, "the fold never called the brain"
+    assert "Chose the derive option." in seen[0]

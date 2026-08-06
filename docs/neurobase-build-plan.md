@@ -309,12 +309,21 @@ is four raws for one session in `transactiontracker`. Needs
 `_raw_payload` exclusion and its paired fixtures) to stay honest about what it wrote,
 the project write lock (ADR-0023) to order against `SessionEnd` capture, and its own D13
 pass because `write_raw` writes the supplied body as-is.
-⚠️ **The interface is NOT decided.** `neurobase wrap --summary -` fed by the summary
-`/wrap` already writes ("derive, don't duplicate") is **one candidate**, and on its own
-it is insufficient — it carries no session or agent identity. Ratifying the CLI contract
-and the `/wrap` relationship is a **separate decision owed before implementation**;
-ADR-0027's "Deliberately not decided here" records the same status. Sequence that
-decision first, then the verb.
+✅ **DECIDED AND BUILT (2026-08-06).** Andrew ratified the "derive, don't duplicate"
+option: **`neurobase wrap --summary -`**, fed the same summary `/wrap` has already
+written to the vault packet, so one act of authorship reaches two destinations and the
+two cannot drift. The identity gap that made the interface "insufficient on its own" is
+closed by `--session-id` and `--agent` (the id is echoed back when generated, so an
+omitted one is never a silent junk identity). The verb applies its own D13 pass over the
+body and the informational frontmatter it supplies, writes through `write_raw_guarded`
+(so it takes the project lock non-blocking and cannot clobber a raw a curate pass is
+mid-consume on), and marks the result `authority: agent-authored`.
+⚠️ **The residual that remains open** is the one this entry names above: the write
+**adds** a raw rather than replacing the `SessionEnd` skim, because identity is the whole
+`(captured_at, agent, sid8)` tuple and the scribe stamps a fresh timestamp. The fold may
+therefore see a wrapped session twice. Replacing needs identity discovery plus ordering
+against that capture, and is deliberately not built — it is stated in the verb's own
+docstring rather than left for a reader to discover.
 *Justified independently of whether authored summaries read better* — that question is
 still open and the cost argument does not depend on it. Codex sessions stay skims either
 way (no verified renderer).

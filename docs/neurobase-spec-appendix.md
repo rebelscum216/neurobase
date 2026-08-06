@@ -67,6 +67,7 @@ consumed: false
 transcript_path: <abs>   # OPTIONAL (capture_version ≥ 2) — Claude hook
                          #   transcript_path / Codex rollout path; for §2 distill
 capture_version: 2       # OPTIONAL — absent ⇒ a v1 raw
+authority: agent-authored  # OPTIONAL — absent ⇒ `captured` (ADR-0027 D45)
 ```
 
 Rules:
@@ -78,6 +79,26 @@ Rules:
   so **no `STORE_SCHEMA_VERSION` bump** — old binaries ignore unknown keys. The
   path is stored absolute; §2's distill resolves it best-effort and a
   missing/unreadable/moved path is never an error (it degrades to the skim body).
+- **`authority` is OPTIONAL and additive** (ADR-0027, D45/D46). Values are `captured`
+  and `agent-authored`; **absence means `captured`**, and readers MUST tolerate it
+  absent exactly as for `transcript_path`/`capture_version`. Absent and an explicit
+  `captured` mean the same thing — no reader may treat the distinction as significant.
+  It lands on **schema 1** and MUST NOT bump `STORE_SCHEMA_VERSION`: D11 compares the
+  integer in `store.toml`, not a document's keys (the `capture_version: 2` precedent).
+- **`authority` MUST NOT influence planning, ranking, recall, or proposal mining**
+  (ADR-0027, D47). It is a claim about provenance, not a grant of trust. Its only
+  permitted consumers are surfaces that would otherwise *misdescribe* what they hold:
+  the fold journal, `doctor`, and any UI naming the rung it shows. The mechanism is the
+  existing planner seam — `_raw_payload` projects a raw to `{"raw", "body"}` and passes
+  **no** frontmatter — and `authority` MUST stay outside it. Two raws identical but for
+  `authority` MUST produce byte-identical plan payloads and identical selection.
+- **The D13 redaction guarantee is unconditional on `authority`** (ADR-0027, D48).
+  `write_raw` writes the supplied body as-is and has no redaction pass of its own, so
+  **any** caller producing an authored raw MUST apply the redaction table to the body
+  and to the informational frontmatter it supplies (`cwd`, `branch`; never
+  `session_id`) before calling it. Nothing about a body being agent-authored makes it
+  safe. `neurobase wrap` is the supported path; code that reaches `write_raw` without
+  that pass is a D13 violation regardless of authorship.
 - `list_raw(project, unconsumed_only=True)` returns **oldest-*capture*-first,
   ordered by the authoritative `captured_at` frontmatter** (ADR-0023), with the
   filename as a stable tiebreak. It does **not** sort by filename string — that

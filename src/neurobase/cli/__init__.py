@@ -232,6 +232,21 @@ def curate(
     ),
 ) -> None:
     """Fold unconsumed raw captures into the curated fact set (spec §2)."""
+    # G15: the two options are contradictory, and the engine resolves the contradiction
+    # the dangerous way — `if resynth:` (curator/engine.py) calls `_synthesize`, which
+    # WRITES the node, and the first read of `dry_run` comes fifty lines later, so the
+    # flag was never consulted on that path. A "change nothing" run regenerated the node,
+    # called the brain, and disclosed neither. Rejected here, at the surface that owns the
+    # flags, rather than by threading `dry_run` into a branch that has no preview to show.
+    if dry_run and resynth:
+        typer.secho(
+            "`--dry-run` and `--resynth` cannot be combined: --resynth regenerates the "
+            "node unconditionally, which is a write, and --dry-run promises none. Run "
+            "`neurobase curate --resynth` to regenerate, or `--dry-run` alone to preview.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
     config = load_config()
     resolved_root = store.resolve_root(root)
     resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()

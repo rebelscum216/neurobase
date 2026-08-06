@@ -697,3 +697,115 @@ def test_doctor_does_not_recommend_enable_for_a_corrupt_registry(
 
     assert "Repair or remove" in result.output
     assert "Run `neurobase enable` in this repo." not in result.output
+
+
+def _registered(root: Path, repo: Path, slug: str = "demo") -> None:
+    """A store whose only registered root is ``repo``."""
+    root.mkdir(parents=True, exist_ok=True)
+    store.ensure_tree(slug, root)
+    projects.register_project(root, repo)
+
+
+def test_doctor_names_the_registered_root_below_a_too_high_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G16. Addressing a repo one directory too high is the same silent no-op as a
+    deliberate opt-out — capture, injection and the hook-spawned curate all resolve
+    through this rule and return quietly, so a repo can lose every session without a
+    surface saying so. The two are distinguishable: an accidental address has a
+    registered root *below* it."""
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+    repo = tmp_path / "workspace" / "repo"
+    repo.mkdir(parents=True)
+    _registered(root, repo)
+
+    result = runner.invoke(app, ["doctor", "--cwd", str(tmp_path / "workspace")])
+
+    assert "a registered root sits below it" in result.output
+    assert str(repo) in result.output
+
+
+def test_doctor_does_not_recommend_enable_for_a_too_high_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operational half, as in G14: the remedy must move the caller down, not
+    register a second and wider root for work that already has one."""
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+    repo = tmp_path / "workspace" / "repo"
+    repo.mkdir(parents=True)
+    _registered(root, repo)
+
+    result = runner.invoke(app, ["doctor", "--cwd", str(tmp_path / "workspace")])
+
+    assert "one level too high" in result.output
+    assert "Run `neurobase enable` in this repo." not in result.output
+
+
+def test_doctor_still_says_plain_not_enabled_with_no_registered_root_below(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control. Without it, a "fix" that emitted the nested-root message for every
+    unresolved cwd would pass both tests above — a genuinely unregistered directory
+    must keep its own, different diagnosis and its own remedy."""
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+    repo = tmp_path / "workspace" / "repo"
+    repo.mkdir(parents=True)
+    _registered(root, repo)
+
+    # A sibling of the workspace: nothing registered anywhere beneath it.
+    elsewhere = tmp_path / "unrelated"
+    elsewhere.mkdir()
+    result = runner.invoke(app, ["doctor", "--cwd", str(elsewhere)])
+
+    assert "a registered root sits below it" not in result.output
+    assert "is not enabled" in result.output
+    assert "Run `neurobase enable` in this repo." in result.output
+
+
+def test_doctor_counts_them_instead_of_naming_one_when_several_roots_sit_below(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A container of repos is not a mis-addressed one. Naming the first of several
+    reads as "this is the one you meant" when it is only alphabetically first — and the
+    single-root remedy ("run neurobase from <X>") is then actively wrong. Found by
+    running the check against the real store, where `~/AI Projects` has four."""
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+    first = tmp_path / "workspace" / "alpha"
+    second = tmp_path / "workspace" / "beta"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    _registered(root, first, slug="alpha")
+    projects.register_project(root, second, slug="beta")
+
+    result = runner.invoke(app, ["doctor", "--cwd", str(tmp_path / "workspace")])
+
+    assert "2 registered roots sit below it" in result.output
+    assert "the repo you mean" in result.output
+    assert f"Run neurobase from {first} —" not in result.output
+
+
+def test_doctor_leaves_the_healthy_path_alone_when_standing_in_the_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second control: the new branch must not capture a cwd that resolves. It
+    fails if the nested-root check is hoisted above the resolution.
+
+    ⚠️ It deliberately does NOT claim to test strict-vs-`<=` descendant comparison.
+    That boundary is **unreachable**: if cwd equals (or sits under) a registered root,
+    `resolve_project` succeeds and `_registered_roots_below` is never called, so no
+    input can distinguish the two comparisons. Verified by mutation — flipping the
+    helper to match everything leaves this test green. Do not add a test for it."""
+    _patch_tools(monkeypatch)
+    root = tmp_path / "store"
+    repo = tmp_path / "workspace" / "repo"
+    repo.mkdir(parents=True)
+    _registered(root, repo)
+
+    result = runner.invoke(app, ["doctor", "--cwd", str(repo)])
+
+    assert "a registered root sits below it" not in result.output
+    assert "is not enabled" not in result.output

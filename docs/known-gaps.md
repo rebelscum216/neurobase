@@ -1465,3 +1465,64 @@ rule — `Bash(uv run --directory * neurobase curate --dry-run:*)` — so it *ma
 `curate --dry-run --resynth`. The wrapper's prose refusal of `--resynth` is therefore the
 only control standing between an unreviewed worktree build and a node write; it is
 load-bearing, not defensive.
+
+### G16 — an unregistered `cwd` silently discards capture, injection and curation
+
+- **status:** **fixed (diagnosis only)** — `doctor` now distinguishes "deliberately not
+  enabled" from "addressed one directory too high" and names the registered root sitting
+  below the cwd, because the two *are* mechanically distinguishable and the standard
+  remedy is wrong for the second. The silent no-op in capture and in the hook-spawned
+  curate is **unchanged and deliberate**: `AGENTS.md` requires hooks stay fail-safe and
+  never wedge an agent, so this cannot become a raise. Pinned by five tests in
+  `tests/test_cli_doctor.py`, two of them controls, each shown to fail under a distinct
+  mutation — neutering the detector fails the two diagnosis tests, making it match
+  everything fails the unregistered-directory control, hoisting it above the resolution
+  fails the healthy-path control, and collapsing the plural branch fails the
+  several-roots test.
+
+  A cwd sitting above **several** registered roots is reported as a count rather than by
+  naming the first, because that is a container of repos (`~/AI Projects`) rather than a
+  mis-addressed one, and "run neurobase from `<first>`" is then wrong advice. That case
+  was found by running the check against the real store — where `~/AI Projects` has four
+  — not by reading it, which is the same lesson `G15` recorded.
+- **severity:** high — this is the only entry here that loses user data outright, and it
+  does so without a single surface reporting it. Measured on this repo on 2026-08-06:
+  **28** Claude sessions ran with cwd set to the workspace directory one level above the
+  registered root, **4** ran from the root, and **0** of the store's 26 raws carry the
+  higher path. Roughly 28 sessions produced no memory at all. It had been live since the
+  first `enable` on 2026-07-31 — through five days of the author's own daily use, with
+  `doctor` passing 17/17 throughout.
+- **found:** 2026-08-06 by Claude, from the opposite end: a session-start question about
+  why the store had not been folded in 27 hours.
+
+**Reproduction**, against any store whose registered root is nested under a directory
+that is not itself a git repository:
+
+```
+$ neurobase curate --if-stale --cwd "<parent-of-registered-root>"
+Not an enabled project (no registered root matches this directory).   # exit 1
+$ neurobase curate --if-stale --cwd "<registered-root>"
+Not stale — nothing to curate.                                        # exit 0
+```
+
+**Why.** Three surfaces resolve the project from `cwd` and fail quiet:
+
+| surface | behavior on an unresolved cwd | line |
+|---|---|---|
+| capture | `resolve_or_auto_enable` → `None` → `return None`, no raw written | `adapters/claude/scribe.py:294-301` |
+| session-start injection | `build_context` returns `None`, nothing injected | `adapters/recall_common.py:129-130` |
+| hook-spawned curate | child exits 1 **before** the staleness check; parent discards output | `adapters/recall_common.py:159-169` |
+
+The curate spawn is the sharpest: `subprocess.Popen(..., stdout=DEVNULL, stderr=DEVNULL)`
+inside `contextlib.suppress(OSError)`, so the child's exit-1 diagnostic is discarded by
+construction. There is no surface on which this could have been noticed.
+
+`git_common_root` rescues the ordinary case — a cwd *below* the root resolves by
+longest-prefix match — but a cwd *above* it has nothing to collapse to when the parent is
+not a git repository.
+
+**Scope — what the fix does not do.** It does not change the resolution rule, does not
+make capture loud (fail-safe forbids it), and does not recover the sessions already lost;
+their transcripts still exist under `~/.claude/projects/`, so a backfill is possible but
+is not attempted here. The remaining exposure is that a user who never runs `doctor` still
+sees nothing.

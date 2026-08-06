@@ -339,6 +339,43 @@ def _project_check(handle: StoreHandle | None, root: Path, cwd: Path) -> Check:
         else projects.resolve_project(root, cwd)
     )
     if slug is None:
+        # G16: "deliberately not enabled" and "addressed one directory too high" are
+        # the same silent no-op everywhere it matters — capture (`adapters/*/scribe.py`
+        # returns None), session-start injection, and the hook-spawned
+        # `curate --if-stale` (which resolves the project *before* its staleness check,
+        # then exits 1 into a DEVNULL'd, OSError-suppressed spawn). Nothing is written
+        # and nothing is printed, so a repo can lose every session's memory without one
+        # surface saying so. This is the same argument as the containment and G14
+        # branches above, applied to the fourth case they did not cover.
+        #
+        # The two ARE mechanically distinguishable: an accidental address has a
+        # registered root *below* it. That also makes the standard remedy wrong —
+        # `neurobase enable` here would register a second, wider root rather than move
+        # the caller to the one that already exists.
+        below = _registered_roots_below(handle, root, cwd)
+        if len(below) == 1:
+            return _check(
+                "project",
+                "warn",
+                f"{cwd} is not enabled, but a registered root sits below it: {below[0]}",
+                f"Run neurobase from {below[0]} — this directory is one level too high. "
+                "Do not run `neurobase enable` here; that would register a second, wider "
+                "root for the same work.",
+            )
+        if below:
+            # A container of several repos (`~/AI Projects`), not a mis-addressed one.
+            # Naming just the first would read as "this is the one you meant", which is
+            # arbitrary — it is only the alphabetically first of several. Found by
+            # running the check against a real store rather than by reading it.
+            return _check(
+                "project",
+                "warn",
+                f"{cwd} is not enabled, and {len(below)} registered roots sit below it "
+                f"(e.g. {below[0]})",
+                "Run neurobase from the repo you mean — this directory sits above several. "
+                "Do not run `neurobase enable` here; that would register one wider root "
+                "standing in for all of them.",
+            )
         return _check(
             "project",
             "warn",
@@ -346,6 +383,33 @@ def _project_check(handle: StoreHandle | None, root: Path, cwd: Path) -> Check:
             "Run `neurobase enable` in this repo.",
         )
     return _check("project", "ok", f"{cwd} resolves to {slug!r}")
+
+
+def _registered_roots_below(handle: StoreHandle | None, root: Path, cwd: Path) -> list[str]:
+    """Registered roots that are strict descendants of ``cwd`` (G16), sorted.
+
+    Goes through the handle when there is one and falls back to the raw root only when
+    a corrupt ``store.toml`` denied us one — the same shape as the ``resolve_project``
+    call it annotates, and ALLOW-listed in the step-5 chokepoint guard for the same
+    reason: doctor must still be able to ask this when the store will not open.
+
+    Fail-soft, like that resolution: ``load_registry`` already swallows a missing,
+    unreadable or unparseable registry (§10), and the containment and parse branches
+    above have reported those cases before this can run — so an empty result here means
+    "no nested root", never "could not tell"."""
+    try:
+        resolved = cwd.resolve()
+    except OSError:  # pragma: no cover - resolve() on a vanished cwd
+        return []
+    registry = (
+        handle.load_registry()
+        if handle is not None
+        # Sanctioned raw-root fallback — see the docstring above and the guard's ALLOW.
+        else projects.load_registry(root)
+    )
+    return sorted(
+        entry for roots in registry.values() for entry in roots if resolved in Path(entry).parents
+    )
 
 
 def _brain_check(config: Config) -> Check:

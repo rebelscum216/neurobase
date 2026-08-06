@@ -187,6 +187,12 @@ ALLOW: frozenset[tuple[str, str]] = frozenset(
         # containment predicate above did not cover. Same one-file justification:
         # read-side callers get empty either way and never need to ask.
         ("cli/diagnostics.py", "registry_parse_error"),
+        # G16: telling a cwd addressed one directory TOO HIGH from a deliberately
+        # unenabled one, by looking for a registered root below it. Handle-first —
+        # this is only the corrupt-store.toml fallback, exactly as `resolve_project`
+        # above, and for the same reason: a broken store.toml must not also mask the
+        # diagnosis that a repo is silently losing every session's capture.
+        ("cli/diagnostics.py", "load_registry"),
     }
 )
 

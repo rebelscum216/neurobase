@@ -1269,3 +1269,122 @@ and admission-control problem, not a shipped inconsistency, and is filed in the
 build-plan [Backlog](neurobase-build-plan.md) instead. The fix here is to correct the
 comment to describe the real cost model, or to delete the inference and cite the sizing
 work.
+
+---
+
+### G13 — `curate --dry-run` journals a pass on the noop branch, so a preview writes to the store and consumes its "never curated" state
+
+- **status:** open
+- **severity:** low-moderate — no curated fact, tombstone, raw, or node is touched, and no
+  lock is held past the call. The write is one JSONL line. What makes it a defect rather
+  than a curiosity is that the line is **indistinguishable from a real no-op pass** and
+  **permanently retires a diagnostic state**: `doctor` reports `no curate passes recorded
+  for <project> yet` only while the log is missing or empty
+  (`cli/diagnostics.py:951`), so one preview moves a virgin store to `no pass has
+  attempted synthesis yet` and nothing short of editing the journal restores the
+  distinction. The flag's own help string is `"Print the plan the curator would apply;
+  change nothing."` (`cli/__init__.py:228`).
+- **found:** 2026-08-06 by Claude, on the first execution of `curate --dry-run` (against a
+  scratch store, via the `/nb-dev` command wrapper). Four rounds of Codex review had
+  enumerated this function's branches by reading; this branch was found by running it once.
+
+**Reproduction**, against any enabled project with no unconsumed raws:
+
+```
+$ neurobase curate --dry-run --root <scratch>
+{}
+$ cat <scratch>/projects/<slug>/memory/.curator-log.jsonl
+{"status": "noop", "raw": 0, "active_facts": 16, "at": "2026-08-06T14:00:59.277494Z"}
+```
+
+**Why.** `curator/engine.py:397-402` — when `list_raw(..., unconsumed_only=True)` is
+empty, the noop branch logs and returns **before `dry_run` is consulted at all**:
+
+```python
+raw_docs = handle.list_raw(project, unconsumed_only=True)
+if not raw_docs:
+    active = len(handle.list_curated(project))
+    summary = {"status": "noop", "raw": 0, "active_facts": active}
+    _log_pass(handle, project, summary)
+    return summary
+```
+
+The `dry_run` checks sit further down, at the plan stage: the preview branch (`:573-584`)
+returns **without** `_log_pass`, and the failed-preview branch (`:566`) logs a record
+carrying `"dry_run": True` (`:559`).
+
+**The inconsistency is internal to the engine, not a matter of reading the help string.**
+Those two branches state a convention — *a dry run journals only its failures, and marks
+them* — and the noop branch writes an **unmarked, non-failure** record, matching neither
+half. The journal schema is not the problem: `diagnostics.py:45` already treats `noop`,
+`skipped-locked` and `dry-run` as neutral statuses, and `_classify_curate_history`
+(`:901`) already tests `entry.get("dry_run") is not True`. The record simply never says
+it was a preview.
+
+**Fix (decided 2026-08-06):** skip the append on this branch when `dry_run` is set —
+
+```python
+    if not dry_run:
+        _log_pass(handle, project, summary)
+```
+
+— matching `:584`'s silent preview. Real no-op passes keep journaling, which is the
+cadence evidence that a hook fired and found nothing; only the preview stops writing.
+
+**Alternative considered and rejected:** stamping `"dry_run": True` into the noop record
+instead (consistent with `:559`). It keeps a preview writing to the store, still consumes
+the "never curated" state, and would force the help string to narrow from "change nothing"
+to "changes no facts" — buying cadence evidence for an operation that by definition did
+nothing.
+
+**Scope.** Rare in practice: across all three projects in the reporting machine's live
+store the journal holds 17 records (`ok`/`error`/`partial` only) — **no `noop` and no
+dry-run records at all** — because automatic passes run when there is something to fold.
+The branch is reached mainly by a manual dry run against an empty backlog.
+
+---
+
+### G14 — a corrupt `registry.toml` is reported as "not enabled", and the remedy `doctor` prints crashes
+
+- **status:** open
+- **severity:** moderate — **no data is at risk**: the corrupt file is left byte-identical,
+  because `_read_registry` fails closed exactly as `core/projects.py:143-161` intends. The
+  defect is diagnosis. Every surface misdescribes a broken registry as an absent one, and
+  the remedy `doctor` prints ends in an unhandled traceback, so a user whose registry was
+  truncated is told their repo was never enabled and sent to a command that exits 1 with a
+  Python stack.
+- **found:** 2026-08-06 by Claude, while probing whether `doctor` can exit nonzero from an
+  ordinary store (it cannot — only an `error`-status check does that, and a corrupt
+  registry produces none).
+
+**Observed**, on a scratch store whose `registry.toml` was replaced with invalid TOML
+(`[projects.neurobase` — unclosed table declaration):
+
+| Command | Output | Exit |
+|---|---|---|
+| `doctor` | `✓ store: … (schema 1)`, then `! project: … is not enabled`, remedy `Run neurobase enable in this repo.` | **0** |
+| `status` | `Not an enabled project (no registered root matches this directory).` | 1 |
+| `enable` (the printed remedy) | unhandled `TOMLDecodeError: Expected ']' at the end of a table declaration` | 1 |
+
+**Why the readers say "not enabled".** `projects.load_registry`
+(`core/projects.py:164-203`) returns `{}` on `OSError` or `tomllib.TOMLDecodeError` by
+contract — the §10 fail-soft posture, and the ruling recorded in the round-5 store-lock
+review. That is correct for readers; the consequence is that *corrupt* and *absent* reach
+every reader as the same empty mapping.
+
+**The unreachable branch.** `cli/diagnostics.py:322-324` catches
+`(OSError, tomllib.TOMLDecodeError)` around `resolve_project` and reports `"registry is
+unreadable or invalid"` — **it cannot fire for the inputs its message names**, because both
+call paths route through `load_registry`, which has already swallowed both. The message
+that would have made this diagnosable exists in the code and is dead.
+
+**Shape of a fix.** `doctor` already draws this class of distinction one line earlier:
+`registry_is_contained` exists so "no registry" can be told from "a registry pointing out
+of the store" (`core/store_handle.py:330-336`). A parallel *parseability* probe would let
+the project check report `corrupt` as an `error` — which would also give the nonzero-exit
+path its first trigger reachable from an ordinary store — and `enable` should catch
+`TOMLDecodeError` and refuse cleanly instead of raising.
+
+**Related.** The same conflation appears at a third surface: `recommend show <slug>` prints
+`proposal '<slug>' not found or malformed`, collapsing two distinct states into one
+message. Worth fixing in the same pass as a prose habit rather than three separate defects.

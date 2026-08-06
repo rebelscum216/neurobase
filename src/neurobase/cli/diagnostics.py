@@ -313,15 +313,31 @@ def _project_check(handle: StoreHandle | None, root: Path, cwd: Path) -> Check:
             f"the registry for {root} resolves outside the store — it selects no projects",
             "Remove or replace the registry symlink so it points inside the store.",
         )
-    try:
-        slug = (
-            handle.resolve_project(cwd)
-            if handle is not None
-            # Sanctioned raw-root fallback — see the docstring above and the guard's ALLOW.
-            else projects.resolve_project(root, cwd)
+    # G14: *corrupt* must not be reported as *absent*. Both reach the resolver as an
+    # empty mapping (`load_registry` is fail-soft by contract, §10), so a broken
+    # registry used to read as "not enabled" — sending the operator to `neurobase
+    # enable`, which fails closed against that same file. This is the containment
+    # argument above, applied to the third case it did not cover.
+    #
+    # It replaces a `try/except (OSError, TOMLDecodeError)` around the resolution
+    # below, which could not fire for the inputs its message named: both call paths
+    # go through `load_registry`, which has already swallowed those two exceptions.
+    # A branch that cannot run is not a safety net, so it is gone rather than kept.
+    parse_error = projects.registry_parse_error(root)
+    if parse_error is not None:
+        return _check(
+            "project",
+            "error",
+            f"the registry for {root} is present but unusable — {parse_error}",
+            "Repair or remove registry.toml; `neurobase enable` refuses to rewrite a "
+            "registry it could not fully parse, so it cannot fix this for you.",
         )
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        return _check("project", "error", f"registry is unreadable or invalid: {exc}")
+    slug = (
+        handle.resolve_project(cwd)
+        if handle is not None
+        # Sanctioned raw-root fallback — see the docstring above and the guard's ALLOW.
+        else projects.resolve_project(root, cwd)
+    )
     if slug is None:
         return _check(
             "project",

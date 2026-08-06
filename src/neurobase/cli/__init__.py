@@ -12,6 +12,7 @@ import difflib
 import json
 import shutil
 import sys
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -108,6 +109,28 @@ def enable(
         project_slug = handle.register_project(resolved_cwd, slug=slug)
     except (projects.ProjectSlugCollisionError, store.InvalidSlugError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    # G14: `register_project` reads STRICTLY, because its read exists to be written
+    # back — an unparseable or out-of-store registry must not be treated as empty and
+    # rewritten from `{}`, dropping every other project's roots. That fail-closed
+    # behaviour is correct and stays; what was wrong is that the CLI let the exception
+    # escape as a traceback, which is how `doctor`'s own remedy ended up crashing.
+    except (tomllib.TOMLDecodeError, projects.RegistryShapeError) as exc:
+        typer.secho(
+            f"the registry for {resolved_root} cannot be read as a registry: {exc}\n"
+            "Refusing to rewrite it — doing so would drop every project it still "
+            "holds. Repair or remove it, then run `neurobase enable` again.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    except projects.RegistryNotContainedError as exc:
+        typer.secho(
+            f"{exc}\nRemove or replace the registry symlink so it points inside the "
+            "store, then run `neurobase enable` again.",
+            fg=typer.colors.RED,
+            err=True,
+        )
         raise typer.Exit(code=1) from exc
     mem = handle.ensure_tree(project_slug)
     typer.echo(f"Enabled project '{project_slug}' at {mem}")

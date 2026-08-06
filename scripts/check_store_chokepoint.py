@@ -83,8 +83,9 @@ that. See ``docs/neurobase-spec-appendix.md`` §10.
 
 **Sanctioned raw-``root`` residuals** (pending the deferred signature removal — not
 covered by this guard, documented in §10):
-- ``doctor``'s **three** corrupt-``store.toml`` reads — ``projects.resolve_project(root,
-  cwd)``, ``projects.registry_is_contained(root)`` and ``store.store_toml_path(root)`` in
+- ``doctor``'s **four** corrupt-``store.toml`` reads — ``projects.resolve_project(root,
+  cwd)``, ``projects.registry_is_contained(root)``, ``projects.registry_parse_error(root)``
+  and ``store.store_toml_path(root)`` in
   ``cli/diagnostics.py`` — allow-listed here by (file, name). Project resolution is a
   ``registry.toml`` concern, independent of the store-schema guard (ADR-0015 registry
   carve-out, F1), so it is legitimate when no handle can open; the containment predicate
@@ -157,13 +158,19 @@ PROJECTS_FORBIDDEN = frozenset(
         "registry_path",
         "_registry_path",
         "registry_is_contained",
+        # ``registry_parse_error`` (G14) is the same shape as the predicate above: it
+        # names ``registry.toml`` and reads it from a raw root, so publishing it without
+        # listing it here would hand every production module a CI-approved way in — the
+        # exact reintroduction this guard exists to make hard. Doctor's no-handle branch
+        # is again the one sanctioned caller, allow-listed by (file, name) below.
+        "registry_parse_error",
     }
 )
 
 # Store-metadata filenames — a bare literal is a hand-rolled store path.
 SENSITIVE_LITERALS = frozenset({"store.toml", "registry.toml"})
 
-# The doctor's THREE sanctioned raw-``root`` reads on its no-handle (corrupt-store)
+# The doctor's FOUR sanctioned raw-``root`` reads on its no-handle (corrupt-store)
 # path. (posix-relative-to-``src/neurobase``, accessor name.) Keep this count in step
 # with the module docstring above, spec §10 and ADR-0015 — the guard's safety model is
 # a small auditable exception list, so a stale count leaves the next reviewer unable to
@@ -176,6 +183,10 @@ ALLOW: frozenset[tuple[str, str]] = frozenset(
         # store's registry really this store's? Read-side callers never need it —
         # they get empty either way — so this stays a one-file exemption.
         ("cli/diagnostics.py", "registry_is_contained"),
+        # G14: telling a CORRUPT registry from an absent one — the third case the
+        # containment predicate above did not cover. Same one-file justification:
+        # read-side callers get empty either way and never need to ask.
+        ("cli/diagnostics.py", "registry_parse_error"),
     }
 )
 

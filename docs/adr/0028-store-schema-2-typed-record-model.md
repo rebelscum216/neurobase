@@ -125,6 +125,13 @@ have a source of truth that must not be duplicated — see D52 and D53. **Where 
 derivable from an existing field, it MUST be derived rather than written**, so a
 migration cannot create two encodings of one fact that later disagree.
 
+⚠️ **"Derivable" means the evidence is provably BOUND to the value it describes** — same
+record, same write — **not merely evidence that usually correlates with it.** Where the
+only candidate evidence is produced by a *separate* operation from the thing it
+describes, it is not derivable, and deriving from it manufactures confident falsehoods
+exactly where storing manufactures none. D53 applies this test kind by kind and records
+which way each fell.
+
 Readers MUST tolerate the absence of any axis, exactly as they already must for
 `transcript_path` / `capture_version` / `authority` — `write_raw`'s contract
 ([`core/store.py:326-329`](../../src/neurobase/core/store.py)) already states this
@@ -224,7 +231,7 @@ No record is dropped, reordered, or reinterpreted.
 | Curated fact, `provenance` ∋ `user-directed` | `curated` | `protected` | by the fact rules below |
 | Curated fact, otherwise | `curated` | `replaceable` | by the fact rules below |
 | Raw capture | `raw` | `consumable` | **stored** — whatever ADR-0027 wrote, absence included |
-| Recommender proposal | `proposal` | `decidable` | by the proposal rules below |
+| Recommender proposal | `proposal` | `decidable` | **stored** — stamped by the body write; absent on pre-migration proposals |
 | Synthesized status node | `node` | `derived` | `curator-derived` |
 
 ⚠️ **`authority` does not fit in a per-kind cell, and an earlier draft's attempt to put
@@ -249,40 +256,54 @@ new, order-preserving dedupe), so a `seed:*` entry **survives a later curator re
 Provenance is a cumulative history; `agent_last` is the current-writer signal, which is
 exactly what an axis meaning *how this body came to exist* requires.
 
-**Recommender proposal — resolution order, first match wins:**
+**Recommender proposal — `authority` is STORED, and written by the same call that writes
+the body.** Every body-producing path stamps it in the frontmatter it is already writing:
 
-1. The ledger holds an `edited` event **newer than the last `proposed` write** for this
-   slug → **`user-edited`**. `save_edited_draft`
-   ([`recommender/proposals.py:542`](../../src/neurobase/recommender/proposals.py))
-   replaces the draft body with redacted **user** text and appends that event.
-2. Ledger readable, no such event → **`recommender-mined`**. The body is
-   `render_body(candidate)` from the miner
-   ([`recommender/proposals.py:233`](../../src/neurobase/recommender/proposals.py)).
-3. Ledger missing, unreadable, malformed, or compacted past the event → **the axis
-   resolves ABSENT**, consistent with spec §10's fail-soft posture. A truncated history
-   MUST NOT be reported as `recommender-mined`: absence of evidence is not evidence the
-   body was never edited.
+- `_write_proposal` (miner create and refresh) → **`recommender-mined`**.
+- `save_edited_draft` → **`user-edited`**, in the same
+  [`store.write_doc`](../../src/neurobase/recommender/proposals.py) call at `:541` that
+  writes the user's replacement body.
+- Lifecycle-only verbs — `accept`, `reject`, `_apply_supersedes`, `revert_proposal`,
+  `reopen_proposal` — **carry the existing value through untouched**, exactly as they
+  already carry `doc.body` untouched. None of them produces a body, so none may restamp
+  the axis.
+- A proposal written before this migration has no key → **the axis resolves ABSENT** until
+  its next body-producing write stamps one. **The migration back-fills nothing**, because
+  it cannot determine the truth for an existing body (see below).
 
-⚠️ **Use the ordering of
-[`_edited_since_last_write`](../../src/neurobase/recommender/proposals.py) — "an `edited`
-event newer than our last `proposed` write" — and NOT merely "an `edited` event exists".**
-A refresh appends a new `proposed` event after rewriting the body, so a bare existence
-test would keep claiming `user-edited` for a body the miner has since replaced. That
-ordering is also what makes rule 1 safe against the lifecycle verbs: `revert_proposal`
-and `reopen_proposal` both re-write `doc.body` **unchanged** (they move only `status`,
-`installed_path`, `updated_at`), so neither can strand the claim.
+⛔ **Why this axis is stored while every other derived one is derived — and why the
+obvious ledger derivation is WRONG.** It looks derivable: `edited` and `proposed` events
+record body-producing writes. It is not, for two independent reasons, both verified
+against the code rather than reasoned about:
 
-⛔ **Do not simply call that predicate and inherit its default.** It returns `False` for
-a missing or malformed ledger, which is correct *for the miner* — there the question is
-"may I safely refresh?". Here the same input means "I cannot tell how this body came to
-exist", and `False` would silently become the positive claim `recommender-mined`. Reuse
-the ordering; **replace the fail-soft default with ABSENT.** Same evidence, different
-question, different safe answer.
+1. **The evidence is not bound to the body.** Both body-producing paths write the
+   document first and append the ledger event second —
+   [`proposals.py:541-542`](../../src/neurobase/recommender/proposals.py) for an edit,
+   [`:280-282`](../../src/neurobase/recommender/proposals.py) for a refresh. A failure
+   between the two leaves a **durable** disagreement, and in *both* directions: a
+   user-edited body with no `edited` event reads as `recommender-mined`, and a
+   miner-refreshed body under an older `edited` event reads as `user-edited`. Neither is
+   a missing-or-malformed case that a fail-soft default can catch — the ledger is valid,
+   readable, and wrong.
+2. **There is no total order to break ties on.**
+   [`_edited_since_last_write`](../../src/neurobase/recommender/proposals.py) compares
+   parsed timestamps with a strict `latest_edited > latest_proposed`, so **equal
+   timestamps resolve as "not edited"** — and that state is already reachable in a
+   committed fixture (`tests/test_metrics.py:186-195` passes the same `NOW` to
+   `write_ranked` and then `save_edited_draft`, giving a user-edited body that would
+   resolve `recommender-mined`).
 
-**Everything above is DERIVED except the raw's `authority`**, which ADR-0027 already
-persists. `kind` follows from the store collection a record lives in; `lifecycle` from
-`status` and `provenance`; a fact's `authority` from `provenance` + `agent_last`; a
-proposal's from its ledger. **Nothing is written.**
+⭐ **The general rule this establishes, which outlives the finding:** D49 says derive an
+axis *where it is derivable*. "Derivable" means **evidence provably bound to the value it
+describes** — not merely evidence that usually correlates with it. Where the only
+available evidence is written in a separate operation from the thing it describes,
+deriving manufactures confident falsehoods where storing manufactures none. Store it, in
+the same write.
+
+**So: `kind` and `lifecycle` are derived for every kind; `authority` is derived for facts
+and nodes, and STORED for raws (ADR-0027) and proposals (here).** `kind` follows from the
+store collection a record lives in; `lifecycle` from `status` and `provenance`; a fact's
+`authority` from `provenance` + `agent_last`.
 
 ⛔ **The pin predicate is `provenance` containing `user-directed` — NOT a `pinned`
 field.** An earlier draft of this decision said "where `pinned` is true". No such key is
@@ -297,16 +318,19 @@ from `provenance` is two encodings of one fact: the moment a later write adds
 `user-directed` to a fact's provenance without rewriting `lifecycle`, they disagree, and
 the consent signal is again at the mercy of whichever encoding the reader happened to
 consult. The same argument applies to a written `authority: user-directed`, which is
-derivable from the identical sentinel. Raws are the sole exception, and only because
-ADR-0027 already persists that field with no derivable source behind it.
+derivable from the identical sentinel. **The two exceptions are raws and proposals**, and
+in both cases for the same stated reason: no evidence bound to the body exists to derive
+from — ADR-0027 already persists the raw's field, and the proposal argument is above.
 
-⭐ **Consequence for D31's migration step: for the three axes it is a NO-OP.** Nothing is
-rewritten and no backup is strictly required for this part — D31's backup still applies
-to the rest of the schema-2 migration. This is the strongest available answer to the
-falsified migration-economy argument in the Context: the migration cost is not merely
-low, it is **zero by construction**, and the entire cost of this ADR is the accessor plus
-`doctor`'s conversion (D50). If an implementation finds itself writing `kind` or
-`lifecycle` to disk, it has diverged from this decision.
+⭐ **Consequence for D31's migration step: it remains a NO-OP on all three axes.** Nothing
+is rewritten — not even the one axis this ADR stores, because proposal `authority` is
+back-filled by nothing and stamped only by the *next ordinary body write*. No backup is
+strictly required for this part; D31's backup still applies to the rest of the schema-2
+migration. This remains the strongest available answer to the falsified migration-economy
+argument in the Context: the migration cost is not merely low, it is **zero by
+construction**, and the entire cost of this ADR is the accessor plus `doctor`'s conversion
+(D50). If an implementation finds itself writing `kind` or `lifecycle` to disk, or
+back-filling `authority` onto existing proposals, it has diverged from this decision.
 
 **`lifecycle` vocabulary** (complete, closed): `protected` (may be flagged and a
 replacement proposed, never silently overwritten), `replaceable` (the curator may
@@ -328,13 +352,18 @@ a derived axis. Required at minimum:
 | Fact, ordinary curator, empty provenance | `curator-derived` | current mutability retained |
 | Fact, `status: tombstoned` | `lifecycle = tombstoned` | not revived |
 | Raw, no `authority` key | `captured` (D45) | still no key on disk |
-| Proposal, freshly mined | `recommender-mined` | — |
+| Proposal, freshly mined | `recommender-mined` | key present on disk |
 | **Proposal, after `save_edited_draft`, then accepted** | `user-edited` | survives the edit-then-accept path |
-| Proposal, ledger missing/malformed | **absent** | never `recommender-mined` |
+| **Proposal, edited with the SAME timestamp as its `proposed` event** | `user-edited` | the tie that breaks any timestamp-ordered derivation |
+| **Proposal, body written but the ledger append then fails** | `user-edited` | resolved from the body write, so the ledger cannot contradict it |
+| Proposal, miner refresh over prior edit history | `recommender-mined` | the stale `edited` event does not win |
+| Proposal written before the migration | **absent** | **no key back-filled onto disk** |
+| Any lifecycle-only move (`accept`/`reject`/`supersede`/`revert`/`reopen`) | value **unchanged** | body unchanged, so the axis must not be restamped |
 
-The two bolded rows are the ones that fail under the naive derivation: the third proves
-`agent_last` — not merged provenance — decides current authorship, and the eighth proves
-an authorship transition is not erased by a later lifecycle move.
+The bolded rows are the ones that fail under a ledger-derived implementation, and they
+are the reason this axis is stored: row 3 proves `agent_last` — not merged provenance —
+decides a fact's current authorship; rows 8, 9 and 10 each produce a *confident false*
+value under derivation, not an absent one.
 
 **D54 — the `kind` vocabulary is opened only as far as Neurobase actually stores, and it
 adopts the spellings already on disk.** Named now: **`curated`** (a curated fact),

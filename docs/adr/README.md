@@ -46,7 +46,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0013](0013-capture-fidelity-event-shapes.md) | Live capture event shapes for richer deterministic skims | Accepted | S-cf1 / S-cf2 / S-cf3 |
 | [0014](0014-transcript-distill-curation.md) | Transcript-distill curation — Tier-2 capture fidelity (raw pointer + curate-time distill) | Accepted | S-cf5 / D15 / D16 / D17 |
 | [0015](0015-store-chokepoint-handle.md) | Store chokepoint — a validated `StoreHandle` every path must obtain (D23–D26) | Accepted | G1 / D11 / spec §10 |
-| [0016](0016-store-schema-2-project-records-profiles.md) | Store schema 2 — project-record registry, logical profiles, forward-compatible identifiers (D27–D31) | Accepted | Hardening §12/§16/§25 |
+| [0016](0016-store-schema-2-project-records-profiles.md) | Store schema 2 — project-record registry, logical profiles, forward-compatible identifiers (D27–D31). **Superseded by [0028](0028-store-schema-2-typed-record-model.md)**, which carries D27–D31 forward unchanged — cite those decisions at 0028; 0016 is retained as the historical record | Superseded by 0028 | Hardening §12/§16/§25 |
 | [0017](0017-egress-policy-gate.md) | Central egress policy — one `authorize_egress()` gate every brain call passes (D32–D35) | Accepted | Hardening §9 |
 | [0018](0018-hook-receipts-degraded-state.md) | Hook receipts and degraded-state reporting — make fail-soft visible (D36–D38) | Accepted | Hardening §10 |
 | [0019](0019-folder-scoped-auto-enable.md) | Folder-scoped auto-enable — consent once at a directory, not per repo (D39–D42). **Denylist granularity revised by [0026](0026-denylist-is-repo-scoped.md)**; the rest stands. | Accepted | per-repo `enable` friction / spec §3–§5/§10 |
@@ -58,6 +58,7 @@ for investigation, and reserve ADRs for decisions someone might later question.
 | [0025](0025-brain-call-harness-isolation.md) | Brain-call harness isolation — the curator call must *be* a curator call | Accepted | G5 |
 | [0026](0026-denylist-is-repo-scoped.md) | `denylist` matching is repo-scoped — an entry inside a repo is not a carve-out (revises ADR-0019 denylist granularity) | Accepted | independent review I3/I5/I7 |
 | [0027](0027-authored-raw-authority-field.md) | `authority` on a raw — an agent-authored digest is a distinct capture class, on schema 1 (D45–D48) | Accepted | memory-layering note decision 6 |
+| [0028](0028-store-schema-2-typed-record-model.md) | Store schema 2, revised — the typed record model rides the same migration; carries D27–D31 forward and adds D49–D54. **Supersedes [0016](0016-store-schema-2-project-records-profiles.md)** | Accepted | memory-layering note decision 3 |
 
 ADRs 0016–0018 are the three **Phase-0** decisions promoted from the
 [hardening plan](../notes/2026-07-21-hardening-plan-draft.md) (per the

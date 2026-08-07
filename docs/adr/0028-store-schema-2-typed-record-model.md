@@ -1,9 +1,15 @@
 # ADR-0028: Store schema 2, revised — the typed record model rides the same migration
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-06
-- **Supersedes:** [ADR-0016](0016-store-schema-2-project-records-profiles.md) on
-  acceptance (see **Sequencing** — 0016 stays `Accepted` until then)
+- **Accepted via** a 4-round Claude↔Codex relay (baton:
+  [`docs/reviews/2026-08-07-adr-0028-typed-record-model.md`](../reviews/2026-08-07-adr-0028-typed-record-model.md)),
+  verdict `APPROVED` on `f736df4`. 7 findings — 6 × P1, 1 × P2 — all fixed, none
+  disputed, no P0. Three of the seven were raised against the *fixes* rather than the
+  original draft. Immutable from here ([ADR README](README.md)) — a change needs a
+  superseding ADR.
+- **Supersedes:** [ADR-0016](0016-store-schema-2-project-records-profiles.md), which is
+  now `Superseded by 0028` and retained in full as the historical record.
 - **Resolves:** decision 3 of the memory-layering working note (2026-08-01, §6.3 /
   §8.4 / §10.2). ⚠️ **That note is unpublished** — a private lab notebook, not
   committed to this repo — so its section references are provenance for the author
@@ -65,10 +71,11 @@ for the migration**, and carries ADR-0016's decisions forward unchanged.
 
 ## Sequencing
 
-This ADR is `Proposed`. **ADR-0016 stays `Accepted` until this one is accepted**; on
-acceptance, 0016's status becomes `Superseded by 0028` — the one edit the
-[ADR README](README.md) sanctions on an accepted ADR. 0016 is retained in full as
-the historical record and keeps its rationale and alternatives.
+✅ **Completed 2026-08-07.** This ADR was `Proposed` while the relay ran, and ADR-0016
+stayed `Accepted` throughout so no reader was misled meanwhile. On acceptance, 0016's
+status became `Superseded by 0028` — the one edit the [ADR README](README.md) sanctions
+on an accepted ADR. 0016 is retained in full as the historical record and keeps its
+rationale and alternatives.
 
 **D27–D31 keep their numbers and their meaning here**, because they are cited by
 number elsewhere: [ADR-0017](0017-egress-policy-gate.md) declares it builds on the

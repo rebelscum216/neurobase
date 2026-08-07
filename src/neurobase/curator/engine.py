@@ -32,6 +32,8 @@ from neurobase.curator import distill as distill_mod
 
 DEFAULT_TOMBSTONE_GRACE_DAYS = 14
 DEFAULT_PLAN_PAYLOAD_MAX_BYTES = 262_144
+DEFAULT_PLAN_MAX_RAWS = 3
+DEFAULT_PLAN_TRIGGER_RAWS = 3
 DEFAULT_DISTILL = "auto"
 DEFAULT_DISTILL_CHUNK_CHARS = distill_mod.DISTILL_CHUNK_CHARS
 OVERSIZE_RAW_MARKER = "\n\n[truncated for plan payload]"
@@ -175,13 +177,27 @@ def _next_plan_batch(
     curated: list[store.Document],
     remaining: list[store.Document],
     max_bytes: int,
+    max_raws: int = DEFAULT_PLAN_MAX_RAWS,
 ) -> tuple[list[store.Document], str]:
-    """Build the next oldest-first batch within the final request-byte cap."""
+    """Build the next oldest-first batch within BOTH ceilings — the final
+    request-byte cap and the raw-count cap — whichever binds first.
+
+    ``max_raws`` exists because bytes are the wrong proxy for what limits
+    extraction (G19). One plan call weighs every raw in its batch against every
+    other, and past a handful it writes nothing at all — measured at 0 new facts
+    in 6 of 6 runs with 10 raws in one batch, against 3 of 3 with batches of 3,
+    at a payload four times under the byte cap in both cases. The byte budget
+    still guards the request size; this guards the attention.
+    """
     if max_bytes <= 0:
         raise ValueError("plan payload byte budget must be positive")
+    if max_raws <= 0:
+        raise ValueError("plan raw-count budget must be positive")
     docs: list[store.Document] = []
     entries: list[dict[str, str]] = []
     for doc in remaining:
+        if len(docs) >= max_raws:
+            break
         entry = _raw_payload(doc)
         candidate_entries = [*entries, entry]
         payload = _plan_user_payload(curated, candidate_entries)
@@ -343,6 +359,7 @@ def _curate_unlocked(
     resynth: bool = False,
     tombstone_grace_days: int = DEFAULT_TOMBSTONE_GRACE_DAYS,
     plan_payload_max_bytes: int = DEFAULT_PLAN_PAYLOAD_MAX_BYTES,
+    plan_max_raws: int = DEFAULT_PLAN_MAX_RAWS,
     distill: str = DEFAULT_DISTILL,
     distill_chunk_chars: int = DEFAULT_DISTILL_CHUNK_CHARS,
     redact_patterns: tuple[str, ...] = (),
@@ -390,6 +407,12 @@ def _curate_unlocked(
             "status": "resynth",
             "node_refreshed": True,
             "active_facts": len(handle.list_curated(project)),
+            # The budget fields ride the success branch too. Without them a
+            # resynth logged `budget_calls: None` while the failure branch just
+            # above and the main path both reported theirs — so the one call a
+            # resynth always makes (synthesis, measured at ~23s against this
+            # store, roughly two plan calls) left no cost record at all.
+            **pass_budget.summary(),
         }
         _log_pass(handle, project, summary)
         return summary
@@ -470,7 +493,9 @@ def _curate_unlocked(
         # updated, superseded, or tombstoned by earlier batches.
         curated = handle.list_curated(project)
         try:
-            batch_docs, user_payload = _next_plan_batch(curated, remaining, plan_payload_max_bytes)
+            batch_docs, user_payload = _next_plan_batch(
+                curated, remaining, plan_payload_max_bytes, plan_max_raws
+            )
         except ValueError as exc:
             plan_error = str(exc)
             break
@@ -788,12 +813,26 @@ def curate(
         return {"status": "skipped-locked", "reason": "another writer holds the project lock"}
 
 
-def is_stale(root: Path, project: str, hours: int) -> bool:
-    """True if any unconsumed raw is older than ``hours`` (decision D8's
-    ``--if-stale`` gate)."""
-    cutoff = datetime.now(UTC).timestamp() - hours * 3600
+def is_stale(
+    root: Path, project: str, hours: int, trigger_raws: int = DEFAULT_PLAN_TRIGGER_RAWS
+) -> bool:
+    """True if the backlog is worth folding — either it has reached
+    ``trigger_raws`` unconsumed raws, or one of them is older than ``hours``
+    (decision D8's ``--if-stale`` gate). Whichever fires first.
+
+    The count arm is not an optimization; it is what keeps the backlog small
+    enough to extract from. A time-only gate guarantees raws have piled up
+    before anything folds them, which is the condition G19 measures as
+    extracting nothing. The time arm is not redundant either: a pure count
+    starves the tail, where two sessions are followed by silence and never
+    reach the threshold at all.
+    """
     handle = open_store(root, StoreMode.READ)
-    for doc in handle.list_raw(project, unconsumed_only=True):
+    unconsumed = handle.list_raw(project, unconsumed_only=True)
+    if trigger_raws > 0 and len(unconsumed) >= trigger_raws:
+        return True
+    cutoff = datetime.now(UTC).timestamp() - hours * 3600
+    for doc in unconsumed:
         captured_at = doc.get("captured_at")
         if not captured_at:
             continue

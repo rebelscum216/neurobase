@@ -245,10 +245,16 @@ def test_later_batch_failure_journals_error_with_a_refreshed_node(
 
 
 def _one_raw_per_batch(original):
-    """Wrap `_next_plan_batch` so each batch carries exactly one raw."""
+    """Wrap `_next_plan_batch` so each batch carries exactly one raw.
 
-    def _wrapped(curated, remaining, max_bytes):
-        docs, payload = original(curated, remaining[:1], max_bytes)
+    Takes `max_raws` through so the double keeps matching the real signature —
+    the engine passes it positionally, and a stale double here fails as a
+    `TypeError` inside the batch loop, which the pass reports as a plan error
+    and the test then reads as the failure it was trying to stage.
+    """
+
+    def _wrapped(curated, remaining, max_bytes, max_raws=engine.DEFAULT_PLAN_MAX_RAWS):
+        docs, payload = original(curated, remaining[:1], max_bytes, max_raws)
         return docs, payload
 
     return _wrapped

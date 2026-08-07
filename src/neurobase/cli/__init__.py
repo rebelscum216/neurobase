@@ -291,7 +291,10 @@ def curate(
 
         checking_staleness = if_stale and not resynth
         if checking_staleness and not is_stale(
-            handle.root, project_slug, config.curate.stale_hours
+            handle.root,
+            project_slug,
+            config.curate.stale_hours,
+            config.curate.plan_trigger_raws,
         ):
             typer.echo("Not stale — nothing to curate.")
             return
@@ -316,6 +319,7 @@ def curate(
             resynth=resynth,
             tombstone_grace_days=config.curate.tombstone_grace_days,
             plan_payload_max_bytes=config.curate.plan_payload_max_bytes,
+            plan_max_raws=config.curate.plan_max_raws,
             distill=config.curate.distill,
             distill_chunk_chars=config.curate.distill_chunk_chars,
             redact_patterns=tuple(config.redact.extra_patterns),

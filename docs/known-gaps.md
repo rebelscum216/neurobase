@@ -749,7 +749,14 @@ over-count was the finding, not the noise.
 
 ### G8 — the "current fact set" claim is unconditional, but currency is only maintained while new captures keep arriving
 
-- **status:** open
+- **status:** **open — claim narrowed 2026-08-06, mechanism unbuilt.** The first
+  half of the fix direction below has shipped: `README.md`'s opening paragraph,
+  its "A curator that deletes" bullet, the comparison-table `Fact set` row, and
+  `docs/how-it-works.md` step 2 now all state that currency is activity-coupled
+  and that no scheduled pruning pass exists. The gap stays **open** because the
+  audit pass is still unbuilt. ⛔ Do not read the narrowed claim as closing this:
+  even a shipped `curate --audit` could not restore the unconditional reading,
+  because pinned facts are exempt by design (specific 3 below).
 - **severity:** minor — nothing is lost or corrupted, and the fold does correct
   facts whenever a session touches the same ground again. It is filed because the
   shipped claim has no "while active" qualifier on it, and because the projects
@@ -806,10 +813,13 @@ of its own provenance-checking.
 
 **Fix direction.** Two independent halves; the first is required either way.
 
-- **Narrow the claim** (cheap, and honest): say the curator keeps the set current
-  *as sessions continue to touch it*, and stop implying scheduled pruning in the
-  comparison table. Note that even a perfect audit pass could not restore the
-  unconditional reading, because rule 3 exempts pinned facts by design.
+- ✅ **DONE 2026-08-06 — Narrow the claim** (cheap, and honest): the curator is
+  now documented as keeping the set current *as sessions continue to touch it*,
+  and the comparison table no longer implies scheduled pruning. All four sites
+  named under **The claim** above were edited. Note that even a perfect audit
+  pass could not restore the unconditional reading, because rule 3 exempts
+  pinned facts by design — so this half was required either way, and closes the
+  *filed* defect without closing the gap.
 - **Add an audit pass** — e.g. `curate --audit`: fold with **zero** new raws,
   sending the active set alone and asking only "which of these are still true,
   mergeable, or superseded." Most of the machinery already exists — the plan step

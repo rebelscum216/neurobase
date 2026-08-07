@@ -40,8 +40,11 @@ zero telemetry**:
    append-only `raw/` store. No LLM runs at capture time; secrets are redacted
    before anything is written.
 2. **Curate** — on a schedule (or opportunistically at session start), an LLM
-   *curator* folds raw captures into a **small, current, non-redundant** set of
-   curated facts. Its mandate is deletion and supersession, not accumulation.
+   *curator* folds raw captures into a **small, non-redundant** set of curated
+   facts. Its mandate is deletion and supersession, not accumulation. The
+   schedule governs when *new captures* are folded, not a review of the existing
+   set: with no unconsumed raw the pass is a no-op, so facts in a quiet project
+   are never re-examined. See `G8` in `known-gaps.md`.
 3. **Synthesize** — curated facts are rendered into a wikilinked markdown wiki
    (`nodes/` + `index.md`) that is Obsidian-readable and git-friendly. Nodes are a
    pure function of the curated set — regenerated wholesale, never patched.

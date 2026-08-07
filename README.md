@@ -4,8 +4,9 @@
 
 Your coding agents forget everything between sessions, and what one learns is
 invisible to the next. Neurobase fixes both. It captures your Claude Code and
-Codex CLI sessions automatically, curates them into a small, current fact set,
-builds a browsable markdown wiki, and injects that memory back into future
+Codex CLI sessions automatically, curates them into a small fact set it keeps
+current as sessions keep touching it, builds a browsable markdown wiki, and
+injects that memory back into future
 sessions — for **either** agent. On top of that loop sits the piece nobody else
 ships: a **recommender** that mines your cross-agent history for recurring
 patterns and proposes promoting them into standard **SKILL.md** and
@@ -35,7 +36,10 @@ hooks capture (auto)  →  curator folds raw into a small durable fact set
   always exit cleanly so they can never wedge a session. Secrets are redacted
   before anything is written.
 - **A curator that deletes.** An LLM folds raw captures into a *small,
-  non-redundant, current* fact set — optimizing for supersession, not accumulation.
+  non-redundant* fact set — optimizing for supersession, not accumulation.
+  Currency is **activity-coupled**: correction arrives with new captures, so a
+  project nothing has touched lately is not re-examined. See `G8` in
+  `docs/known-gaps.md`.
 - **Transcript distill.** When a raw capture has a resolvable Claude transcript,
   curate can distill the fuller session into a bounded, redacted digest before the
   plan step; missing transcripts or backend failures safely fall back to the skim.
@@ -70,7 +74,7 @@ in particular moves — verify current numbers before quoting them elsewhere.
 | License | Apache-2.0 | AGPL-3.0 | Apache-2.0 | Apache-2.0 |
 | Storage | Markdown, wikilinked | Markdown, wikilinked (Obsidian) | SQLite + Orama search | Postgres + Qdrant (Docker) |
 | Cross-agent | Claude Code + Codex CLI (hooks + MCP) | Any MCP client | Many agents (MCP + plugins) | Any MCP client |
-| Fact set | Curator **folds & deletes** — small, current, non-redundant | Editable notes (`write_note`/`edit_note`/`delete_note`), no automatic curation | Notes + generated briefs; no documented automatic pruning | Vector-recalled memories, no documented automatic pruning |
+| Fact set | Curator **folds & deletes** — small, non-redundant; kept current as sessions touch it, with no scheduled pruning pass (see `G8`) | Editable notes (`write_note`/`edit_note`/`delete_note`), no automatic curation | Notes + generated briefs; no documented automatic pruning | Vector-recalled memories, no documented automatic pruning |
 | Skill/rule promotion | **Mines the corpus for recurring patterns, proposes SKILL.md/AGENTS.md, and tracks accept/edit/reject + 30-day survival per proposal** | — | Has `memorix skills` (CLI) / `memorix_promote` (MCP tool) to promote knowledge into skill files; README doesn't document automatic pattern-mining or post-promotion tracking | — |
 | Cost | Free | Free, self-hosted + a paid hosted-sync tier (check current pricing — it's changed more than once) | Free | Free self-hosted (mem0 also sells a cloud product) |
 

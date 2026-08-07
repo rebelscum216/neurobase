@@ -182,6 +182,14 @@ named**. Extending the vocabulary to a new kind therefore cannot smuggle in a po
 meaning: a value that would change how a record is *treated* rather than describe how it
 was *made* does not belong on this axis.
 
+**The vocabulary, complete for the kinds D49 admits.** Raws keep exactly ADR-0027's
+`captured` / `agent-authored` (absence ⇒ `captured`). Schema 2 adds, for other kinds:
+**`user-directed`** (the user directed this body), **`seed-imported`** (imported source
+text), **`curator-derived`** (the curator wrote it), **`recommender-mined`** (the miner
+generated it), and **`user-edited`** (a user replaced a generated body). Each names an
+*origin*, never a permission or a priority, so each satisfies the test above. D53 gives
+the resolution order per kind; a new value requires an ADR.
+
 **Permitted consumers, scoped.** `D47` restricts consumption to surfaces that would
 otherwise misdescribe what they hold — the fold journal, `doctor`, and any UI naming the
 rung it is showing. That restriction is carried forward unchanged and applies to the
@@ -212,17 +220,69 @@ No record is dropped, reordered, or reinterpreted.
 
 | Record | `kind` | `lifecycle` | `authority` |
 |---|---|---|---|
-| Curated fact, `status: tombstoned` | `curated` | `tombstoned` | per the next two rows |
-| Curated fact, `provenance` ∋ `user-directed` | `curated` | `protected` | `user-directed` |
-| Curated fact, otherwise | `curated` | `replaceable` | `curator-derived` |
+| Curated fact, `status: tombstoned` | `curated` | `tombstoned` | by the fact rules below |
+| Curated fact, `provenance` ∋ `user-directed` | `curated` | `protected` | by the fact rules below |
+| Curated fact, otherwise | `curated` | `replaceable` | by the fact rules below |
 | Raw capture | `raw` | `consumable` | **stored** — whatever ADR-0027 wrote, absence included |
-| Recommender proposal | `proposal` | `decidable` | `curator-derived` |
+| Recommender proposal | `proposal` | `decidable` | by the proposal rules below |
 | Synthesized status node | `node` | `derived` | `curator-derived` |
 
-**Every value above is DERIVED except the raw's `authority`, which ADR-0027 already
-persists.** `kind` follows from the store collection a record lives in; `lifecycle` from
-`status` and `provenance`; a curated fact's `authority` from the same `user-directed`
-sentinel that D52's pin test uses. Nothing else is written.
+⚠️ **`authority` does not fit in a per-kind cell, and an earlier draft's attempt to put
+it in one was wrong twice.** Two kinds have authorship sub-cases *within* the kind, so
+each gets its own ordered resolution below. A table that enumerates only its rows does
+not thereby enumerate its cells.
+
+**Curated fact — resolution order, first match wins:**
+
+1. `provenance` ∋ `user-directed` → **`user-directed`**. The user directed this body;
+   this is also D52's pin condition, and it outranks `agent_last` because the sentinel
+   records *who directed the content*, not which component performed the write.
+2. `agent_last == "seed"` → **`seed-imported`**. The body is imported source text.
+3. `agent_last == "curator"` → **`curator-derived`**.
+4. `agent_last` absent or any other value → **the axis resolves ABSENT.** Do not guess.
+   A consumer that must name a rung says so as unknown (D49 already requires readers to
+   tolerate absence).
+
+⛔ **Never derive a fact's authorship from `seed:*` in `provenance`.**
+[`core/store.py:470`](../../src/neurobase/core/store.py) **merges** provenance (prior +
+new, order-preserving dedupe), so a `seed:*` entry **survives a later curator rewrite**.
+Provenance is a cumulative history; `agent_last` is the current-writer signal, which is
+exactly what an axis meaning *how this body came to exist* requires.
+
+**Recommender proposal — resolution order, first match wins:**
+
+1. The ledger holds an `edited` event **newer than the last `proposed` write** for this
+   slug → **`user-edited`**. `save_edited_draft`
+   ([`recommender/proposals.py:542`](../../src/neurobase/recommender/proposals.py))
+   replaces the draft body with redacted **user** text and appends that event.
+2. Ledger readable, no such event → **`recommender-mined`**. The body is
+   `render_body(candidate)` from the miner
+   ([`recommender/proposals.py:233`](../../src/neurobase/recommender/proposals.py)).
+3. Ledger missing, unreadable, malformed, or compacted past the event → **the axis
+   resolves ABSENT**, consistent with spec §10's fail-soft posture. A truncated history
+   MUST NOT be reported as `recommender-mined`: absence of evidence is not evidence the
+   body was never edited.
+
+⚠️ **Use the ordering of
+[`_edited_since_last_write`](../../src/neurobase/recommender/proposals.py) — "an `edited`
+event newer than our last `proposed` write" — and NOT merely "an `edited` event exists".**
+A refresh appends a new `proposed` event after rewriting the body, so a bare existence
+test would keep claiming `user-edited` for a body the miner has since replaced. That
+ordering is also what makes rule 1 safe against the lifecycle verbs: `revert_proposal`
+and `reopen_proposal` both re-write `doc.body` **unchanged** (they move only `status`,
+`installed_path`, `updated_at`), so neither can strand the claim.
+
+⛔ **Do not simply call that predicate and inherit its default.** It returns `False` for
+a missing or malformed ledger, which is correct *for the miner* — there the question is
+"may I safely refresh?". Here the same input means "I cannot tell how this body came to
+exist", and `False` would silently become the positive claim `recommender-mined`. Reuse
+the ordering; **replace the fail-soft default with ABSENT.** Same evidence, different
+question, different safe answer.
+
+**Everything above is DERIVED except the raw's `authority`**, which ADR-0027 already
+persists. `kind` follows from the store collection a record lives in; `lifecycle` from
+`status` and `provenance`; a fact's `authority` from `provenance` + `agent_last`; a
+proposal's from its ledger. **Nothing is written.**
 
 ⛔ **The pin predicate is `provenance` containing `user-directed` — NOT a `pinned`
 field.** An earlier draft of this decision said "where `pinned` is true". No such key is
@@ -255,13 +315,26 @@ reword, supersede, or tombstone), `tombstoned` (retained, not live), `consumable
 mutability rule), `decidable` (moves by explicit accept/reject/reopen), `derived`
 (regenerated wholesale from its inputs). A new value requires an ADR.
 
-**Accessor fixtures are an acceptance criterion**, one per row above, plus: a
-`user-directed` fact MUST stay pinned and MUST *resolve* to `authority = user-directed`;
-an ordinary curator fact MUST retain its current mutability; a tombstoned fact MUST NOT
-be revived; and a raw with no `authority` key MUST still have none on disk afterward and
-MUST resolve to `captured` (D45). Each fixture asserts on the **resolved** value and on
-the **bytes on disk** — the second half is what catches an implementation that quietly
-starts persisting a derived axis.
+**Accessor fixtures are an acceptance criterion**, one per row above and one per
+resolution branch. Each fixture asserts on the **resolved** value *and* on the **bytes on
+disk** — the second half is what catches an implementation that quietly starts persisting
+a derived axis. Required at minimum:
+
+| Fixture | MUST resolve to | MUST also hold |
+|---|---|---|
+| Fact, `provenance` ∋ `user-directed` | `user-directed` | stays pinned |
+| Fact, seed-only, `agent_last: seed` | `seed-imported` | not reported as curator-written |
+| **Fact, seed-origin, later rewritten with `agent_last: curator`** | `curator-derived` | **`seed:*` still in merged provenance and correctly ignored** |
+| Fact, ordinary curator, empty provenance | `curator-derived` | current mutability retained |
+| Fact, `status: tombstoned` | `lifecycle = tombstoned` | not revived |
+| Raw, no `authority` key | `captured` (D45) | still no key on disk |
+| Proposal, freshly mined | `recommender-mined` | — |
+| **Proposal, after `save_edited_draft`, then accepted** | `user-edited` | survives the edit-then-accept path |
+| Proposal, ledger missing/malformed | **absent** | never `recommender-mined` |
+
+The two bolded rows are the ones that fail under the naive derivation: the third proves
+`agent_last` — not merged provenance — decides current authorship, and the eighth proves
+an authorship transition is not erased by a later lifecycle move.
 
 **D54 — the `kind` vocabulary is opened only as far as Neurobase actually stores, and it
 adopts the spellings already on disk.** Named now: **`curated`** (a curated fact),

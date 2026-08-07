@@ -1526,3 +1526,81 @@ make capture loud (fail-safe forbids it), and does not recover the sessions alre
 their transcripts still exist under `~/.claude/projects/`, so a backfill is possible but
 is not attempted here. The remaining exposure is that a user who never runs `doctor` still
 sees nothing.
+
+⚠️ **Knock-on: registering the parent has a cost of its own — see
+[G17](#g17--the-curators-brain-call-inherits-the-callers-cwd-so-curation-dies-in-a-non-git-registered-root).**
+The standard remedy for this gap is to register the higher directory, which makes capture
+work there. But `codex exec` refuses to start in a directory that is not a git repository,
+and the brain call inherited the caller's `cwd`, so with the `codex-cli` brain every curate
+pass fired from that directory then failed outright. Fixed in G17; recorded here because
+the remedy for one gap created the condition for the other.
+
+### G17 — the curator's brain call inherits the caller's `cwd`, so curation dies in a non-git registered root
+
+- **status:** **fixed** — the `codex exec` invocation now passes
+  `--skip-git-repo-check` and runs in an **empty throwaway directory** rather than
+  whatever directory the caller happened to be in, with `-s read-only` naming the
+  sandbox policy that was previously left to Codex's default. Pinned by four tests in
+  `tests/test_brain_codex_cli.py`, each shown to fail under a distinct mutation:
+  dropping the flag fails the guard test, flipping `read-only` to `workspace-write`
+  fails the sandbox test, dropping `cwd=` fails both directory tests, and — the one
+  that matters — substituting `tempfile.gettempdir()` for `TemporaryDirectory` fails
+  the emptiness assertion. That last mutation is the discriminating one: the shared
+  temp dir is *not* the caller's cwd and would satisfy a naive "cwd is isolated"
+  check, while holding 1,968 entries the model could read.
+- **severity:** medium — **no data is lost.** The failed pass has `batches: 0` and
+  consumes nothing, so its raws stay unconsumed and the next pass folds them; fail-soft
+  works exactly as designed. What breaks is that curation **stalls for every pass fired
+  from such a directory**, and `doctor` only escalates curate health after three
+  *consecutive* failures, so any run of failures that a single success interrupts never
+  surfaces at all. Brain-specific: `claude -p` enforces no directory policy and the
+  Anthropic API backend is HTTP, so this is invisible unless the brain is pinned to
+  `codex-cli`.
+- **found:** 2026-08-07 by Claude, from a `status: error` record in the curator log —
+  not from a user-visible symptom, which is the point of the severity note above.
+
+**Relationship to [G16](#g16--an-unregistered-cwd-silently-discards-capture-injection-and-curation).**
+G16's remedy created this condition. Registering the non-git parent directory as a second
+root is what makes capture work from there — and it is exactly that directory in which
+`codex exec` refuses to start. The two gaps are the same directory seen from opposite
+ends: G16 is capture failing silently *outside* the registered roots, G17 is curation
+failing loudly *inside* one of them.
+
+**Reproduction**, with the control that makes it discriminating:
+
+```sh
+# fails — a registered root that is not a git repository
+cd "<parent>" && codex exec --ignore-user-config --json "Reply with exactly: OK"
+# Not inside a trusted directory and --skip-git-repo-check was not specified.
+
+# succeeds — one directory down, inside the git repo
+cd "<parent>/<repo>" && codex exec --ignore-user-config --json "Reply with exactly: OK"
+# {"type":"item.completed","item":{"type":"agent_message","text":"OK"}}
+```
+
+Observed live on 2026-08-07: the `12:21:59Z` pass recorded
+`status: error`, `raw: 5`, `batches: 0` with that message; the `13:21:33Z` retry, fired
+after the working directory had moved into the repo, succeeded with `distilled: 3`,
+`upserts: 5`. Nothing about the store changed between them — only the cwd.
+
+**Why the obvious remedy is unavailable.** Marking the directory trusted in
+`~/.codex/config.toml` cannot work: `--ignore-user-config` is precisely what stops that
+file being read, and it is load-bearing for a different reason — two live spikes
+(2026-07-20/21) proved it is what prevents Codex firing hooks into its own headless
+sessions, reopening the recursive-capture incident. So the flag stays and the guard must
+be cleared explicitly.
+
+**Second defect, fixed in the same change and independent of the failure.** Codex treats
+the cwd as its workspace, so before this fix a curation call's workspace was *whatever
+repository the user was sitting in* — routinely an unrelated client repo. That is a data
+boundary Neurobase otherwise takes seriously (ADR-0017's egress gate), and it was never
+an intended capability. The empty temporary directory closes it: a brain call is a pure
+function of its prompt and should be able to read nothing.
+
+**Scope — what the fix does not do.** It does not change how brains are selected, does
+not plumb a store-root-derived working directory (the brain deliberately knows nothing
+about the store), and does not make a failed pass louder — `doctor`'s three-consecutive
+threshold is unchanged and remains the only surface. This is
+[ADR-0025](adr/0025-brain-call-harness-isolation.md)'s harness-isolation principle
+applied to a dimension that ADR did not cover; it needs no new ADR because it decides
+nothing that one did not already decide.

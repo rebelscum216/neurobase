@@ -1614,3 +1614,102 @@ threshold is unchanged and remains the only surface. This is
 [ADR-0025](adr/0025-brain-call-harness-isolation.md)'s harness-isolation principle
 applied to a dimension that ADR did not cover; it needs no new ADR because it decides
 nothing that one did not already decide.
+
+---
+
+### G18 — a raw consumed without contributing is indistinguishable from one that was folded
+
+- **status:** **open.** No fix is proposed here. The mechanism is correct — nothing is
+  lost or double-counted; what is missing is any record of which raws actually reached a
+  fact. A fix touches the pass journal, not the fold, and should be designed against
+  [ADR-0028](adr/0028-store-schema-2-typed-record-model.md)'s record model rather than
+  bolted onto the current frontmatter.
+- **severity:** low as a runtime defect — no data loss, no wrong output, no user-visible
+  failure. Higher as an **evaluation** defect: it is the reason a claim about the
+  curator's merging behavior was recorded as settled and then failed to replicate when
+  it was re-derived from the store (below). Any future measurement of curation quality
+  runs into this same wall — and on this store it applies to **31% of all consumed raws**,
+  so it is not an edge case being reported as one.
+- **found:** 2026-08-07 by Claude, while regenerating §15 of
+  `notes/2026-08-01-memory-layering-ideas.md` from the live store instead of carrying
+  forward the previous session's summary of it.
+
+**What happens.** `consumed: true` is written to a raw's frontmatter when a pass folds
+it, and it is written identically whether that raw produced a fact, contributed a clause
+to a merged fact, or contributed nothing at all. The pass record does not close the gap
+either: it reports `distilled`, `fallback`, `upserts` and `batches` as **totals for the
+pass**, never per-raw. So for any individual raw, "was this read and used, or read and
+discarded?" has no recorded answer.
+
+The only way to reconstruct it is to grep provenance across every curated fact and
+subtract — which is what surfaced this entry, and which does not scale past a store small
+enough to read exhaustively.
+
+**How wide this is, measured 2026-08-07 on this project's store: 11 of 36 consumed raws
+(31%) are cited by no curated fact.** The entry was written from a single session and the
+store-wide count was run afterwards to check the framing; it was an understatement. The
+population is lopsided:
+
+| | raws | consumed but uncited |
+|---|---|---|
+| `codex` captures | 25 | **10** |
+| `claude` captures | 11 | 1 |
+
+⭐ **That skew is itself a finding, and it is consistent with a known confound rather than
+a new defect.** Per `notes/2026-08-01-memory-layering-ideas.md` §14, `render_transcript`
+returns `None` for any non-`claude` agent, so **no Codex capture can ever be distilled** —
+every one takes the fallback path and reaches the curator as a raw body. Whether those ten
+were judged redundant, were too thin to yield a fact, or were dropped for some third
+reason is exactly what the store does not record. **Do not read the 10 as ten losses** —
+read it as ten raws whose contribution is unknowable after the fact.
+
+**Measurement that exposed it**, on this project's store on 2026-08-07. Three sessions
+each hold two raws — an `authority: agent-authored` v1 written at wrap, and the
+deterministic `SessionEnd` v2 skim:
+
+| session | raws | facts citing **both** raws | outcome |
+|---|---|---|---|
+| `b7c62f8a` | 2 | 3 | merged |
+| `f8083cb5` | 2 | 2 | merged |
+| `66b54a2e` | 2 | **0** | **the `SessionEnd` raw is cited by no fact at all** |
+
+`66b54a2e`'s second raw is 255 lines, `capture_version: 2`, `consumed: true` — and
+appears in the provenance of nothing. Whether the curator judged it redundant against the
+authored raw, or silently dropped it, is **not recoverable from the store**. Both readings
+are consistent with every byte on disk.
+
+**Why this is not [G10](#g10--a-sessions-richest-record-can-expire-before-anything-reads-it-and-the-fallback-is-silent) or [G11](#g11--the-digest-cap-truncates-the-tail-against-a-fixed-section-order-so-the-last-sections-are-usually-lost-on-dense-sessions).**
+Both of those are about content being *lost before* the curator sees it — an expired
+transcript, a truncated digest tail. This entry is about content the curator **did** see:
+the raw was read, marked consumed, and left no trace of its contribution either way. The
+loss, if there is one, is downstream of everything those two entries govern.
+
+**Why `authority` does not address it.** ADR-0028's `authority` field records *who wrote
+a record*, which is a property of the raw at write time. This gap is about *what a pass
+did with it*, which is a property of the fold. `authority` would let a reader ask "was
+this authored or captured?" — it still could not answer "did it contribute?".
+
+**Reproduction** — against any store with at least one consumed raw:
+
+```sh
+# every consumed raw claims the same thing
+grep -l '^consumed: true' <store>/projects/<p>/memory/raw/*.md | wc -l
+
+# but only some appear in any fact's provenance
+for f in <store>/projects/<p>/memory/raw/*.md; do
+  grep -qr "$(basename "$f")" <store>/projects/<p>/memory/curated/ || echo "uncited: $(basename "$f")"
+done
+```
+
+The second command reports raws that were consumed and are cited nowhere. Nothing in the
+store distinguishes those from a deliberate no-op.
+
+**Scope.** This does not claim the curator is wrong to merge or to drop a redundant raw —
+on the evidence above it merged correctly in two of three cases, and the third may well be
+a correct drop. The defect is that **the store cannot tell the difference**, so neither
+can a reviewer, a `doctor` check, or any future quality measurement.
+
+⚠️ **A caveat this entry inherits.** All 8 passes in this store's `.curator-log.jsonl`
+ran at `batches: 1` (7 `ok`, 1 `error`). Multi-batch behavior — where two raws of one
+session could land in different plan batches — has **never been observed**, so the table
+above says nothing about it.

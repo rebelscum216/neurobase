@@ -45,7 +45,8 @@ claim no authority in the S-table above.
 
 | Date | What | Result |
 |---|---|---|
-| 2026-08-04 | [Authorial stance vs. compression framing](2026-08-04-authorial-stance.md) — reframing `DISTILL_SYSTEM` as a successor handover, everything else held constant. Harness: [`2026-08-04-stance-test.py`](2026-08-04-stance-test.py) | 13–22% shorter at identical 4/4 section coverage, n=3 pairs, model-verified. Quality not judged. |
+| 2026-08-04 | [Authorial stance vs. compression framing](2026-08-04-authorial-stance.md) — reframing `DISTILL_SYSTEM` as a successor handover, everything else held constant. Harness: [`2026-08-04-stance-test.py`](2026-08-04-stance-test.py) | ⛔ **RETRACTED 2026-08-06 — the length result did NOT replicate.** Same harness, same inputs, same models: one session's sign reversed. The **same arm** on the **same frozen input** drifts −17.1% to +11.1% between runs, so the original "13–22% shorter" sat inside a noise floor its design specified and never ran. ✅ Only **4/4 section coverage** survives (12/12 across both runs). Quality never judged by either run. ⚠️ The write-up itself still states 13–22% as fact. |
+| 2026-08-07 | [Batch composition decides what a pass extracts](2026-08-07-g19-batch-crowding.md) — forcing multi-batch curation, then sweeping raws-per-batch. Harness: [`2026-08-07-g19-batch-crowding.py`](2026-08-07-g19-batch-crowding.py) | Multi-batch does **not** duplicate (provenance accumulates across batches). But one batch of 10 raws produced new facts in **0 of 6** runs vs **3 of 3** at 3/batch, at a payload a quarter of the byte cap → **G19** filed and fixed (`plan_max_raws`), **G20** filed, **G18** updated. Synthesis measured at ~23s, ≈66% of a pass. |
 
 ## Naming
 

@@ -519,6 +519,101 @@ def test_is_stale_false_when_no_raw(root: Path) -> None:
     assert engine.is_stale(root, "proj", hours=12) is False
 
 
+def test_is_stale_true_when_backlog_reaches_trigger(root: Path) -> None:
+    """The count arm fires on a backlog of recent raws the time arm would pass
+    over. Without it the time gate guarantees a pile-up before anything folds
+    (G19)."""
+    recent = (datetime.now(UTC) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    for i in range(3):
+        _write_raw(root, "proj", f"r{i}.md", when=recent)
+    assert engine.is_stale(root, "proj", hours=12, trigger_raws=3) is True
+
+
+def test_is_stale_false_below_trigger_and_not_old(root: Path) -> None:
+    recent = (datetime.now(UTC) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    for i in range(2):
+        _write_raw(root, "proj", f"r{i}.md", when=recent)
+    assert engine.is_stale(root, "proj", hours=12, trigger_raws=3) is False
+
+
+def test_is_stale_time_arm_still_fires_below_trigger(root: Path) -> None:
+    """The two arms are independent: one old raw is enough even though the
+    backlog never reaches the count. A pure count starves the tail."""
+    old = (datetime.now(UTC) - timedelta(hours=20)).isoformat().replace("+00:00", "Z")
+    _write_raw(root, "proj", "r1.md", when=old)
+    assert engine.is_stale(root, "proj", hours=12, trigger_raws=3) is True
+
+
+def test_is_stale_count_arm_ignores_consumed_raws(root: Path) -> None:
+    """The backlog is unconsumed raws only — consumed ones must not push the
+    trigger, or every pass would immediately re-arm the next one."""
+    recent = (datetime.now(UTC) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    for i in range(4):
+        path = _write_raw(root, "proj", f"r{i}.md", when=recent)
+        doc = store.read_doc(path)
+        store.write_doc(path, {**doc.frontmatter, "consumed": True}, doc.body)
+    assert engine.is_stale(root, "proj", hours=12, trigger_raws=3) is False
+
+
+# --- plan batch ceilings (G19) -------------------------------------------
+
+
+def test_plan_batch_stops_at_raw_ceiling(root: Path) -> None:
+    """The raw-count ceiling binds even when the byte budget is nowhere near
+    it — the G19 condition exactly: small payload, too many raws."""
+    docs = [store.read_doc(_write_raw(root, "proj", f"r{i}.md", body="tiny")) for i in range(10)]
+    batch, _ = engine._next_plan_batch([], docs, 1_000_000, 3)
+    assert len(batch) == 3
+    assert [d.file_path.name for d in batch] == ["r0.md", "r1.md", "r2.md"]
+
+
+def test_plan_batch_byte_budget_still_binds_below_raw_ceiling(root: Path) -> None:
+    """Whichever ceiling binds first wins — the byte cap is not weakened by
+    adding the count cap."""
+    docs = [
+        store.read_doc(_write_raw(root, "proj", f"r{i}.md", body="x" * 4_000)) for i in range(5)
+    ]
+    # a cap sized to exactly one raw, derived rather than guessed
+    one_raw = engine._plan_request_bytes(
+        engine._plan_user_payload([], [engine._raw_payload(docs[0])])
+    )
+    batch, _ = engine._next_plan_batch([], docs, one_raw, 99)
+    assert len(batch) == 1  # the byte cap binds long before the count cap does
+
+
+def test_plan_batch_rejects_non_positive_raw_ceiling(root: Path) -> None:
+    docs = [store.read_doc(_write_raw(root, "proj", "r0.md"))]
+    with pytest.raises(ValueError, match="raw-count budget must be positive"):
+        engine._next_plan_batch([], docs, 1_000_000, 0)
+
+
+def test_curate_splits_backlog_into_raw_capped_batches(root: Path) -> None:
+    """End to end: 7 raws under one plan call's byte budget still plan as 3
+    batches, not 1."""
+    for i in range(7):
+        _write_raw(root, "proj", f"r{i}.md", body="tiny")
+    brain = FakeBrain({"upserts": [], "tombstones": []})
+    summary = engine.curate(root, "proj", brain, plan_max_raws=3)
+    assert summary["batches"] == 3
+    assert brain.plan_calls == 3
+
+
+# --- resynth cost record --------------------------------------------------
+
+
+def test_resynth_summary_carries_budget_fields(root: Path) -> None:
+    """A resynth makes exactly one brain call; its cost must reach the journal
+    like every other pass's does."""
+    store.ensure_tree("proj", root)
+    # synthesis short-circuits on an empty fact set and makes no call at all,
+    # so the fixture needs a fact for there to be a cost to record
+    store.upsert_curated(root, "proj", "fact-a", "body", provenance=[])
+    summary = engine.curate(root, "proj", FakeBrain(), resynth=True)
+    assert summary["status"] == "resynth"
+    assert summary["budget_calls"] == 1
+    assert _read_log(root, "proj")[-1]["budget_calls"] == 1
+
+
 # --- node prompt fence stripping -----------------------------------------
 
 

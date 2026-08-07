@@ -1713,3 +1713,177 @@ can a reviewer, a `doctor` check, or any future quality measurement.
 ran at `batches: 1` (7 `ok`, 1 `error`). Multi-batch behavior — where two raws of one
 session could land in different plan batches — has **never been observed**, so the table
 above says nothing about it.
+
+⭐ **UPDATE 2026-08-07 (later): the caveat above is discharged, and the 31% now has a
+measured cause — see [G19](#g19--a-plan-batch-is-capped-by-bytes-but-not-by-raw-count-so-a-large-batch-extracts-nothing).**
+Multi-batch was forced against a copy of this store and behaves correctly: provenance
+accumulates across batches on a same-slug upsert, and one fact was observed citing four
+raws that were planned in four different batches. **Duplication is not the hazard.**
+
+What the same experiment did find is that **batch composition silently decides which raws
+contribute at all**. The ten codex raws counted above as "consumed but uncited" were
+re-folded from a copy of this store under two batchings: as one batch of 10 they produced
+new facts in **0 of 6 runs and cited 0 raws**; as ten batches of 1 they produced facts in
+**3 of 3 runs and cited the same 6 raws every time**. So of the ten, roughly **six were
+suppressed by crowding and four are genuinely thin** — not ten unknowables. The honest
+reading of the 31% shifts from "unrecoverable" to "substantially explained, and largely an
+artifact of a fixable batching defect."
+
+**This entry stays `open`.** G19's fix removes the dominant *cause*, but not the defect
+recorded here: `consumed: true` is still written identically either way, and the pass
+record still reports per-pass totals, so an individual raw's contribution is still
+unrecorded. The fix makes the number smaller; it does not make it observable. That still
+wants the pass journal designed against ADR-0028's record model.
+
+⚠️ **And the gap obstructed the experiment meant to close its neighbour.** The pass record
+reports `batches` as a count and never says which raws were in which batch, so measuring
+this required monkeypatching `_next_plan_batch` to log composition. A reader of the journal
+alone cannot reconstruct any of the above.
+
+---
+
+### G19 — a plan batch is capped by bytes but not by raw count, so a large batch extracts nothing
+
+- **status:** **fixed** — `plan_max_raws` (default 3) is now a second ceiling in
+  `_next_plan_batch`, and `plan_trigger_raws` (default 3) arms `--if-stale` on backlog
+  size as well as age. Both land in this PR with the entry.
+- **severity:** **high.** Silent, total loss of extraction on the common path. Nothing
+  errors, nothing is logged as wrong, the raws are marked `consumed: true`, and the pass
+  reports `status: ok`. The larger the backlog, the more is lost — so it degrades exactly
+  when there is most to save.
+- **found:** 2026-08-07 by Claude, while running the multi-batch experiment
+  [G18](#g18--a-raw-consumed-without-contributing-is-indistinguishable-from-one-that-was-folded)
+  called for.
+
+**What happens.** `_next_plan_batch` bounded a batch by one thing: the serialized request
+must fit `plan_payload_max_bytes` (262,144). There was no ceiling on **how many raws** a
+batch could hold. Session captures are small — a few KB each — so a realistic backlog fits
+that cap many times over and arrives as **one batch**, i.e. one plan call asked to weigh
+every raw against every other. Past a handful, it writes nothing at all.
+
+Bytes are the wrong proxy. The byte cap guards the *request size*; what limits extraction
+is how many raws compete for one call's **attention**, and the two are unrelated at this
+scale.
+
+**Measured**, on a copy of this project's live store — the 10 `codex` raws that G18 counted
+as consumed-but-uncited, re-folded with `distill=off`, the fixture rebuilt from the live
+store before every run:
+
+| raws per batch | runs | raws cited (per run) | runs producing new facts | plan calls |
+|---|---|---|---|---|
+| 1 | 6 | 6, 7, 5, 6, 6, 6 | **6/6** | 11 |
+| 2 | 3 | 6, 8, 0 | 2/3 | 6 |
+| **3** | 3 | 7, 7, 4 | **3/3** | **5** |
+| 5 | 3 | 0, 5, 1 | 1/3 | 3 |
+| 10 | 6 | 0, 0, 4, 0, 0, 0 | **0/6** | 2 |
+
+All ten raws together are **63,511 bytes** — a quarter of the byte cap. Nothing about the
+request size was ever near a limit.
+
+⭐ **Why the default is 3 and not 1.** Batches of 3 match 1-per-batch extraction (mean 6.0
+raws cited either way, facts produced in every run) at **fewer than half the calls** — 5
+versus 11 — the best facts-per-call in the sweep. Isolation buys nothing over small
+batches; only *large* batches are harmful.
+
+**The trigger is the other half of the fix.** A ceiling alone is not enough while
+`--if-stale` fires on `stale_hours = 12` only: a 12-hour gate *guarantees* a backlog has
+accumulated before anything folds it. `is_stale` now also returns `True` once the backlog
+reaches `plan_trigger_raws`, whichever comes first. The time arm is deliberately kept — a
+pure count starves the tail, where two sessions are followed by silence and never reach the
+threshold. Two knobs, not one shared value: they answer different questions (*how often to
+fold* vs *how much per call*) and will diverge as the curated set grows.
+
+⚠️ **3 is calibrated, not derived.** It was measured against this store with **21 active
+facts** sharing the plan payload. A larger curated set crowds raws harder, so the threshold
+should be expected to fall. Re-measure before trusting the default at a materially bigger
+fact set — the sweep is cheap.
+
+⚠️ **Scope of the measurement.** One project, one brain (`codex-cli 0.146.0-alpha.9.2`),
+`distill=off`, n=3 at the interior sizes. The endpoints (1-3 good, 10 dead) are solid and
+consistent; the exact location of the transition between 3 and 5 is not established. A
+single run at any size can come back empty — see the `0` at size 2.
+
+**Reproduction** — force the two batchings against a **copy** of a store, never the live one:
+
+```python
+from neurobase.curator.engine import curate
+# crowded: one batch, extracts nothing
+curate(copy_root, project, brain, plan_max_raws=99, distill="off")
+# capped: batches of 3, extracts from ~6 of 10
+curate(copy_root, project, brain, plan_max_raws=3, distill="off")
+```
+
+Compare `fold.edges` in the last `.curator-log.jsonl` record: the set of raws cited is the
+measurement, not `upserts`, which counts writes rather than sources.
+
+**Relationship to [G18](#g18--a-raw-consumed-without-contributing-is-indistinguishable-from-one-that-was-folded).**
+G18 records that a raw's contribution is unrecorded; this entry records *why so many
+contributed nothing*. They are cause and symptom, and fixing this one shrinks G18's
+population without closing it — the store still cannot say which raws reached a fact.
+
+**Not [G10](#g10--a-sessions-richest-record-can-expire-before-anything-reads-it-and-the-fallback-is-silent) or [G11](#g11--the-digest-cap-truncates-the-tail-against-a-fixed-section-order-so-the-last-sections-are-usually-lost-on-dense-sessions).**
+Both of those lose content *before* the curator sees it. Here the full raw body reached the
+plan payload intact and was simply not used.
+
+---
+
+### G20 — a newly created fact's slug is unanchored, so the same content can be stored twice
+
+- **status:** **open.** No fix here. The plausible directions — have the planner propose a
+  slug against existing slugs it must justify diverging from, or dedupe on content
+  similarity after the fact — are both design work, and the second is a behavior change to
+  the fold rather than a bug fix.
+- **severity:** low-to-moderate, and **narrower than it first looks**. Every dedup
+  mechanism in the store keys on slug — provenance merge, supersession, tombstoning — so
+  two slugs for one fact defeat all three. But an existing fact in the plan payload
+  **anchors** the planner: it reliably updates rather than duplicating. The exposure is
+  therefore confined to *first* creation, and to content whose fact was tombstoned and
+  pruned.
+- **found:** 2026-08-07 by Claude, while replicating the G19 sweep.
+
+**What happens.** When the fold creates a fact that does not exist yet, nothing constrains
+the slug it picks. Five runs over an identical fixture produced the same rule under five
+different slugs:
+
+```
+pr-and-save-cost-discipline   pr-ci-cost-discipline   pr-count-ci-credit-policy
+pr-ci-credit-policy           pr-use-ci-credit-discipline
+```
+
+Two of the bodies, near-identical in substance:
+
+> *"For Neurobase work, conserve CI and agent credits: open PRs only when they are
+> substantively needed, combine closely related code, tests, and documentation into one PR
+> where practical…"*
+
+> *"For Neurobase, keep PR count lean to conserve CI credits: open PRs only when they are
+> actually needed, not merely convenient, and consolidate closely related code, tests, and
+> documentation into one PR when practical."*
+
+⭐ **The anchoring effect is the mitigating half, and it is measured too.** In the same
+sweep, batches that ran *after* a fact existed converged on it: one fact accumulated
+provenance from four raws across four separate batches, because each later batch saw the
+slug already in its payload and updated it. Two control runs both landed on the same
+pre-existing slug (`hook-activation-quirks`) rather than inventing one. **The fold is
+anchored when it updates and unanchored when it creates.**
+
+**The same nondeterminism reaches the status node.** Three `curate --resynth` runs against
+an unchanged 21-fact store regenerated the node at **4,173 / 4,198 / 5,313 bytes** from an
+original 4,820 — up to 27% variation with no input change. Since that node is what
+`inject` puts in front of an agent at session start, the memory an agent sees varies run to
+run even when the store does not. Arguably the more consequential surface of the two, and
+it is true of every pass today, not a regression.
+
+**Reproduction** — fold the same fixture twice from a clean copy, with the target fact
+absent both times:
+
+```sh
+# delete a fact whose provenance is exactly the raws you will re-fold, reset those
+# raws to `consumed: false`, then curate twice from two fresh copies and compare slugs
+```
+
+**Not a duplicate of [G8](#g8--the-current-fact-set-claim-is-unconditional-but-currency-is-only-maintained-while-new-captures-keep-arriving).**
+G8 is about facts going stale because no new capture arrives. This is about one fact being
+written twice under two names, which G8's currency argument does not address, and which
+`authority` (ADR-0028) does not touch either — that records who wrote a record, not whether
+the store already holds the same claim.

@@ -32,6 +32,25 @@ class CurateConfig:
     # Final serialized plan request budget, including PLAN_SYSTEM and framing.
     # Bytes (not characters): CLI backends pass the prompt as one argv entry.
     plan_payload_max_bytes: int = 262_144
+    # Raws per plan batch. A SECOND ceiling beside the byte budget, because
+    # bytes turned out to be the wrong proxy for what actually limits
+    # extraction (G19): raws compete for one plan call's attention, and a batch
+    # large in COUNT but small in BYTES extracts nothing while sailing under
+    # `plan_payload_max_bytes`. Measured 2026-08-07 on this store, 10 codex raws
+    # totalling 63,511 bytes against the 262,144 cap — one batch of 10 produced
+    # new facts in 0 of 6 runs; batches of 3 produced them in 3 of 3 and cited
+    # 6/10 raws, matching 1-per-batch extraction at less than half the calls.
+    # Whichever ceiling binds first wins. 3 is CALIBRATED to this store's fact
+    # set (21 active facts sharing the payload), not derived — a larger curated
+    # set crowds raws harder, so re-measure before trusting it at a bigger size.
+    plan_max_raws: int = 3
+    # Backlog size that triggers an `--if-stale` pass, checked alongside
+    # `stale_hours` — whichever fires first. Without it the 12-hour gate
+    # guarantees a backlog has accumulated before anything folds it, which is
+    # precisely the condition G19 shows extracts nothing. Without `stale_hours`
+    # a pure count starves the tail: two sessions then silence, and neither
+    # becomes a fact.
+    plan_trigger_raws: int = 3
     # Tier-2 transcript distill (spec §2.0, ADR-0014). `auto` distills a raw
     # when its transcript_path resolves; `off` disables it (skim only).
     distill: str = "auto"

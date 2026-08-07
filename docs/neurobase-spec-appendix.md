@@ -296,9 +296,13 @@ _<N> active curated facts._
    `{"status":"noop", …}`) — idempotence. Then run the **distill** step
    (Tier-2, below) per unconsumed raw: it replaces a raw's *body* with a richer
    digest for the rest of this pass, or leaves the skim body on any failure.
-2. Load active curated facts. Build the oldest-first next batch whose **final
-   combined plan request** (system prompt + framing + serialized user payload)
-   is at most `PLAN_PAYLOAD_MAX_BYTES` in UTF-8 bytes. User payload remains
+2. Load active curated facts. Build the oldest-first next batch under **both**
+   ceilings, whichever binds first: its **final combined plan request** (system
+   prompt + framing + serialized user payload) is at most
+   `PLAN_PAYLOAD_MAX_BYTES` in UTF-8 bytes, **and** it holds at most
+   `PLAN_MAX_RAWS` raws. The count ceiling is not a size guard — it bounds how
+   many raws compete for one plan call's attention, measured as the thing that
+   actually limits extraction (`known-gaps.md` G19). User payload remains
    `{"curated_facts":[{slug,body,pinned?}…], "raw_captures":[{raw:<filename>, body}…]}`
    — `pinned: true` is set for user-directed facts; each `body` is the raw's
    **distilled digest** when the distill step produced one, else its skim body.
@@ -808,10 +812,12 @@ modification; idempotent; state "takes effect next session."
 | MAX_IDE_CONTEXT_CHARS | 800 | codex scribe |
 | MAX_CONTEXT_CHARS (inject) | 6000 | recall |
 | TOMBSTONE_GRACE_DAYS | 14 | curator |
-| Staleness for `--if-stale` | 12h | D8 |
+| Staleness for `--if-stale` | 12h **OR** a backlog of `PLAN_TRIGGER_RAWS` | D8 |
+| PLAN_TRIGGER_RAWS | 3 | curator (`--if-stale` count arm; G19) |
 | Node name | `<project>-status` | curator |
 | Brain call timeout / retries | 120s / 1 retry (timeout, 5xx, parse) | brain |
 | PLAN_PAYLOAD_MAX_BYTES | 262144 | curator (final serialized request, UTF-8 bytes) |
+| PLAN_MAX_RAWS | 3 | curator (raws per plan batch; second ceiling, G19) |
 | distill | `auto` | curator (§2.0; `auto` = distill when `transcript_path` resolves, else `off`) |
 | DISTILL_CHUNK_CHARS / MAX_DISTILL_CHUNKS | 200000 / 5 | curator (§2.0 distill) |
 | DIGEST_MAX_CHARS | 6000 | curator (§2.0 distill; enforced in code) |
@@ -851,8 +857,10 @@ timeout_seconds = 120
 
 [curate]
 stale_hours = 12
+plan_trigger_raws = 3            # backlog size that also arms --if-stale; OR'd with stale_hours
 tombstone_grace_days = 14
 plan_payload_max_bytes = 262144
+plan_max_raws = 3                # SECOND batch ceiling beside the byte budget; first to bind wins
 distill = "auto"                 # auto | off  (§2.0; auto = distill when transcript_path resolves)
 distill_chunk_chars = 200000
 

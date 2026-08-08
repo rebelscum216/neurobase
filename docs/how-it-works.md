@@ -528,6 +528,188 @@ Functions:
 - `core/projects.py` imports `SLUG_RE` and `InvalidSlugError` from `core/store.py`, reusing the store's slug grammar/exception rather than redefining it, and calls out to the `git` binary via `subprocess`.
 - Downstream, the curator engine, scribes (Claude/Codex), hooks, the recommender (`recommender/miner.py`, `recommender/ranker.py`, `recommender/proposals.py`, corpus loader), the MCP server, and the CLI all call into `core/store.py`'s `resolve_root`/`ensure_tree`/`write_raw`/`list_raw`/`mark_consumed`/`upsert_curated`/`list_curated`/`soft_delete_curated`/`prune_tombstones`/`write_node`/`rebuild_index` rather than touching the filesystem directly — this module is the sole authority on tree layout and write atomicity. `core/projects.py`'s `resolve_project`/`register_project` are what hooks and the CLI use to turn "what directory am I in" into the project slug that scopes all of the above. `RecommendConfig` fields feed the Phase 8 recommender's corpus loader, miner, and ranker (spec §12.4–§12.9), and `McpConfig.expose_resources` gates the MCP server's resource exposure (spec §13).
 
+## The store chokepoint and the concurrency primitives
+
+Four modules under `src/neurobase/core/` that own *who may touch the store* and *who may write to it at once*. `store_handle.py` is the ADR-0015 chokepoint every store path must pass; `lock.py` and `locks.py` are two different locks with two different jobs (a genuine source of confusion — the distinction is drawn below); `process_guard.py` is the one-bit marker that lets Neurobase recognize the agent CLIs it launched itself.
+
+### `core/store_handle.py`
+
+Purpose: the **store chokepoint** (ADR-0015). `open_store()` is the single place the D11 schema guard lives — spec §10's *"refuse to operate on a schema newer than the binary"* — and it hands back a `StoreHandle` carrying the validated root. Because a handle *returned by* `open_store()` is proof the schema was already checked, a call site obtaining its handle that way cannot forget the guard, which is the defect recorded as **G1**.
+
+```python
+class StoreMode(Enum):
+    READ = "read"; WRITE = "write"; DOCTOR = "doctor"; MIGRATE = "migrate"; PURGE = "purge"
+```
+The mode governs both whether `open_store()` may **create** `store.toml` and how it treats a schema it does not support:
+
+| Mode | Creates `store.toml`? | On a newer schema |
+|---|---|---|
+| `READ` | no — absent means *uninitialized* (`schema is None`), not an error | raises `UnsupportedSchemaError` |
+| `WRITE` | **yes**, on first use | raises |
+| `DOCTOR` | no | **opens anyway**, carrying the newer integer so the caller can *report* rather than refuse (D26) |
+| `MIGRATE` | yes | raises — reserved as the schema-2 seam (ADR-0016 D31); no migration logic lives here yet |
+| `PURGE` | no | **opens regardless, even on unreadable metadata** (D25) — deleting a store you cannot parse is the safe escape hatch *from* one |
+
+Requiring `WRITE` is what closes G1's `init --guided` mutate-before-guard hole: the guard runs before the handle is returned, so a write path that opens its handle the supported way cannot mutate ahead of the check.
+
+🔴 **The handle is not unforgeable, and the source says so explicitly.** `StoreHandle.__post_init__` rejects direct construction without a private `_CONSTRUCTOR_TOKEN`, which stops *accidental* construction — and that is the whole of what it provides. A determined in-process caller has at least three routes: `_make` is module-level and importable and holds the token; the token itself is importable; and `dataclasses.replace()` on a legitimate handle copies the token, so root, mode and schema can all be retargeted. An earlier revision of that comment claimed mechanical unforgeability and was **withdrawn** rather than patched (Codex `P2-SAFETY-SECURITY-013`). What is true and load-bearing: `open_store()` is the supported entry point, every production caller uses it, and `scripts/check_store_chokepoint.py` catches the ordinary relapse. The hard boundary is ADR-0015's *deferred* signature-removal step, not Python privacy.
+
+**Accessors.** The handle exposes the `core.store` API with the `root` argument dropped — `memory_dir`, `ensure_tree`, `raw_path`, `write_raw`, `list_raw`, `mark_consumed`, `upsert_curated`, `list_curated`, `list_tombstoned`, `soft_delete_curated`, `prune_tombstones`, `write_node`, `rebuild_index` — each delegating to the root-taking function beneath it. Those functions still exist because step 4's other half is deferred.
+
+```python
+def contains(self, path: Path) -> bool
+def _require_within_store(self, path: Path) -> None
+def mark_consumed(self, path: Path, *, expect_digest: str | None = None) -> Path | None
+```
+⭐ **`mark_consumed` is the one accessor that takes a full path rather than building one from `self.root`, so it must prove containment** — otherwise a handle for one store could mutate a raw under another, unvalidated store, which is the exact boundary ADR-0015 closes. `contains` resolves **both** sides, so `..`, an absolute path, or a **symlink** cannot smuggle a target outside the tree, while a store whose own root is reached through a symlink (macOS `/var` → `/private/var`) still matches. It **fails closed**: a `resolve()` that raises — a symlink loop (`RuntimeError`) or an unreadable parent (`OSError`) — counts as *not contained* rather than letting the error escape, which keeps filtering consumers fail-soft (spec §13) instead of turning a hostile entry into a 500 or an MCP `ToolError`.
+
+**Registry accessors** (`load_registry`, `register_project`, `resolve_project`, `registry_is_contained`) are deliberately **plain delegates**. Containment was briefly guarded here and that was the wrong altitude: `resolve_project` and `register_project` delegate to raw-root functions that call the *low-level* `projects.load_registry`, so an external registry read as `{}` through one method while still resolving the attacker-selected slug through the next. ⭐ **A guard on one method of three is a guard on one caller.** Containment therefore lives at the `core.projects` accessor boundary, which every registry read in the process reaches — including doctor's sanctioned no-handle fallback, which has no handle to guard. A second guard here could disagree with the one beneath it.
+
+```python
+def open_store(root: Path, mode: StoreMode = StoreMode.READ, profile: str | None = None) -> StoreHandle
+def _parse_schema(path: Path) -> int
+```
+`_parse_schema` **fails closed**: unreadable file, invalid TOML, or a `schema` that is missing or not an integer all raise `UnsupportedSchemaError` — a store whose own metadata is unreadable is one to refuse, exactly like one too new. (`bool` is an `int` subclass, so `schema = true` is rejected.) `open_store` validates only `store.toml`; `registry.toml` parseability is a separate fail-soft concern. The `profile` argument is carried onto the handle unchanged (ADR-0016 D28) — under schema 1 there is no profile registry to resolve against, so it is simply recorded.
+
+### `core/lock.py` — the per-project **write** lock
+
+Purpose: serialize every *mutating* pass over one project's store (curator, seed importer, MCP `memory_remember`) — ADR-0023 / **G4**. **Readers never take it.** The lockfile is `<memory_dir>/.lock`, a dotfile outside every store glob, so it is invisible to readers by construction.
+
+⭐ **Ownership is bound to an open OS handle** — `filelock.FileLock` selects `fcntl.flock` on POSIX and `msvcrt.locking` on Windows — and this is the entire design: the kernel decides who holds the lock, and it releases automatically when the holding process dies. **Killed holders therefore need no policy**: no stale-lock timeout, no PID liveness probe, no takeover race.
+
+That property is load-bearing, and it is why the module's first draft was **rejected**. That draft hand-rolled ownership as an `O_EXCL` lockfile carrying a token, with heartbeats and a stale-takeover protocol; review demonstrated that *check the token, then mutate the path* is not mutual exclusion — a stale holder's heartbeat could `os.replace` over a successor's lock, a stale `release()` could unlink a successor's lock, and an empty lockfile left by a crash in the create/write window wedged `acquire()` in an infinite loop that never reached its deadline. Binding ownership to a handle deletes that entire class of bug along with the machinery that produced it.
+
+```python
+DEFAULT_TIMEOUT = 30.0
+LOCK_NAME = ".lock"
+class LockContended(RuntimeError)   # a non-blocking acquire lost
+class LockTimeout(RuntimeError)     # a blocking acquire ran out of time
+def lock_path(memory_dir: Path) -> Path
+@contextmanager
+def project_lock(memory_dir: Path, *, blocking: bool = True, timeout: float = DEFAULT_TIMEOUT) -> Iterator[FileLock]
+```
+`blocking=True` (user-intent operations) waits up to `timeout` then raises `LockTimeout`; `blocking=False` (the detached `curate --if-stale`) raises `LockContended` immediately so a background freshness pass **skips rather than queues**. ⚠️ Each call builds a *fresh* `FileLock` instance, so although `FileLock` is re-entrant per instance, a nested acquire in the same process blocks like any other contender — **passes must not nest**.
+
+**Why this module takes a `memory_dir` and not a `root`+`project` pair:** resolving `memory_dir(project, root)` itself would be a second, unvalidated way to name a store path — exactly what the chokepoint prevents — and would need a CI-guard exemption. The caller passes the directory it already got from its handle.
+
+```python
+def write_raw_guarded(handle: StoreHandle, project: str, **kwargs: Any) -> Path
+```
+⭐ **The scribe capture path, and a neat resolution of two conflicting requirements.** Scribes run inside agent hooks, so they can neither block on the lock nor fail when it is held (ADR-0003 latency budget, exit 0 always) — but they must never overwrite a raw a curator is mid-consume on, because `mark_consumed` reads a raw then writes it back, and a scribe landing between those two steps loses its capture outright. So: try the lock **non-blocking**. Winning proves no pass is in flight and the ordinary session-keyed overwrite is safe; losing means a pass may be consuming this very file, so it writes a *fresh* filename (`unique=True`) and leaves the contended path untouched.
+
+⚠️ **The contended write re-stamps `captured_at` to now** rather than reusing the caller's key: Codex passes its session-start time, so reusing it would name a brand-new capture with an hours-old timestamp and sort it among stale raws, breaking `list_raw`'s oldest-first contract corpus-wide (`P1-CORRECTNESS-006`).
+
+### `core/locks.py` — the **single-flight** curate lock
+
+A different lock for a different question, and the naming is the trap: `lock.py` (singular) answers *"may I write to this project's store?"*; `locks.py` (plural) answers *"is another curate pass already running for this project?"*. They layer — `cli.curate` takes the single-flight lock first, and the pass then takes the write lock inside it — because the write lock excludes scribes too, while single-flight only excludes other curators.
+
+```python
+def try_file_lock(path: Path) -> Iterator[bool]        # contextmanager, yields whether it was acquired
+def curate_lock_path(handle: StoreHandle, project: str) -> Path   # <memory_dir>/.locks/curate.lock
+def try_curate_lock(handle: StoreHandle, project: str) -> AbstractContextManager[bool]
+```
+Unlike `lock.py` this one calls `fcntl.flock` / `msvcrt.locking` directly rather than through `filelock`, and it **yields a boolean instead of raising** — the caller decides what a lost race means (`cli.curate` prints "Curate already running for project …; skipping." and returns). The same kernel-ownership property holds: the lock file stays on disk, but ownership is tied to the open descriptor and is released automatically if the process exits or crashes. On Windows `_try_lock` first writes a single byte if the file is empty, because `msvcrt.locking` locks a byte range and needs a byte to lock.
+
+### `core/process_guard.py`
+
+Nineteen lines, one bit of state, and it exists because Neurobase shells out to the same agent CLIs that invoke Neurobase.
+
+```python
+INTERNAL_CALL_ENV = "NEUROBASE_INTERNAL_CALL"
+def internal_call_env() -> dict[str, str]   # os.environ.copy() + the marker set to "1"
+def is_internal_call() -> bool              # os.environ.get(...) == "1"
+```
+⭐ **This is recursion protection, and the loop it breaks is real.** The curator's brain backends shell out to the very agents whose hooks invoke Neurobase: `brain/claude_cli.py:100`, `brain/codex_cli.py:78` and `brain/select.py:44` all pass `env=internal_call_env()`. Without the marker, a curate pass launching `claude -p` would start a Claude session, whose `SessionStart`/`SessionEnd` hooks would capture a raw and spawn another curate pass, which would launch `claude -p` again.
+
+The single consumer is the hook dispatcher itself — `run_hook` (`cli/__init__.py:1543`) returns immediately when `is_internal_call()` is true, before parsing argv or reading stdin. So the guard is enforced at the one entry point every hook event funnels through, rather than at each of the events. The marker is inherited by the whole child process tree, which is the point: the depth of nesting does not matter, only whether *this* process descends from a Neurobase-launched CLI.
+
+## `core/capabilities.py` — what a build advertises about its own safety
+
+Purpose: let `doctor` tell **source-tree hardening** from **deployed hardening**. The module exists because of a recurrence: on 2026-07-27 both `SessionStart` hooks invoked a shim built 2026-07-09 that contained none of the hardening added after the 2026-07-17 runaway — no single-flight curate lock, no reentrancy guard, no automatic-pass budget. The runaway recurred, and `doctor` reported **all-green throughout**, because it verified that the hook command *string* matched the shim path and never that the shim contained the safety code it depends on.
+
+**Three design rules, each load-bearing:**
+
+1. ⭐ **Name behavioral invariants, never modules.** `"contains core/locks.py"` rots the moment a guard moves file, and a module's presence is not evidence that its behavior holds. Each capability name is a *contract* bound to a test that exercises the behavior, so the manifest cannot drift from reality without the suite failing.
+2. ⭐ **The requirement comes from the diagnosing build, never the artifact under test.** A stale build asked whether it is safe will answer yes — it cannot report a guard it has never heard of. So `doctor` takes `REQUIRED_FOR_STARTUP_HOOK` from *itself* and reads only what the other install *provides*. A build predating this module ships no manifest at all, which is the signal: **absence is unfakeable in the safe direction.**
+3. 🔴 **Read the artifact; never run it.** Capability evidence is a static JSON file inside the installed package. An earlier revision executed `<exe> capabilities` and was a genuine security defect — `doctor` would run any command named in a repo-local `.codex/hooks.json`, including one Codex itself never discovers, breaking doctor's read-only contract (spec §6). Reading a file cannot have side effects; spawning a process can, and validating after the fact is too late.
+
+```python
+MANIFEST_NAME = "capability_manifest.json"   # its ABSENCE identifies a pre-profile build
+HOOK_REENTRANCY_SUPPRESSION = "hook-reentrancy-suppression"
+CURATE_SINGLE_FLIGHT        = "curate-single-flight"
+AUTOMATIC_PASS_BUDGET       = "automatic-pass-budget"
+PROJECT_STORE_WRITE_LOCK    = "project-store-write-lock"
+REQUIRED_FOR_STARTUP_HOOK = frozenset({HOOK_REENTRANCY_SUPPRESSION, CURATE_SINGLE_FLIGHT, AUTOMATIC_PASS_BUDGET})
+```
+Note what is **not** in the required set: `PROJECT_STORE_WRITE_LOCK` is a capability a build may provide, but it is not part of the startup-hook gate. The gate is scoped to what makes *unattended spawning* safe — startup hooks are the only surface that starts work with no human in the loop, and capture hooks never spawn a curator.
+
+```python
+def describe() -> dict[str, Any]     # {"profile", "version", "provides"} — the `neurobase capabilities` payload
+PROFILE: str                          # from the packaged manifest, "unknown" if unreadable
+PROVIDES: frozenset[str]
+```
+⚠️ **Consumers compare `profile`, not `version`.** The package version is deliberately held constant across many source changes, so it cannot carry this signal. `_load_own_manifest` never raises — a damaged install must be *reportable*, and every consumer degrades to "provides nothing", which is the safe direction.
+
+```python
+def read_manifest(executable: str | Path) -> dict[str, Any] | None
+def provided_by(executable: str | Path) -> frozenset[str]
+def missing_for_startup_hook(provided) -> list[str]
+def own_executable() -> Path
+MAX_MANIFEST_BYTES = 64 * 1024
+```
+The read is bounded — the shipped manifest is ~200 bytes, and a generous ceiling still refuses to stream something unbounded that happens to sit at the manifest path.
+
+⭐ **The subtle part is resolving *which* `site-packages` backs a console script**, in `_interpreter_root`. pip and uv write `#!<env>/bin/python` atop every console script, so the shebang names the environment. **The root is taken lexically, without resolving symlinks — that is the whole point, not a shortcut**: a venv's `bin/python` is normally a symlink to some base interpreter, so resolving it discards the venv root whose `site-packages` is actually imported. Resolving here rejected the ordinary uv-tool layout and marked a correctly installed shim unsafe.
+
+Two non-answers are kept **distinct**, and only one withholds evidence:
+
+| Result | Meaning | Why |
+|---|---|---|
+| `_Shebang.ABSENT` | no shebang to read | a Windows `.exe` wrapper or unreadable file — the documented case, so directory convention is used instead |
+| `_Shebang.AMBIGUOUS` | a shebang we decline to vouch for | `#!/usr/bin/env python` names the *launcher*, not the interpreter (which Python it picks depends on run-time `PATH`, so `/usr/bin` is not an environment root and treating it as one would certify anything under `/usr`); a relative path; or an interpreter that is **not a Python** — `#!<env>/bin/sh` beside a planted manifest passed the root check and was certified, because the binding is to "the Python that imports the attesting package" |
+
+## `core/graph.py` — the session→fact provenance graph
+
+Purpose: a deterministic, LLM-free, **read-only** answer to "which conversations fed which memory". Nothing here writes and nothing here infers — every edge is already recorded on disk, in a curated fact's `provenance`/`supersedes` frontmatter (spec §1) or the curator's per-pass `fold` journal record (spec §2, ADR-0022) — and this module only joins those two records into nodes and edges.
+
+⭐ **The degradation ladder is the design.** Provenance targets outlive neither raw retention nor tombstone pruning, so a naive join loses edges exactly where the history is oldest. Following the ranker's D21 discipline, this reader **degrades to coarse, never fabricates, and never drops**:
+
+| # | Situation | Result |
+|---|---|---|
+| 1 | `raw/<file>` provenance entry, raw file on disk | session identity from its frontmatter → **resolved** edge |
+| 2 | Raw file gone, but the fold journal recorded that file's identity at consumption time | still a **resolved** edge, sourced from the journal |
+| 3 | Neither | filename grammar (`{ts}_{agent}_{sid8}.md`) parsed into a **skeleton** session node — edge kept, `resolved=False` |
+| 4 | A `supersedes` target present in neither `curated/` nor `.tombstones/` | a **ghost** fact node, same ladder |
+
+⚠️ **A skeleton node reports `session_id=None` rather than pretending.** `sid8` is a truncated, non-alphanumeric-stripped digest of the session id, not the id, so it cannot be widened back into one — and `parse_raw_filename` deliberately does not return it, handing back only `(captured_at, agent)`.
+
+🔴 **What is deliberately NOT rendered: run-granular edges.** The journal records which sessions a pass consumed *and* which facts it touched; joining those two would sprout 90 edges off one unattributed fact in a 90-raw backlog pass. Only `fold.edges` — the validated per-fact attribution — produces journal edges, and **an unattributed fact renders as an honest orphan**. Sentinel provenance produces no session edge either: `user-directed` and `seed:*` are not sessions (matching the ranker's `startswith("raw/")` filter), and `user-directed` membership instead marks the fact `pinned`.
+
+```python
+@dataclass(frozen=True)
+class SessionNode:  id: str; project: str; files: tuple[str, ...]; session_id: str | None
+                    agent: str | None; captured_at: str | None; resolved: bool
+@dataclass(frozen=True)
+class FactNode:     slug: str; project: str; status: str; pinned: bool
+                    updated_at: str | None; tombstoned: bool; resolved: bool
+@dataclass(frozen=True)
+class SessionFactEdge: session: str; fact: str; project: str; resolved: bool; source: str
+@dataclass(frozen=True)
+class FactFactEdge:    supersedes: str; superseded_by: str; project: str; resolved: bool; source: str
+@dataclass(frozen=True)
+class MemoryGraph:  sessions, facts, session_edges, fact_edges   # all tuples
+```
+`FactNode.status` is `active`, `tombstoned`, or `ghost`. An edge's `source` is `journal` or `frontmatter`, and **the journal wins when both record it** — journal-sourced pairs outlive both tombstone pruning and multi-generation supersession, which overwrites the `supersedes` frontmatter key.
+
+```python
+def memory_graph(handle: StoreHandle, project: str | None = None, *, include_tombstoned: bool = False) -> MemoryGraph
+```
+One project, or every registered project when `project is None`. One frontmatter parse per file per call — the webui's existing per-request re-read posture, with no cache to invalidate — and ordering is total and stable so callers can diff two graphs.
+
+⭐ **Fail-soft is scoped to the store, not to the caller**, and the distinction is deliberate. In the all-projects sweep, an unusable registry reads as empty and a slug whose tree is unreadable contributes nothing rather than taking down every other project's graph. But an **explicitly named** project that is not a valid slug still raises `store.InvalidSlugError` — swallowing that would turn a caller's typo into a silently empty graph, which is indistinguishable from a project that genuinely has no memory yet.
+
+**Layering.** `memory_graph` takes a `StoreHandle`, not a raw `root` — a *reader* that skipped the schema guard is exactly what the chokepoint exists to prevent. This module is legal in `core/` on the `core/search.py` precedent (it reads markdown, frontmatter and the filesystem, nothing more) and **must not import `recommender/`**, which would be an upward import. The fact→proposal half of the app's graph is composed in the webui route layer, which may legally import both core and the mid tier.
+
 ## Core utilities — redaction, linkify, backups, search
 
 This subsystem is four small, independent utility modules under `src/neurobase/core/` that sit on the write and read paths of the store rather than owning it. `redact.py` scrubs secret-shaped text before it is ever persisted; `linkify.py` runs after curation to weave curated facts and status nodes into Obsidian-navigable wikilinks; `backups.py` gives every config-file mutation (install/uninstall/accept) a disaster-recovery snapshot; `search.py` is the read-side keyword index backing the MCP `memory_search` tool. None of them own the on-disk tree — that's `core/store.py` — but each is invoked at a specific, well-defined point in the data flow: redact at capture time, linkify at curate time, backups at config-write time, search at query time.
@@ -967,6 +1149,59 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 - Re-exported from `neurobase.curator` (`src/neurobase/curator/__init__.py`) as `curate`, `is_stale`, `node_name`, `read_fact_count_trend` (its `__all__`).
 - Called by `src/neurobase/cli/__init__.py`'s `curate` command (the `neurobase curate` CLI, flags `--root`, `--if-stale`, `--dry-run`, `--resynth`, plus a hidden `--cwd` for testing), which wires `config.curate.stale_hours` + `config.curate.plan_trigger_raws` into `is_stale`, and `config.curate.tombstone_grace_days` + `config.curate.plan_max_raws` into `curate`, and by `spawn_curate_if_stale` (`src/neurobase/adapters/recall_common.py:112`), which the Claude and Codex recall adapters invoke opportunistically on session-start-type hooks to trigger a detached background `curate --if-stale` pass when memory has gone stale.
 - `read_fact_count_trend`'s fail-soft log-parsing pattern is explicitly named as precedent elsewhere in the codebase (`recommender/corpus.py:479`, `recommender/proposals.py:413`) for reading other JSONL logs defensively.
+
+### `curator/budget.py`
+
+Purpose: bound every automatic curation pass — **P0** from the 2026-07-17 Claude usage runaway. The lock, the internal-call marker and distill's systemic-failure breaker all bound *pathological* behavior; none of them bounds a **healthy** pass, and one curator holding the lock legitimately with no errors at all will process the entire unconsumed backlog. This module supplies the missing ceiling.
+
+⭐ **Exhaustion is a normal outcome, not a failure**, and the type hierarchy enforces that. `BudgetExhausted` is deliberately **not** a `BrainError`: a `BrainError` from `plan_json` means "abort, leave every raw unconsumed" (D9) and surfaces as `status: error`, which the CLI turns into **exit 1** — breaking the hooks-always-exit-0 guarantee. A budget stop instead leaves the remaining raws unconsumed and reports a bounded, retryable result.
+
+⭐ **Enforcement is structural, not conventional.** `Brain` is a two-method Protocol, so wrapping it means every brain call — *including a call site a future contributor adds* — must debit the ledger. There is no path around it short of deliberately unwrapping.
+
+```python
+DEFAULT_RESERVE_CALLS = 6
+
+@dataclass
+class PassBudget:
+    max_raws: int; max_brain_calls: int; max_brain_attempts: int
+    max_distill_chunks: int; max_seconds: int
+    reserve_calls: int = DEFAULT_RESERVE_CALLS
+    clock: Callable[[], float] = time.monotonic
+    # runtime, init=False: calls, distill_calls, deferred_raws, stopped_by, _started
+```
+`clock` is injectable so the wall-clock ceiling is deterministically testable, and defaults to `time.monotonic` **specifically so a system-clock adjustment mid-pass cannot extend or collapse the budget**. `__post_init__` rejects any non-positive ceiling, and rejects `reserve_calls >= max_brain_calls` — otherwise the distill allowance is zero or negative and every pass would skim-only, a silent and total loss of distillation.
+
+🔴 **Reserved calls prevent a livelock, and this is the subtlest rule in the module.** If distillation could spend the whole call budget, planning would never run, nothing would be consumed, and the next pass would replay the same prefix **forever** — a backlog that silently never drains. Distill is therefore capped at `max_brain_calls - reserve_calls` and degrades to deterministic skims when it hits that, exactly as it already handles a systemic backend failure (D16: distill never aborts a pass). Planning and synthesis always keep their reserve.
+
+```python
+def select_raws(self, docs: list[_T]) -> list[_T]
+```
+⭐ **Deferred raws are dropped *before* the pass begins**, so they never enter the batch loop and therefore can never be marked consumed. That makes "the rest stays unconsumed" a **structural property** rather than something every error path has to remember.
+
+```python
+def debit(self, *, distilling: bool) -> None
+```
+Charges one logical call or raises. The clock is checked first, then the distill ceilings (`max_distill_chunks`, then the reserve-limited allowance), then the plain call ceiling.
+
+⚠️ **`max_brain_attempts` is a worst-case bound, not an observed count.** `call_with_retry` lives *inside* each backend, below the `Brain` protocol, so a wrapper at this level cannot see a retry happen; one logical call can become `DEFAULT_RETRIES + 1` subprocesses, and that is what is charged — `(calls + 1) * (DEFAULT_RETRIES + 1) > max_brain_attempts` trips it.
+
+```python
+def summary(self) -> dict[str, int | str]     # budget_calls, budget_deferred_raws, budget_stopped_by
+def from_config(curate_cfg, *, automatic: bool) -> PassBudget
+def explicit_budget() -> PassBudget
+```
+`from_config` selects the tier by prefixing every knob with `auto_` when `automatic` is true — hook-triggered `curate --if-stale` gets the small ceilings, an explicitly typed `neurobase curate` the permissive ones. `budget_stopped_by` appears in the summary only when a ceiling actually stopped the pass, and names which one.
+
+```python
+class BudgetedBrain:
+    def for_distill(self) -> BudgetedBrain
+    @property
+    def usage(self) -> Any
+    def plan_json(self, system, user) -> dict     # debit, then delegate
+    def text(self, system, user) -> str           # debit, then delegate
+```
+Satisfies the `Brain` protocol structurally, so it drops in wherever a brain is passed. `for_distill()` returns a second view over **the same ledger**, charged against the distill allowance. `usage` delegates to the wrapped brain: every wrapper and every `for_distill()` view shares one inner brain, so token counters accumulate across the whole pass regardless of which view made the call — which is what makes a single per-pass total meaningful.
+
 
 ## Claude Code adapter — scribe, recall, installer
 
@@ -1822,6 +2057,106 @@ Imports `hashlib`, `neurobase.core.store`, `neurobase.core.config.{RecommendConf
 - `proposals.py`, `ranker.py`, and `metrics.py` all depend on `corpus.py` (not covered by this section) for `EvidenceRef`, `proposal_path`/`ledger_path`, `load_ledger_summary`, `is_near_duplicate`, and `load_corpus` — `corpus.py` is the shared read-side aggregator this whole subsystem builds on.
 - Redaction (`core/redact.py:redact`) is applied at two independent points in the write path — once in `proposals._write_one` before the initial `proposed` write, and again in `emitters.prepare` immediately before an accepted artifact is written — the spec §12.8 "belt-and-suspenders" redaction MUST, so a custom `[redact].extra_patterns` pattern added after a proposal was first written still can't leak into the eventually-installed artifact.
 - `metrics.py` never touches `ranker.py` directly except for the shared `_parse_iso` helper; it depends on `corpus.py` only for `_recurrence_reduction`'s corpus reload.
+
+## Web UI — the local review surface
+
+`src/neurobase/webui/` is a **peer of `cli/`**: both sit on top of `core`/`brain`/the mid tier, and neither imports the other (the layer contract's "no lateral import between edges" rule). The package is **lazily imported** by the CLI's `ui` command, so starlette, jinja2 and uvicorn never load on the hook fast path or any other command's cold start.
+
+It is server-rendered Jinja2 over the same `recommender` and `core` modules the CLI already uses — a second presentation layer, not new business logic. Five surfaces are live (Graph, Sessions, Memory, Suggestions, Skills); Status is a stub.
+
+### `webui/app.py` — the app factory
+
+```python
+def build_app(root: Path) -> Starlette
+def serve(root: Path, *, port: int = 8765) -> None
+def _store_root_label(root: Path) -> str
+```
+🔴 **`serve` hard-pins the bind to `127.0.0.1`** — never `0.0.0.0`, never unspecified — and there is deliberately **no `--host` flag**. This is the Phase 1 plan's stated security requirement, not a default.
+
+`build_app` wires three things that exist so no route handler has to remember them: `shell_context` as a Jinja **context processor** (the left rail is injected into every render, not threaded per-handler); `CSRF_FORM_FIELD` and `store_root_label` as Jinja **globals**, so the hidden form field name can never drift out of sync with the middleware that validates it; and the `humandate` filter. It also registers `unsupported_schema_handler` as an **exception handler** for `store.UnsupportedSchemaError`, so a store that advances past this binary's schema *after the server started* surfaces as a fail-safe typed page rather than a 500.
+
+`_store_root_label` collapses the store path to `~/…` when it is under the home directory, matching how every other Neurobase surface refers to a store.
+
+### `webui/security.py` — the §14 request gate
+
+Purpose: this is a local **write** surface, so every mutating request must prove it originated from the app's own page. No cookies, no sessions, no dependency beyond starlette. The token lives only in server memory (`app.state.csrf_token`) for the process lifetime — a restart invalidates every outstanding form, which is correct for a single-user local tool.
+
+```python
+CSRF_FORM_FIELD = "csrf_token"
+def new_csrf_token() -> str                       # secrets.token_urlsafe(32)
+def is_loopback_host(host: str | None) -> bool
+async def check_same_origin_csrf(request, csrf_token) -> str | None   # None = pass
+class CSRFMiddleware(BaseHTTPMiddleware)
+```
+
+🔴 **Binding the socket to loopback does not constrain the HTTP `Host` header, and that gap is a real attack.** Under **DNS rebinding**, a hostile page's own hostname resolves to loopback, its requests carry that hostname as `Host` *and* as a matching `Origin`, and the browser then treats the response as same-origin. So the boundary is enforced on the **header**, on every method, before routing. Loopback names cannot be rebound; anything else is rejected.
+
+⭐ **The authority parser is strict on purpose, and every detail of its strictness was earned:**
+
+| Choice | What it stops |
+|---|---|
+| full-string `fullmatch`, not `urlsplit().hostname` | lenient extraction tolerates `evil.example@localhost` (userinfo), `localhost/evil.example` (path suffix), `localhost:notaport` (junk port) |
+| `fullmatch` rather than a `$` anchor | `$` matches *before* a trailing newline, letting `"localhost\n"` through |
+| compiled `re.ASCII` | case-insensitivity could otherwise Unicode-fold a lookalike (`localhoſt`) onto `localhost` |
+| port class `[0-9]`, not `\d` | non-ASCII decimal digits (`１２３`) would count as numeric |
+
+⚠️ **`check_same_origin_csrf` reads `request.body()` *before* `request.form()`, and the order is load-bearing.** Starlette's `BaseHTTPMiddleware` only replays a POST body to the downstream handler when `Request.body()` has populated `request._body`; a bare `await request.form()` drains the ASGI receive stream directly without setting it, so the route handler's own later `await request.form()` would see an **empty body and lose every field** but the one this check happened to read. Priming the cache keeps the middleware side-effect-neutral for every handler.
+
+The `Origin` check falls back to `Referer` (some browsers omit `Origin` on same-origin form submissions), and a malformed value is an ordinary 403 rejection rather than an exception surfacing as a 500. The middleware reads the token from `request.app.state.csrf_token` **at dispatch time** rather than capturing it at construction, so it stays correct regardless of when Starlette builds its lazy middleware stack.
+
+### `webui/routes.py` — the route table
+
+```python
+def graph_routes() / suggestions_routes() / sessions_routes() / memory_routes() / skills_routes()
+def all_routes() -> list[Route]
+```
+GET handlers are all side-effect-free — safe to retry, safe to prefetch. Mutating actions are POST, and because `CSRFMiddleware` rejects a failing POST before any handler runs, handlers do not re-check it; they **re-derive server-side state instead** (`install.prepare_install` is re-run fresh inside the POST accept handler rather than trusting anything computed during the earlier GET preview).
+
+⭐ **The schema guard runs at the *request* boundary, not once at startup**, via two helpers that differ only in mode:
+
+```python
+def _read_root(request) -> Path    # open_store(..., READ)  — never creates store.toml
+def _write_root(request) -> Path   # open_store(..., WRITE) — runs before any proposal/ledger write
+```
+A long-running server that started on a supported store therefore still refuses to *mutate* forward-schema state after the on-disk store advances under it. A stale link to a proposal in a non-editable status gets a clean 409 at the request boundary — the authoritative guard lives inside the locked `proposals.save_edited_draft`, and the route-level check is the friendly early message, single-sourced from there.
+
+### `webui/graph_view.py` — presentation half of the graph
+
+`core/graph.py` is deliberately identity-only. This module is the other half: it adds the node kinds Slice A does not model — **proposals/skills**, walked from `proposals.load_all_proposals` and resolved through the same `EvidenceRef`/`resolve_evidence` pair the Suggestions detail page uses — and derives **display** fields (session title, prompts-kept count, fact snippet) that Slice A has no business knowing about.
+
+```python
+_TITLE_MAX = 72; _SNIPPET_MAX = 240
+def graph_payload(...)      # nodes + edges for the canvas
+```
+⭐ **Node ids are namespaced by kind (`s:`/`f:`/`p:`) and, for the two project-scoped kinds, by project** — two projects may each hold a fact named `ci-gate`, and they are different nodes. Everything is read-only and fail-soft: this renders the app's *home* page, so one unreadable project, one malformed proposal or one absent raw file must degrade a node's **label**, never 500 the surface. Display text is passed through `redact` before it reaches a template.
+
+### `webui/shell.py` — the app shell
+
+```python
+_NAV: list[tuple[str, str, str, str, bool]]   # key · label · glyph · href · enabled
+def shell_context(request) -> dict[str, Any]
+def _counts(root: Path) -> dict[str, int]
+```
+The left-rail nav plus live counts, injected by the context processor registered in `app.py`. A surface becomes a real nav link the moment its route lands — flip its `_NAV` entry to `enabled=True`; until then it renders as an inert "soon" stub, **never an `<a>` that could 404**. Counts are raw captures (Sessions), active curated facts (Memory), pending proposals (Suggestions) and accepted proposals (Skills), read through a validated READ handle. ⚠️ **Every read is fail-soft per project**, because this runs on *every* page render: one broken project must degrade the rail's counts, never turn the whole chrome into a 500.
+
+### `webui/skills_scan.py` — the Skills gallery's discovery
+
+```python
+@dataclass(frozen=True)
+class InstalledSkill: ...
+def user_skills_root() -> Path
+def discover_skills(handle) -> list[InstalledSkill]
+```
+Discovers `SKILL.md` skills across **user scope** (`~/.claude/skills`) and each registered project's `<root>/.claude/skills`, so the gallery shows every skill on the machine rather than only the ones Neurobase installed. Neurobase-owned skills carry `neurobase_managed`/`neurobase_slug` frontmatter (`recommender/emitters.py`); everything else is **external** — hand-authored, or installed by another tool. It only reads and never touches the store, so it sits outside the ADR-0015 chokepoint by construction. Its frontmatter regex is deliberately more tolerant than the store's `_DOC_RE` (BOM, whitespace around fences, no required blank line) because it parses files Neurobase did not write.
+
+### `webui/filters.py` and `webui/templates/`
+
+```python
+def human_datetime(value: Any) -> str     # registered as the `humandate` Jinja filter
+```
+Renders an ISO-8601 timestamp as a date over a time (`July 15, 2026` / `1:20pm`). ⚠️ **It composes the day, hour and meridiem by hand rather than using `strftime('%-d')`/`'%-I'`** — the no-pad directives are POSIX-only and **raise on Windows, where CI also runs**. An empty value renders as `—`; an **unparseable one is shown verbatim** rather than hidden, so a malformed timestamp stays visible. It returns `Markup` because the two-block output is intentional markup, with both parts escaped.
+
+Templates live in `webui/templates/` — `base.html` plus per-surface pages and `_`-prefixed partials (`_suggestion_card.html`, `_memory_pane.html`, `_two_pane_script.html`, …) shared by the list/detail two-pane surfaces.
 
 ## Test suite — how the contracts are enforced
 

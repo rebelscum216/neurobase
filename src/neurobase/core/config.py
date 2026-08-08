@@ -69,11 +69,32 @@ class CurateConfig:
     # consumed, 200 unconsumed), not a guess. Those 200 spread over five days:
     # 165 landed on 2026-07-17 (the incident), the other four days ran 1-18.
     # So a normal day is single-to-low-double digits and the runaway was ~10x
-    # that; 40 sits well above the former and decisively below the latter.
-    auto_max_raws: int = 40
-    # 40 distill + <=4 plan batches + 1 synthesis = 45, plus headroom. Measured
-    # bodies are median 1482 / p90 4028 / max 13926 chars against a 200k chunk
-    # size, so no raw in this store chunks and each costs exactly one call.
+    # that.
+    #
+    # Lowered 40 -> 18 on 2026-08-07, because `plan_max_raws = 3` (G19) changed
+    # what a raw COSTS: batches are now ceil(raws/3), so 40 raws needs ~55 brain
+    # calls against a ceiling of 50 — a tier that could not complete itself. The
+    # ceilings are the fixed points here and the tier is sized to FIT them, not
+    # the reverse: a detached background pass that can run 40 minutes on a laptop
+    # is a worse failure than a bounded `partial`, and `partial` loses nothing
+    # (remaining raws stay unconsumed and any later pass retries them).
+    #
+    # 18 is the measured shape: `baysis-dev` spent its whole 900s on 25 calls,
+    # and 18 raws is exactly 25 calls by the model below. The session-end trigger
+    # keeps real backlogs well under this in any case.
+    auto_max_raws: int = 18
+    # 18 distill + ceil(18/3) = 6 plan batches + 1 synthesis = 25, plus headroom.
+    #
+    # Read the first term as an UPPER bound on the mixture, not a conversion:
+    # `_distill_one` spends zero calls on five paths (v1 raw, vanished transcript,
+    # digest cache hit, unsupported renderer, empty render) and more than one when
+    # a *rendered transcript* chunks — the raw body is not what chunks (G12). The
+    # terms that are exact are the plan batches, which `plan_max_raws` fixes at
+    # ceil(raws/3), and the single synthesis call.
+    #
+    # `test_config.py::test_auto_tier_admits_a_full_pass` pins this arithmetic, so
+    # changing `auto_max_raws` or `plan_max_raws` without re-deriving the ceiling
+    # fails the gate rather than silently shipping a tier that cannot finish.
     auto_max_brain_calls: int = 50
     # Worst-case subprocesses, enforced as calls x (DEFAULT_RETRIES + 1) because
     # `call_with_retry` sits inside each backend, below the Brain protocol.
@@ -82,12 +103,26 @@ class CurateConfig:
     # binds first in every case measured here. This catches transcripts growing
     # far beyond anything currently in the store.
     auto_max_distill_chunks: int = 60
-    # A healthy 40-raw pass is estimated at 4-10 min (per-call latency is NOT
-    # measured — an open item). 15 min leaves margin without letting a detached
-    # background curator run unbounded.
+    # 15 min, unchanged — it is now the constraint the raw ceiling was sized to
+    # fit rather than an estimate of a 40-raw pass. The one real datapoint: a
+    # `baysis-dev` pass spent 900s on 25 calls (~36s/call, n=1, a shared machine),
+    # which is the same 25 calls an 18-raw pass costs. So a full auto pass is
+    # expected to run CLOSE to this ceiling, and hitting it stays a normal
+    # bounded `partial` rather than a fault.
     auto_max_seconds: int = 900
     # Explicit tier: one typed command drains the current 200-raw backlog.
-    max_raws: int = 250
+    #
+    # 250 -> 200 for the same reason the auto tier moved (2026-08-07): at
+    # ceil(raws/3) batches, 250 raws needs ~335 calls against a 280 ceiling,
+    # where before G19 it needed ~255 and fit. 200 raws = 200 distill + 67 plan
+    # + 1 synthesis = 268, inside the ceiling, and it is exactly the backlog this
+    # tier was written to drain.
+    #
+    # ⚠️ Not claimed: that a 200-raw pass finishes inside `max_seconds`. At the
+    # one measured latency (~36s/call, n=1) 268 calls is far past 3600s, so the
+    # CLOCK is expected to bind first on a full explicit drain — as it already
+    # did before G19. This change fixes the call arithmetic only.
+    max_raws: int = 200
     max_brain_calls: int = 280
     max_brain_attempts: int = 560
     max_distill_chunks: int = 320

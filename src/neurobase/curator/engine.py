@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from neurobase.brain.base import Brain, BrainError, combine_prompt
-from neurobase.core import linkify, lock, store
+from neurobase.core import linkify, lock, spawn_marker, store
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 from neurobase.curator import budget as budget_mod
 from neurobase.curator import distill as distill_mod
@@ -340,6 +340,20 @@ def _log_pass(
     mem = handle.memory_dir(project)
     mem.mkdir(parents=True, exist_ok=True)
     record = {**summary, "at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}
+
+    # Abandoned intent markers are swept HERE, at the one chokepoint every
+    # reported outcome passes through, because the sweep and the count that
+    # records it must not be able to land separately: clearing doctor's alarm
+    # while losing the number would delete the only durable evidence that a
+    # spawned pass died, which is the silence this whole mechanism exists to end.
+    # A *preview* sweeps nothing — a dry run may not mutate the store (G13), and
+    # its records are marked, so the guard reads the record rather than a flag
+    # threaded through five call sites.
+    if summary.get("dry_run") is not True:
+        swept = spawn_marker.sweep(handle, project)
+        if swept:
+            record["abandoned_spawns"] = swept
+
     if fold is not None:
         record["fold"] = fold
     if distill_detail:

@@ -166,9 +166,15 @@ This is the core value loop, and it runs without you thinking about it.
    status node. The load-bearing safety rule: if the plan won't parse, the raws
    stay **unconsumed** so nothing is silently lost (D9). Distill failures are
    weaker: they degrade that raw to its skim and never abort the pass (D16).
-   Curation is triggered opportunistically — the SessionStart hook spawns a
-   detached `curate --if-stale` (D8) so it never delays the session that
-   triggered it.
+   Curation is triggered opportunistically at **both ends of a session** — the
+   SessionStart hook spawns a detached `curate --if-stale` (D8), and `neurobase
+   wrap` spawns the same pass after writing its authored digest — so it never
+   delays the session that triggered it. The session-end trigger is what removes a
+   one-session lag: the start-of-session spawn races that same session's own
+   injection and typically lands for the session *after*, whereas folding at the
+   end means the next session's injection reads a store that is already current.
+   Because the pass is detached it is also unobservable, so every spawn records an
+   **intent marker** first (`core/spawn_marker.py`) — G21.
 
 3. **Recall.** At the next session start, the **recall** module resolves the
    project from the cwd, assembles its status nodes (alphabetical, capped at 6000
@@ -491,7 +497,7 @@ Purpose: loads the single user-editable `config.toml` (spec §10). Every key is 
 Dataclasses (each field has a tuned default, all overridable via TOML):
 - `StoreConfig`: `root: str = "~/neurobase"`.
 - `BrainConfig`: `backend: str = "auto"`, `model: str = "claude-sonnet-5"`, `timeout_seconds: int = 120`.
-- `CurateConfig`: `stale_hours: int = 12`, `plan_trigger_raws: int = 3`, `tombstone_grace_days: int = 14`, `plan_max_raws: int = 3`.
+- `CurateConfig`: `stale_hours: int = 12`, `plan_trigger_raws: int = 3`, `tombstone_grace_days: int = 14`, `plan_max_raws: int = 3`, `auto_max_raws: int = 18`, `max_raws: int = 200` — the two raw ceilings are sized so a full pass fits its call ceiling at `ceil(raws/plan_max_raws)` plan batches, an invariant pinned by `tests/test_config.py::test_auto_tier_admits_a_full_pass`.
 - `InjectConfig`: `max_chars: int = 6000`, `sources: list[str]` defaulting (via `field(default_factory=...)`) to `["startup", "clear"]`.
 - `RedactConfig`: `extra_patterns: list[str]` defaulting to `[]` — extra regex strings appended to the built-in redaction table (spec §10).
 - `McpConfig`: `expose_resources: bool = False` — dual-exposure of nodes as MCP resources (Phase 7, decision D-d); off by default because the MCP tool baseline is universal while resources are Claude-only sugar — `resources/list` validly returns `[]` when off.
@@ -730,6 +736,41 @@ Invariants / gotchas:
 - All four modules avoid raising on "expected" bad input where practical (linkify's non-frontmatter files, search's fail-soft registry/slug handling) but `backups.restore_backup` is intentionally strict/fail-loud, since a partial or wrong restore is a worse outcome than an aborted one for a disaster-recovery path.
 - `redact.py` and `search.py` are pure functions/generators with no filesystem writes; `linkify.py` and `backups.py` perform atomic writes (`tmp` file + `Path.replace`/`shutil.copy2` respectively) to avoid partial-file corruption on interruption.
 
+
+### `core/spawn_marker.py`
+
+Purpose: make a **detached** curate pass observable (G21). A pass spawned by a hook or by `neurobase wrap` runs in its own session with all three stdio streams pointed at `/dev/null`; if it dies before reaching `_log_pass` — killed, OOM, the machine sleeping, a crash in argument parsing — it writes nothing at all, and no reader can tell that apart from "no pass was ever spawned." That is G16's defect (silence) one layer down, and the marker is what closes it. Markers live in `<memory_dir>/.curator-spawns/<spawn_id>.json`, a dotfile directory outside every store glob (`curated/*.md`, `nodes/*.md`, `.tombstones/*.md`), so no store reader sees them.
+
+**Every function takes a `StoreHandle`, never a raw root** — ADR-0015 step 5, enforced by `scripts/check_store_chokepoint.py`, which fails the gate on a raw-root `store.memory_dir(...)`. Each caller already holds a handle, so this costs nothing.
+
+```python
+SPAWN_DIR = ".curator-spawns"
+ABANDONED_AFTER_SECONDS = 3600
+```
+The grace window is sized *above* the auto tier's own ceiling (`auto_max_seconds` = 900s) plus room for one brain call hanging to its timeout, so a **slow** pass is never reported as a **dead** one. Deliberately not a config knob: it is a reporting threshold derived from another setting, and a second tunable that must stay above the first is an inconsistency waiting to be filed.
+
+```python
+def write(handle: StoreHandle, project: str, *, trigger: str) -> str | None
+```
+Records `{spawn_id, at, trigger, project, pid}` and returns the id. Called by the spawner **before** `Popen`. Best-effort: any `OSError` returns `None` and the caller spawns unmarked, because failing to write bookkeeping must never stop the pass being attempted. `pid` is recorded for a human reading a report and is **never** consulted to decide abandonment — a recycled pid must not be able to resurrect a dead pass.
+
+```python
+def clear(handle: StoreHandle, project: str, spawn_id: str) -> None
+```
+Unlinks one marker — the child's own — and never raises. 🔴 **The child calls this in a `finally`, not on the success path.** Three returns in `cli.curate` journal nothing at all: "Curate already running", "Not stale — nothing to curate", and the missing-brain exit. Resolving a marker by looking for a pass record would therefore report an abandoned pass after *every ordinary hook fire on a fresh store*, and a check that fires on the healthy path is a check nobody reads.
+
+```python
+def abandoned(handle, project, *, older_than_seconds=ABANDONED_AFTER_SECONDS, now=None) -> list[dict]
+```
+Markers older than the window. A record whose own `at` is missing or unparseable falls back to the file's **mtime**, so a corrupt marker cannot make an abandoned pass invisible — the same rule `_read_curator_log` follows: history we cannot vouch for is a diagnosis, never a silent pass. Read by `doctor`'s `curate spawns` check (`cli/diagnostics.py`).
+
+```python
+def sweep(handle, project, *, older_than_seconds=ABANDONED_AFTER_SECONDS, now=None) -> int
+```
+Clears abandoned markers and returns the count. Called from `_log_pass` (`curator/engine.py`) — the one chokepoint every reported outcome passes through — so the sweep and the `abandoned_spawns` count that records it cannot land separately. **A dry run sweeps nothing**: `_log_pass` guards on `summary.get("dry_run") is not True`, because a preview may not mutate the store (G13). Clearing the alarm therefore never destroys the evidence; the count survives in the journal.
+
+**No liveness probe, no takeover protocol.** `core/lock.py` records at length why this codebase does not hand-roll staleness for *mutual exclusion*; a marker is not exclusion, it is a report, so a plain age threshold is the entire policy, and the worst case of a pathologically slow pass is one self-clearing `warn`.
+
 ## Brain — provider-independent LLM backends
 
 The `brain/` package is Neurobase's execution-backend abstraction for every LLM call the system makes: it defines a single provider-independent contract (`Brain`) with two operations — `plan_json` for the curator's structured plan step and `text` for node synthesis — and three concrete implementations that satisfy it by shelling out to the user's own logged-in `claude`/`codex` CLIs or by calling the Anthropic Messages API directly. It sits between the callers that need "ask the model something" (`curator/engine.py`, `recommender/miner.py`, the `neurobase doctor`/`run` CLI commands) and the actual model invocation, so those callers never know or care which backend is in play. Backend choice is resolved once per run via `select.resolve_brain`, honoring `[brain].backend = auto | claude-cli | codex-cli | anthropic-api` in `Config` (decision D9, build-plan). Every backend enforces the same tuned defaults (120s timeout, 1 retry) and the same fail-soft rule: a plan-JSON parse failure that survives its retry raises `BrainError`, which the curator treats as "abort the pass, leave every raw unconsumed."
@@ -834,7 +875,7 @@ Because detection (`select.py`) is re-run on every `resolve_brain` call rather t
 
 ## Curator — the thinking loop
 
-The curator is the subsystem that turns raw, noisy captures from coding-agent sessions into a small, current, non-redundant set of curated facts, then synthesizes those facts into a single skimmable "status node." It sits downstream of the scribes (which write to `raw/`) and upstream of recall (which injects the synthesized node at `SessionStart`); it is also invoked opportunistically by the recall adapters via `spawn_curate_if_stale` (`src/neurobase/adapters/recall_common.py:112`), and directly by the `neurobase curate` CLI command. Its entire read/write surface is the on-disk store contract in `neurobase.core.store`, and it delegates all LLM calls to an injected `Brain`, keeping the whole apply pipeline testable offline with a fake brain.
+The curator is the subsystem that turns raw, noisy captures from coding-agent sessions into a small, current, non-redundant set of curated facts, then synthesizes those facts into a single skimmable "status node." It sits downstream of the scribes (which write to `raw/`) and upstream of recall (which injects the synthesized node at `SessionStart`); it is also invoked opportunistically by the recall adapters and by `neurobase wrap` via `spawn_curate_if_stale` (`src/neurobase/adapters/recall_common.py`), and directly by the `neurobase curate` CLI command. Its entire read/write surface is the on-disk store contract in `neurobase.core.store`, and it delegates all LLM calls to an injected `Brain`, keeping the whole apply pipeline testable offline with a fake brain.
 
 ### `src/neurobase/curator/distill.py`
 
@@ -965,7 +1006,7 @@ The single-file implementation of the spec §2 curator contract. Its module docs
 - Imports `neurobase.core.store` for the entire on-disk contract: `ensure_tree`, `list_raw`, `list_curated`, `upsert_curated`, `soft_delete_curated`, `prune_tombstones`, `mark_consumed`, `write_node`, `rebuild_index`, `memory_dir`, plus the `Document` type and `InvalidSlugError`.
 - Imports `neurobase.curator.distill` for the Tier-2 transcript digest pass before batching, and `neurobase.core.linkify` for `linkify.linkify(root, project)` as the last step of every synthesis, cross-linking the newly written node against curated facts/other nodes (spec §6).
 - Re-exported from `neurobase.curator` (`src/neurobase/curator/__init__.py`) as `curate`, `is_stale`, `node_name`, `read_fact_count_trend` (its `__all__`).
-- Called by `src/neurobase/cli/__init__.py`'s `curate` command (the `neurobase curate` CLI, flags `--root`, `--if-stale`, `--dry-run`, `--resynth`, plus a hidden `--cwd` for testing), which wires `config.curate.stale_hours` + `config.curate.plan_trigger_raws` into `is_stale`, and `config.curate.tombstone_grace_days` + `config.curate.plan_max_raws` into `curate`, and by `spawn_curate_if_stale` (`src/neurobase/adapters/recall_common.py:112`), which the Claude and Codex recall adapters invoke opportunistically on session-start-type hooks to trigger a detached background `curate --if-stale` pass when memory has gone stale.
+- Called by `src/neurobase/cli/__init__.py`'s `curate` command (the `neurobase curate` CLI, flags `--root`, `--if-stale`, `--dry-run`, `--resynth`, plus hidden `--cwd` (testing) and `--spawn-id` (the intent marker the detached spawner sets)), which wires `config.curate.stale_hours` + `config.curate.plan_trigger_raws` into `is_stale`, and `config.curate.tombstone_grace_days` + `config.curate.plan_max_raws` into `curate`, and by `spawn_curate_if_stale` (`src/neurobase/adapters/recall_common.py`), which the Claude and Codex recall adapters invoke opportunistically on session-start-type hooks — and which `neurobase wrap` invokes with `trigger="session-end"` — to trigger a detached background `curate --if-stale` pass when memory has gone stale. Every such spawn writes an intent marker (`core/spawn_marker.py`) **before** forking and passes its id down as a hidden `--spawn-id`; the child clears it in a `finally` on every exit path, and `doctor`'s `curate spawns` check reports any marker that outlives the grace window — the only way a detached pass that died before journaling anything is distinguishable from one that never ran (G21).
 - `read_fact_count_trend`'s fail-soft log-parsing pattern is explicitly named as precedent elsewhere in the codebase (`recommender/corpus.py:479`, `recommender/proposals.py:413`) for reading other JSONL logs defensively.
 
 ## Claude Code adapter — scribe, recall, installer
@@ -1092,7 +1133,7 @@ Key functions:
   ```
   This is the literal envelope spec §3 mandates, and per its comment, the "Same envelope for both Claude and Codex (ADR-0005)."
 
-- `spawn_curate_if_stale(root: Path, cwd: Path) -> None` — implements decision D8: after emitting recall context, fire off `neurobase curate --if-stale --root <root> --cwd <cwd>` as a **detached** background process (`subprocess.Popen([sys.argv[0], "curate", "--if-stale", ...], stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL, start_new_session=True)`), so a stale synthesized node gets refreshed for *next* session without delaying *this* session's start. `sys.argv[0]` is used as the executable to re-invoke — i.e. whatever `neurobase` binary/shim is currently running is what gets re-spawned. The whole call is wrapped in `contextlib.suppress(OSError)`, so a failure to spawn (missing binary, permission error, etc.) is silently swallowed — "best-effort, never blocks or raises into the hook."
+- `spawn_curate_if_stale(root: Path, cwd: Path, *, trigger: str = "session-start") -> None` — implements decision D8, extended by G21. After emitting recall context (or, from `neurobase wrap`, after writing the authored raw), it fires off `neurobase curate --if-stale --root <root> --cwd <cwd>` as a **detached** background process (`subprocess.Popen([sys.argv[0], "curate", "--if-stale", ...], stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL, start_new_session=True)`), so a stale node is refreshed without delaying the session. `sys.argv[0]` is the executable re-invoked — whatever `neurobase` shim is currently running. **Before forking**, it resolves the project (`_handle_and_project`, which swallows every exception so bookkeeping can never wedge a hook) and writes an intent marker via `spawn_marker.write`, passing the id down as `--spawn-id`; the child clears it on every exit path. Order matters: a marker written *after* the fork could not describe a child that died immediately. If `Popen` itself raises `OSError` the marker is cleared here, because no child exists to clear it — which keeps "a marker outlived its pass" meaning exactly one thing: a process that started and never came back. `trigger` (`session-start` | `session-end`) is descriptive only and names the spawn site in `doctor`'s report; both sites spawn the identical command.
 
 ### src/neurobase/adapters/claude/recall.py
 

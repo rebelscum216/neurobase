@@ -9,13 +9,12 @@ logic once; each adapter's `recall` module re-exports it.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import subprocess
 import sys
 from pathlib import Path
 
-from neurobase.core import projects, store
+from neurobase.core import projects, spawn_marker, store
 from neurobase.core.config import load_config
 from neurobase.core.enable import resolve_or_auto_enable
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
@@ -156,14 +155,56 @@ def emit(root: Path, cwd: Path) -> str | None:
     )
 
 
-def spawn_curate_if_stale(root: Path, cwd: Path) -> None:
+def _handle_and_project(root: Path, cwd: Path) -> tuple[StoreHandle | None, str | None]:
+    """A handle plus the project slug for ``cwd`` — ``(None, None)`` if anything
+    at all goes wrong.
+
+    Only ever used to decide whether an intent marker can be written, and the
+    handle is what carries the marker inside the ADR-0015 chokepoint. A hook must
+    not fail because the *bookkeeping* around a spawn failed, so this swallows
+    everything: an unresolvable project simply means the pass runs unmarked, and
+    a pass with no project to curate would have exited immediately anyway.
+    """
+    try:
+        handle = open_store(root, StoreMode.DOCTOR)
+        return handle, handle.resolve_project(cwd)
+    except Exception:  # noqa: BLE001 - fail-safe: never wedge a hook
+        return None, None
+
+
+def spawn_curate_if_stale(root: Path, cwd: Path, *, trigger: str = "session-start") -> None:
     """Spawn a detached ``curate --if-stale`` (D8) — best-effort, never blocks
-    or raises into the hook."""
-    with contextlib.suppress(OSError):
+    or raises into the hook.
+
+    The spawn is recorded as an intent marker **first** (``core.spawn_marker``),
+    so a child that dies before it can journal anything is still visible to
+    ``doctor``. Detachment without that marker is the G16 shape: a pass nobody can
+    prove ran. The marker is passed down as ``--spawn-id`` and the child clears it
+    on every exit path.
+
+    ``trigger`` names the spawn site for the report — ``session-start`` here,
+    ``session-end`` from ``neurobase wrap``. It is descriptive only; both sites
+    spawn the identical command.
+    """
+    spawn_id: str | None = None
+    handle, project = _handle_and_project(root, cwd)
+    if handle is not None and project is not None:
+        spawn_id = spawn_marker.write(handle, project, trigger=trigger)
+
+    argv = [sys.argv[0], "curate", "--if-stale", "--root", str(root), "--cwd", str(cwd)]
+    if spawn_id:
+        argv += ["--spawn-id", spawn_id]
+    try:
         subprocess.Popen(
-            [sys.argv[0], "curate", "--if-stale", "--root", str(root), "--cwd", str(cwd)],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+    except OSError:
+        # The spawn itself failed, so no child exists to clear the marker it was
+        # given. Clearing it here keeps "a marker outlives its pass" meaning
+        # exactly one thing: a pass that started and never came back.
+        if spawn_id and handle is not None and project is not None:
+            spawn_marker.clear(handle, project, spawn_id)

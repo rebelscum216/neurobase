@@ -22,6 +22,7 @@ import click
 import typer
 
 from neurobase import __version__
+from neurobase.adapters import recall_common
 from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.claude import recall, scribe
 from neurobase.adapters.codex import install as codex_install
@@ -29,9 +30,9 @@ from neurobase.adapters.codex import recall as codex_recall
 from neurobase.adapters.codex import scribe as codex_scribe
 from neurobase.brain import resolve_brain
 from neurobase.cli import diagnostics
-from neurobase.core import backups, lock, locks, projects, store
+from neurobase.core import backups, lock, locks, projects, spawn_marker, store
 from neurobase.core import capabilities as capability_profile
-from neurobase.core.config import load_config
+from neurobase.core.config import Config, load_config
 from neurobase.core.process_guard import is_internal_call
 from neurobase.core.redact import redact
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
@@ -256,6 +257,12 @@ def curate(
     resynth: bool = typer.Option(
         False, "--resynth", help="Regenerate the node + index from current facts; no new raw."
     ),
+    spawn_id: str = typer.Option(
+        "",
+        "--spawn-id",
+        hidden=True,
+        help="Intent marker to clear on exit; set by the detached spawner, not by hand.",
+    ),
 ) -> None:
     """Fold unconsumed raw captures into the curated fact set (spec §2)."""
     # G15: the two options are contradictory, and the engine resolves the contradiction
@@ -284,6 +291,36 @@ def curate(
         typer.echo("Not an enabled project (no registered root matches this directory).")
         raise typer.Exit(code=1)
 
+    # The marker is cleared on EVERY exit below, not just a completed pass. Three
+    # of the returns inside — "already running", "not stale", and a missing brain
+    # — journal nothing at all, so resolving the marker by looking for a pass
+    # record would report an abandoned pass on the most ordinary hook fire there
+    # is. `finally` is the whole guarantee: what outlives a marker is a process
+    # that never came back, and nothing else.
+    try:
+        _curate_body(
+            handle=handle,
+            project_slug=project_slug,
+            config=config,
+            if_stale=if_stale,
+            dry_run=dry_run,
+            resynth=resynth,
+        )
+    finally:
+        spawn_marker.clear(handle, project_slug, spawn_id)
+
+
+def _curate_body(
+    *,
+    handle: StoreHandle,
+    project_slug: str,
+    config: Config,
+    if_stale: bool,
+    dry_run: bool,
+    resynth: bool,
+) -> None:
+    """The pass itself. Split out so ``curate`` can wrap every exit path — including
+    ``typer.Exit`` — in one ``finally`` that clears the intent marker."""
     with locks.try_curate_lock(handle, project_slug) as acquired:
         if not acquired:
             typer.echo(f"Curate already running for project {project_slug!r}; skipping.")
@@ -417,6 +454,19 @@ def wrap(
         body=body,
         authority="agent-authored",
     )
+    # Session-end fold (TODO item 1, decided 2026-08-07). Detached, because
+    # `AGENTS.md` says a memory tool must not wedge an agent and a pass is ~35s
+    # measured (synthesis alone ~23s) with a brain call that can hang to its own
+    # timeout — but REPORTED, via the intent marker `spawn_curate_if_stale`
+    # writes before forking. G16's defect was silence, not detachment.
+    #
+    # The win is not "folds sooner". `spawn_curate_if_stale` already fires at
+    # session *start*, where the fold races that same session's injection and
+    # typically lands for the session after; firing at session end means the next
+    # session's injection reads a store that is already current, which removes a
+    # one-session lag in memory freshness.
+    recall_common.spawn_curate_if_stale(resolved_root, resolved_cwd, trigger="session-end")
+
     typer.echo(
         json.dumps(
             {

@@ -330,8 +330,17 @@ way (no verified renderer).
 
 **Size the auto curate tier from measured latency, and decide what a pass does when it
 cannot fold what it selected.** The hook-triggered tier can admit more work than its
-clock can distill *and* fold in one pass. `auto_max_raws = 40` is **volume-derived** —
-`core/config.py:49-53` sizes it from the 2026-07-20 backlog (a normal day is
+clock can distill *and* fold in one pass. ⛔ **Partly addressed 2026-08-07 — the numbers
+below are superseded, the open question is not.** `auto_max_raws` is now **18** (and
+`max_raws` **200**), re-derived when `plan_max_raws = 3` made a 40-raw pass need ~55 brain
+calls against a 50-call ceiling; the arithmetic is pinned by
+`tests/test_config.py::test_auto_tier_admits_a_full_pass`, and the reasoning is recorded in
+the [G12](known-gaps.md#g12--the-auto_max_brain_calls-comment-sizes-the-auto-tier-from-raw-body-length-but-distillation-chunks-the-rendered-transcript)
+amendment. **What that change did NOT do is answer this item**: the tier was sized to fit
+its *call* ceiling, not to a measured latency, and "what a pass does when it cannot fold
+what it selected" is untouched — a full 18-raw pass is still expected to run close to the
+clock. The original framing, with its now-historical numbers: `auto_max_raws = 40` was
+**volume-derived** — sized from the 2026-07-20 backlog (a normal day is
 single-to-low-double digits; the runaway was ~10×) — while `auto_max_seconds = 900` is
 sized from a *latency* estimate the same file flags as unmeasured: *"A healthy 40-raw
 pass is estimated at 4-10 min (per-call latency is NOT measured — an open item)."*

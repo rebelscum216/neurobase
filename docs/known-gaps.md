@@ -1210,9 +1210,15 @@ worth doing.
 
 ### G12 — the `auto_max_brain_calls` comment sizes the auto tier from raw-body length, but distillation chunks the rendered transcript
 
-- **status:** open
-- **severity:** low-moderate — this is a **comment**, so no behavior is wrong today and
-  nothing is lost. It is filed because the comment is the *stated sizing rationale* for a
+- **status:** **fixed** — 2026-08-07. The comment now states the real cost model, and the
+  arithmetic it describes is pinned by `tests/test_config.py::test_auto_tier_admits_a_full_pass`
+  so it can no longer drift silently out of a comment nothing executes. **The sizing that
+  this entry deliberately scoped out was also corrected**, because it stopped being a
+  judgement call and became arithmetic — see the amendment below.
+- **severity:** low-moderate **as originally filed** — a comment, so no behavior was wrong.
+  ⛔ **That assessment did not survive `plan_max_raws` (G19):** the same comment then
+  justified a ceiling that could not complete its own tier, which is a behavioral defect,
+  not a documentation one. Filed because the comment is the *stated sizing rationale* for a
   shipped default: it tells the next person tuning the auto tier that raw count converts
   1:1 into brain calls, which is false in both directions. A tuning decision reasoned
   from it starts from a wrong model of what the pass costs. Whether `50` is itself the
@@ -1279,6 +1285,50 @@ and admission-control problem, not a shipped inconsistency, and is filed in the
 build-plan [Backlog](neurobase-build-plan.md) instead. The fix here is to correct the
 comment to describe the real cost model, or to delete the inference and cite the sizing
 work.
+
+**Amendment — 2026-08-07: the scope paragraph above is superseded, and by arithmetic
+rather than by judgement.**
+
+`plan_max_raws = 3` (the [G19](#g19--a-plan-batch-is-capped-by-bytes-but-not-by-raw-count-so-a-large-batch-extracts-nothing)
+fix) made batch count a function of raw count — `ceil(raws/3)` — so the second term of the
+comment's own sum stopped being a constant:
+
+| | before G19 | after G19 |
+|---|---|---|
+| auto tier, 40 raws | 40 + **≤4** + 1 = 45 ≤ 50 ✅ | 40 + **14** + 1 = **55 > 50** ❌ |
+| explicit tier, 250 raws | 250 + **≤4** + 1 = 255 ≤ 280 ✅ | 250 + **84** + 1 = **335 > 280** ❌ |
+
+⭐ **This is why the entry could not stay "a comment problem".** "Whether `50` is itself the
+wrong number" was correctly left as sizing work while the sum held; once the sum did not
+hold, the ceiling provably could not admit its own tier, and *that* is a shipped
+inconsistency of exactly the kind this file is for. The explicit tier is the sharper
+evidence — nobody had looked at it, and it broke the same way.
+
+⚠️ **Why it stayed invisible.** Exhausting the budget is a *legitimate, documented* outcome:
+the pass stops, reports `partial`, leaves the remaining raws unconsumed, and any later pass
+retries them. Nothing fails, nothing is lost, and no surface distinguishes "the tier is
+sized wrong" from "this was a big backlog." A real `baysis-dev` pass went `partial` at
+900s / 25 calls within an hour of G19 landing and read as ordinary.
+
+**What landed** (`core/config.py`): `auto_max_raws` 40 → **18**, `max_raws` 250 → **200** —
+the tiers were sized to fit the ceilings rather than the ceilings raised to admit the tiers,
+because a detached background pass that can run ~40 minutes on a laptop is a worse outcome
+than a bounded `partial`, and the 2026-07-17 runaway is why those ceilings exist at all. 18
+is the measured shape: `baysis-dev` spent its whole 900s on 25 calls, and 18 raws costs
+exactly 25 by the model above.
+
+⚠️ **Not claimed:** that a full pass of either tier finishes inside its *clock*. At the one
+measured latency (~36s/call, **n=1**, on a shared machine) an 18-raw pass is expected to run
+close to `auto_max_seconds`, and a 200-raw explicit drain is far past `max_seconds` — as it
+already was before G19. Only the call arithmetic is fixed here; per-call latency remains
+unmeasured, and the clock binding first stays a normal bounded result.
+
+**The durable half is the test, not the numbers.** `test_auto_tier_admits_a_full_pass` and
+`test_the_explicit_tier_admits_a_full_pass` assert
+`raws + ceil(raws/plan_max_raws) + 1 ≤ max_brain_calls` against the shipped defaults, so
+changing `auto_max_raws` or `plan_max_raws` without re-deriving the ceiling now fails the
+gate. The original defect was that the rationale lived somewhere nothing executes — a
+comment cannot fail CI, and this one was false for three days before anyone re-read it.
 
 ---
 
@@ -1887,3 +1937,57 @@ G8 is about facts going stale because no new capture arrives. This is about one 
 written twice under two names, which G8's currency argument does not address, and which
 `authority` (ADR-0028) does not touch either — that records who wrote a record, not whether
 the store already holds the same claim.
+
+---
+
+### G21 — a session's own captures are not folded until the NEXT session, and a detached pass that dies leaves no trace
+
+- **status:** **fixed** — 2026-08-07. `neurobase wrap` now spawns a detached
+  `curate --if-stale` after writing its raw, and every detached spawn records an intent
+  marker that `doctor` reports if the pass never comes back
+  (`core/spawn_marker.py`, `tests/test_spawn_marker.py`).
+- **severity:** low for the freshness half (a one-session lag, self-correcting), **moderate
+  for the visibility half** — a detached pass that dies before it can journal anything was
+  indistinguishable from a pass that was never spawned, which is [G16](#g16--an-unregistered-cwd-silently-discards-capture-injection-and-curation)'s
+  defect one layer down.
+- **found:** 2026-08-07 by Claude, while specifying the session-end trigger.
+
+**The freshness half.** `spawn_curate_if_stale` fired only at session **start**
+(`adapters/recall_common.py`), so the fold raced that same session's injection: the pass
+that folds session *N*'s captures typically lands *after* session *N+1* has already read
+the node. Memory was therefore reliably one session stale — not by design, but because the
+only trigger sat at the wrong end of the session. Firing at session end means the next
+session's injection reads a store that is already current.
+
+⚠️ **Not claimed:** that this makes the fold *happen* where it otherwise would not. The
+`plan_trigger_raws = 3` count arm already folds a small backlog. What is removed is a lag,
+not a loss.
+
+**The visibility half — the reason this is a gap and not a backlog item.** A detached child
+is unobservable by construction. If it dies before reaching `_log_pass` — killed, OOM, the
+machine sleeping, a crash in argument parsing — it writes **nothing**, and no reader can
+tell that outcome apart from "no pass was ever spawned." Every existing health surface
+(`_curate_health_check`) classifies only passes that *reported*, so the failure is
+invisible to exactly the check built to catch frozen nodes.
+
+⭐ **The design turn: G16's defect was silence, not detachment.** Both alternatives were
+considered and rejected — synchronous, because `AGENTS.md` requires that "a memory tool must
+not wedge an agent" and a pass is ~35s measured (synthesis alone ~23s) with a brain call
+that can hang to its own timeout; fire-and-forget, because that *is* the shape being filed.
+So the fix is a marker written by the **spawner, before the fork**, cleared by the child on
+**every** exit path, and reported by `doctor` once it outlives a grace window.
+
+**Why "clear on every exit path" is the load-bearing detail.** Three returns in
+`cli.curate` journal nothing at all — "Not stale", "Curate already running", and "no brain
+backend available". Resolving a marker by *looking for a pass record* would therefore report
+an abandoned pass after every ordinary hook fire on a fresh store, and a check that cries
+wolf on the common path is a check nobody reads. Clearing is a `finally`, so what outlives a
+marker is a process that never came back, and nothing else.
+
+**Residual — the session-start spawner shares the mechanism but not the trigger's
+guarantee.** Both spawn sites write markers, so both are visible. But the marker's grace
+window (1h) is a reporting threshold derived from `auto_max_seconds`, not enforced against
+it: if that ceiling were ever raised past the window, a slow-but-live pass would be reported
+as abandoned. It self-clears on the next completed pass, and no liveness probe was added
+deliberately — `core/lock.py` records why this codebase does not hand-roll staleness
+protocols.

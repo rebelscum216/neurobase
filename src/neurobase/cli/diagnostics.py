@@ -18,7 +18,7 @@ from neurobase.adapters.claude import install as claude_install
 from neurobase.adapters.codex import install as codex_install
 from neurobase.brain import resolve_brain
 from neurobase.brain import select as brain_select
-from neurobase.core import capabilities, projects, store
+from neurobase.core import capabilities, projects, spawn_marker, store
 from neurobase.core.config import Config
 from neurobase.core.store_handle import StoreHandle, StoreMode, open_store
 
@@ -1079,6 +1079,46 @@ def _curate_health_check(root: Path, cwd: Path) -> Check:
     return _check("curate health", "ok", f"{project!r}: last refresh {last_refresh.get('at')}")
 
 
+def _abandoned_spawn_check(root: Path, cwd: Path) -> Check:
+    """Was a detached curate pass spawned that never came back?
+
+    The counterpart to ``_curate_health_check``, which can only classify passes
+    that *reported*. A pass killed before it reaches ``_log_pass`` writes no
+    record at all, so to that check it is indistinguishable from a pass that was
+    never spawned — the G16 shape, one layer down. The intent marker the spawner
+    writes closes that gap, and this is the surface that reads it.
+    """
+    try:
+        handle = open_store(root, StoreMode.DOCTOR)
+    except store.UnsupportedSchemaError:
+        return _check("curate spawns", "warn", "store is unreadable")
+    if handle.schema is None:
+        return _check("curate spawns", "ok", "store is not initialized yet")
+    try:
+        project = handle.resolve_project(cwd)
+    except (OSError, tomllib.TOMLDecodeError):
+        return _check("curate spawns", "warn", "registry is unreadable")
+    if project is None:
+        return _check("curate spawns", "ok", "not an enabled project — nothing to curate")
+
+    stale = spawn_marker.abandoned(handle, project)
+    if not stale:
+        return _check("curate spawns", "ok", f"no abandoned curate passes for {project!r}")
+
+    newest = max(stale, key=lambda entry: int(entry.get("age_seconds") or 0))
+    trigger = str(newest.get("trigger") or "unknown")
+    hours = int(newest.get("age_seconds") or 0) // 3600
+    return _check(
+        "curate spawns",
+        "warn",
+        f"{project!r}: {len(stale)} detached curate pass(es) spawned but never completed "
+        f"— oldest {trigger}, {hours}h ago",
+        "The pass died before it could journal anything (killed, OOM, or the machine "
+        "slept). Nothing is lost — its raws stay unconsumed. Run `neurobase curate` to "
+        "fold them; the next completed pass clears these and records the count.",
+    )
+
+
 def _counter(value: object) -> int | None:
     """``value`` as a counter ``BrainUsage.record`` could have produced, else ``None``.
 
@@ -1434,6 +1474,7 @@ def collect_checks(config: Config, root: Path, cwd: Path) -> list[Check]:
         _shim_check(which),
         *_store_checks(root, cwd),
         _curate_health_check(root, cwd),
+        _abandoned_spawn_check(root, cwd),
         *_model_mixture_check(root, cwd),
         _brain_check(config),
         _agent_check("claude", which),
